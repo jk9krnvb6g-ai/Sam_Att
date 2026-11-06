@@ -24,6 +24,7 @@ import {
   ShiftConfigDeactivationLog,
   DashboardSummary,
   HRPersonSummary,
+  HRReviewStatus,
   NoScanReasonCode,
   UserRole,
 } from '../types/attendance';
@@ -685,49 +686,248 @@ class MockAttendanceService {
     authorUserId: string,
     authorName: string
   ): AttendanceRecord {
-    const record = this.attendance.find((a) => a.id === attendanceId);
-    if (!record) throw new Error('Record not found');
-
-    const nowIso = new Date().toISOString().replace('T', ' ').slice(0, 19);
-    record.notes = {
-      id: `NOTE_${Date.now()}`,
+    return this.saveAttendanceHRReview({
       attendanceId,
       reasonCode,
       reasonLabel,
       note,
+      hrReviewStatus: 'REVIEWED',
       authorUserId,
       authorName,
-      createdAt: nowIso,
+    });
+  }
+
+  /**
+   * Save or update HR Review status and note for an attendance shift item (§4 & §6.C).
+   * - Never alters the underlying AttendanceStatus (e.g. MISSING_CHECKOUT stays MISSING_CHECKOUT, NO_SCAN stays NO_SCAN).
+   * - Never fabricates a RawScanEvent.
+   * - Preserves full noteHistory for auditability.
+   */
+  public saveAttendanceHRReview(params: {
+    attendanceId: string;
+    reasonCode: NoScanReasonCode;
+    reasonLabel: string;
+    note: string;
+    hrReviewStatus: HRReviewStatus;
+    authorUserId: string;
+    authorName: string;
+    fallbackRecordData?: Omit<AttendanceRecord, 'id' | 'computedAt'>;
+  }): AttendanceRecord {
+    let record = this.attendance.find((a) => a.id === params.attendanceId);
+    const nowIso = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+    if (!record && params.fallbackRecordData) {
+      record = {
+        ...params.fallbackRecordData,
+        id: params.attendanceId,
+        computedAt: nowIso,
+      };
+      this.attendance.unshift(record);
+    }
+
+    if (!record) {
+      throw new Error('Record not found');
+    }
+
+    const prevCreatedAt = record.notes?.createdAt || nowIso;
+    record.hrReviewStatus = params.hrReviewStatus;
+    record.notes = {
+      id: record.notes?.id || `NOTE_${Date.now()}`,
+      attendanceId: record.id,
+      reasonCode: params.reasonCode,
+      reasonLabel: params.reasonLabel,
+      note: params.note,
+      authorUserId: params.authorUserId,
+      authorName: params.authorName,
+      createdAt: prevCreatedAt,
       updatedAt: nowIso,
     };
+
+    if (!record.noteHistory) {
+      record.noteHistory = [];
+    }
+    record.noteHistory.unshift({
+      id: `NH_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+      reasonCode: params.reasonCode,
+      reasonLabel: params.reasonLabel,
+      note: params.note,
+      hrReviewStatus: params.hrReviewStatus,
+      authorUserId: params.authorUserId,
+      authorName: params.authorName,
+      timestamp: nowIso,
+    });
 
     if (record.isPushedToHosOffice) {
       record.modifiedAfterPush = true;
     }
 
     this.recordAuditLog({
-      actorName: authorName,
+      actorName: params.authorName,
       action: 'SET_NO_SCAN_NOTE',
       entityType: 'AttendanceRecord',
-      entityId: attendanceId,
-      summary: `บันทึกหมายเหตุ NO_SCAN (${reasonLabel}) ของ ${record.fullName} วันที่ ${record.workDate}`,
-      metadata: { attendanceId, reasonCode, reasonLabel, note },
+      entityId: record.id,
+      summary: `บันทึกผลตรวจสอบ HR (${
+        params.hrReviewStatus === 'REVIEWED' ? 'ตรวจสอบแล้ว' : 'รอตรวจสอบ'
+      } · ${params.reasonLabel}) ของ ${record.fullName} วันที่ ${
+        record.workDate
+      } (คงสถานะ Attendance: ${record.status})`,
+      metadata: {
+        attendanceId: record.id,
+        attendanceStatus: record.status,
+        hrReviewStatus: params.hrReviewStatus,
+        reasonCode: params.reasonCode,
+        reasonLabel: params.reasonLabel,
+        note: params.note,
+      },
     });
 
     return record;
   }
 
-  public reprocessAttendance(fromDate: string, toDate: string): {
+  /**
+   * Preview how many shift/attendance records and raw scans will be evaluated by Reprocess (§7)
+   */
+  public previewReprocessImpact(params: {
+    fromDate: string;
+    toDate: string;
+    groupName?: string;
+    personId?: string;
+  }): {
+    targetAttendanceCount: number;
+    matchingRawScansCount: number;
+    unmappedScansCount: number;
+    futureSkippedCount: number;
+  } {
+    const activeFingleIds = new Set(
+      this.personnel.filter((p) => p.active).map((p) => p.fingleId)
+    );
+
+    const targetAtt = this.attendance.filter((att) => {
+      if (att.workDate < params.fromDate || att.workDate > params.toDate) {
+        return false;
+      }
+      if (
+        params.groupName &&
+        params.groupName !== 'ALL' &&
+        att.groupName !== params.groupName &&
+        att.department !== params.groupName
+      ) {
+        return false;
+      }
+      if (
+        params.personId &&
+        params.personId !== 'ALL' &&
+        att.personId !== params.personId
+      ) {
+        return false;
+      }
+      return true;
+    });
+
+    const futureAssignments = this.assignments.filter(
+      (a) =>
+        a.workDate >= params.fromDate &&
+        a.workDate <= params.toDate &&
+        a.workDate > CURRENT_SYSTEM_DATE
+    );
+
+    const rawInRange = this.rawScans.filter((raw) => {
+      const d = raw.scanDateTime.slice(0, 10);
+      return d >= params.fromDate && d <= params.toDate;
+    });
+
+    const unmapped = rawInRange.filter(
+      (r) => !activeFingleIds.has(r.enrollNumber)
+    ).length;
+
+    return {
+      targetAttendanceCount: targetAtt.length,
+      matchingRawScansCount: rawInRange.length,
+      unmappedScansCount: unmapped,
+      futureSkippedCount: futureAssignments.length,
+    };
+  }
+
+  public reprocessAttendance(
+    fromDate: string,
+    toDate: string,
+    options?: { groupName?: string; personId?: string }
+  ): {
     reprocessedCount: number;
     updatedCount: number;
+    unchangedCount: number;
     errorsCount: number;
+    skippedCount: number;
+    skippedReasons: Array<{ label: string; reason: string }>;
+    changes: Array<{
+      id: string;
+      fullName: string;
+      workDate: string;
+      shiftName: string;
+      oldStatus: string;
+      newStatus: string;
+    }>;
   } {
     let reprocessed = 0;
     let updated = 0;
+    let unchanged = 0;
+    const skippedReasons: Array<{ label: string; reason: string }> = [];
+    const changes: Array<{
+      id: string;
+      fullName: string;
+      workDate: string;
+      shiftName: string;
+      oldStatus: string;
+      newStatus: string;
+    }> = [];
+
+    const activeFingleIds = new Set(
+      this.personnel.filter((p) => p.active).map((p) => p.fingleId)
+    );
 
     const filteredRaw = this.rawScans.filter((raw) => {
       const rawDate = raw.scanDateTime.slice(0, 10);
       return rawDate >= fromDate && rawDate <= toDate;
+    });
+
+    // Track unmapped raw scans in range as skipped reasons
+    filteredRaw.forEach((raw) => {
+      if (!activeFingleIds.has(raw.enrollNumber)) {
+        skippedReasons.push({
+          label: `enrollNumber #${raw.enrollNumber} (${raw.scanDateTime})`,
+          reason: 'ยังไม่พบ FINGLE_ID Mapping กับบุคลากรใน HOSOffice.hr_person',
+        });
+      }
+    });
+
+    // Also check future assignments in range that cannot be evaluated yet
+    this.assignments.forEach((asgn) => {
+      if (
+        asgn.workDate >= fromDate &&
+        asgn.workDate <= toDate &&
+        asgn.workDate > CURRENT_SYSTEM_DATE
+      ) {
+        const p = this.personnel.find((x) => x.personId === asgn.personId);
+        if (
+          options?.groupName &&
+          options.groupName !== 'ALL' &&
+          p?.groupName !== options.groupName &&
+          p?.department !== options.groupName
+        ) {
+          return;
+        }
+        if (
+          options?.personId &&
+          options.personId !== 'ALL' &&
+          asgn.personId !== options.personId
+        ) {
+          return;
+        }
+        skippedReasons.push({
+          label: `${p ? `${p.prefix}${p.firstName} ${p.lastName}` : asgn.personId} (${asgn.workDate} · ${asgn.shiftName})`,
+          reason: 'กะในอนาคตยังไม่ถึงเวลาปฏิบัติงาน (ไม่นับเป็น NO_SCAN)',
+        });
+      }
     });
 
     const rawByPersonDate = new Map<string, RawScanEvent[]>();
@@ -739,33 +939,92 @@ class MockAttendanceService {
     });
 
     this.attendance.forEach((att) => {
-      if (att.workDate >= fromDate && att.workDate <= toDate) {
-        reprocessed++;
-        const key = `${att.fingleId}_${att.workDate}`;
-        const scans = rawByPersonDate.get(key) || [];
+      if (att.workDate < fromDate || att.workDate > toDate) return;
+      if (
+        options?.groupName &&
+        options.groupName !== 'ALL' &&
+        att.groupName !== options.groupName &&
+        att.department !== options.groupName
+      ) {
+        return;
+      }
+      if (
+        options?.personId &&
+        options.personId !== 'ALL' &&
+        att.personId !== options.personId
+      ) {
+        return;
+      }
 
-        if (scans.length > 0) {
-          scans.sort((a, b) => a.scanDateTime.localeCompare(b.scanDateTime));
-          const firstScan = scans[0];
-          const checkInTime = firstScan.scanDateTime.split(' ')[1];
+      if (att.workDate > CURRENT_SYSTEM_DATE) {
+        return;
+      }
 
-          const shift = this.shifts.find((s) => s.id === att.shiftId) || this.shifts[3];
-          const lateCalc = this.calculateLate(checkInTime, shift.startTime, shift.graceMinutes);
+      reprocessed++;
+      const key = `${att.fingleId}_${att.workDate}`;
+      const scans = [...(rawByPersonDate.get(key) || [])].sort((a, b) =>
+        a.scanDateTime.localeCompare(b.scanDateTime)
+      );
 
-          const previousStatus = att.status;
-          att.checkInAt = checkInTime;
-          att.lateMinutes = lateCalc.lateMinutes;
-          att.status = lateCalc.isLate ? 'LATE' : 'NORMAL';
-          att.rawScanInId = firstScan.id;
-          att.computedAt = new Date().toISOString().replace('T', ' ').slice(0, 19);
+      if (scans.length > 0) {
+        const shift =
+          this.shifts.find((s) => s.id === att.shiftId) || this.shifts[3];
+        const shiftStart = att.shiftStartTime || shift.startTime;
+        const graceMins = att.graceMinutes ?? shift.graceMinutes ?? 15;
 
-          if (previousStatus !== att.status) {
-            updated++;
-            if (att.isPushedToHosOffice) {
-              att.modifiedAfterPush = true;
-            }
-          }
+        const firstScan = scans[0];
+        const lastScan = scans.length > 1 ? scans[scans.length - 1] : null;
+        const checkInTime =
+          att.checkInAt || firstScan.scanDateTime.split(' ')[1];
+        const checkOutTime =
+          att.checkOutAt ||
+          (lastScan && lastScan.id !== firstScan.id
+            ? lastScan.scanDateTime.split(' ')[1]
+            : null);
+
+        const lateCalc = this.calculateLate(checkInTime, shiftStart, graceMins);
+        const previousStatus = att.status;
+        const previousCheckOut = att.checkOutAt;
+
+        att.checkInAt = checkInTime;
+        if (checkOutTime) {
+          att.checkOutAt = checkOutTime;
+          att.rawScanOutId = lastScan?.id || att.rawScanOutId;
         }
+        att.lateMinutes = lateCalc.lateMinutes;
+        att.rawScanInId = att.rawScanInId || firstScan.id;
+
+        if (!att.checkOutAt) {
+          att.hasMissingCheckout = true;
+          att.status = lateCalc.isLate ? 'LATE' : 'MISSING_CHECKOUT';
+        } else {
+          att.hasMissingCheckout = false;
+          att.status = lateCalc.isLate ? 'LATE' : 'NORMAL';
+        }
+
+        att.computedAt = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+        if (
+          previousStatus !== att.status ||
+          previousCheckOut !== att.checkOutAt
+        ) {
+          updated++;
+          changes.push({
+            id: att.id,
+            fullName: att.fullName,
+            workDate: att.workDate,
+            shiftName: att.shiftName,
+            oldStatus: previousStatus,
+            newStatus: att.status,
+          });
+          if (att.isPushedToHosOffice) {
+            att.modifiedAfterPush = true;
+          }
+        } else {
+          unchanged++;
+        }
+      } else {
+        unchanged++;
       }
     });
 
@@ -773,14 +1032,26 @@ class MockAttendanceService {
       action: 'REPROCESS_ATTENDANCE',
       entityType: 'AttendanceRecord',
       entityId: `${fromDate}_to_${toDate}`,
-      summary: `สั่งคำนวณเวลาปฏิบัติงานใหม่ (Reprocess) ช่วง ${fromDate} ถึง ${toDate}: ตรวจสอบ ${reprocessed} รายการ, เปลี่ยนแปลง ${updated} รายการ`,
-      metadata: { fromDate, toDate, reprocessed, updated },
+      summary: `สั่งคำนวณเวลาปฏิบัติงานใหม่ (Reprocess) ช่วง ${fromDate} ถึง ${toDate}: ประมวลผล ${reprocessed} รายการ, เปลี่ยนสถานะ ${updated} รายการ, ไม่เปลี่ยนแปลง ${unchanged} รายการ, ข้าม ${skippedReasons.length} รายการ`,
+      metadata: {
+        fromDate,
+        toDate,
+        options,
+        reprocessed,
+        updated,
+        unchanged,
+        skippedCount: skippedReasons.length,
+      },
     });
 
     return {
       reprocessedCount: reprocessed,
       updatedCount: updated,
+      unchangedCount: unchanged,
       errorsCount: 0,
+      skippedCount: skippedReasons.length,
+      skippedReasons,
+      changes,
     };
   }
 

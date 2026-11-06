@@ -28,13 +28,29 @@ export type AttendanceStatus =
   | 'PENDING_MAPPING';   // รอยืนยันรหัสนิ้วมือกับบุคลากร
 
 export type NoScanReasonCode =
-  | 'SICK_LEAVE'       // ลาป่วย
-  | 'BUSINESS_LEAVE'   // ลากิจ
-  | 'VACATION_LEAVE'   // ลาพักผ่อน
-  | 'OFFICIAL_DUTY'    // ไปราชการ
-  | 'TRAINING'         // อบรม / ประชุม
-  | 'DAY_OFF'          // หยุดตามเวร
-  | 'OTHER';           // อื่นๆ
+  | 'SICK_LEAVE'        // ลาป่วย
+  | 'BUSINESS_LEAVE'    // ลากิจ
+  | 'VACATION_LEAVE'    // ลาพักผ่อน
+  | 'OFFICIAL_DUTY'     // ไปราชการ
+  | 'TRAINING'          // อบรม / ประชุม
+  | 'DAY_OFF'           // หยุดตามเวร
+  | 'FORGOT_CHECKOUT'   // ลืมสแกนออก แต่ยืนยันว่ามาปฏิบัติงาน
+  | 'LATE_EXPLANATION'  // ชี้แจงเหตุผลการมาสาย
+  | 'SCANNER_ISSUE'     // เครื่องสแกนขัดข้อง / ลายนิ้วมือไม่ติด
+  | 'OTHER';            // อื่นๆ
+
+export type HRReviewStatus = 'PENDING_REVIEW' | 'REVIEWED' | 'NOT_REQUIRED';
+
+export interface AttendanceNoteHistoryItem {
+  id: string;
+  reasonCode: NoScanReasonCode;
+  reasonLabel: string;
+  note: string;
+  hrReviewStatus: HRReviewStatus;
+  authorUserId: string;
+  authorName: string;
+  timestamp: string;
+}
 
 export interface Personnel {
   personId: string;           // รหัสบุคคล HOSOffice
@@ -259,16 +275,22 @@ export interface AttendanceRecord {
   shiftName: string;
   shiftStartTime: string;
   shiftEndTime: string;
+  crossMidnight?: boolean;
+  graceMinutes?: number;
+  shiftCategory?: ShiftVisualCategory;
   checkInAt: string | null;   // HH:mm:ss or YYYY-MM-DD HH:mm:ss
   checkOutAt: string | null;  // HH:mm:ss or YYYY-MM-DD HH:mm:ss
   lateMinutes: number;        // คำนวณจาก max(0, checkIn - shiftStart - grace)
   earlyCheckoutMinutes?: number;
   approvedOtHours?: number;   // แสดงเฉพาะเมื่อมีข้อมูลหรือกติกา OT ที่ชัดเจน ไม่เดาเองจากเวลาสแกน
   status: AttendanceStatus;
+  hasMissingCheckout?: boolean; // กรณีมีทั้งมาสายและลืมสแกนออกในกะเดียวกัน
+  hrReviewStatus?: HRReviewStatus; // สถานะการตรวจสอบของเจ้าหน้าที่ HR (แยกจากสถานะ Attendance)
   computedAt: string;
   rawScanInId?: string;
   rawScanOutId?: string;
   notes?: AttendanceNote;
+  noteHistory?: AttendanceNoteHistoryItem[];
   isPushedToHosOffice?: boolean;
   lastPushedAt?: string;
   modifiedAfterPush?: boolean;
