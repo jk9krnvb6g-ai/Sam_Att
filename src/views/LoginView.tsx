@@ -3,7 +3,7 @@ import { useAuth } from '../context/AuthContext';
 import { Shield, UserCheck, User, Lock, AlertCircle } from 'lucide-react';
 
 export const LoginView: React.FC = () => {
-  const { login, availableUsers } = useAuth();
+  const { login } = useAuth();
   const [username, setUsername] = useState('staff_patcharee');
   const [password, setPassword] = useState('••••••••');
   const [error, setError] = useState<string | null>(null);
@@ -23,11 +23,11 @@ export const LoginView: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-slate-100 flex flex-col justify-center items-center p-4">
+    <div className="min-h-screen bg-[#F8F7FC] flex flex-col justify-center items-center p-4">
       <div className="max-w-md w-full space-y-6">
         {/* Hospital Brand Header */}
         <div className="text-center space-y-2">
-          <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-teal-600 text-white font-bold text-xl shadow-md">
+          <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-gradient-to-br from-[#8B5CF6] to-[#6D28D9] text-white font-bold text-xl shadow-md">
             SA
           </div>
           <h1 className="text-2xl font-bold text-slate-900 tracking-tight">
@@ -41,7 +41,7 @@ export const LoginView: React.FC = () => {
         </div>
 
         {/* Login Form Card */}
-        <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-5">
+        <div className="bg-white border border-[#E9E5F2] rounded-2xl p-6 shadow-sm space-y-5">
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
@@ -52,7 +52,7 @@ export const LoginView: React.FC = () => {
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 placeholder="ระบุชื่อผู้ใช้งาน..."
-                className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 font-mono focus:bg-white focus:ring-1 focus:ring-teal-500 focus:outline-none"
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-800 font-mono focus:bg-white focus:ring-1 focus:ring-violet-500 focus:outline-none"
               />
             </div>
 
@@ -65,14 +65,14 @@ export const LoginView: React.FC = () => {
                   type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 font-mono focus:bg-white focus:ring-1 focus:ring-teal-500 focus:outline-none"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-800 font-mono focus:bg-white focus:ring-1 focus:ring-violet-500 focus:outline-none"
                 />
                 <Lock className="w-3.5 h-3.5 text-slate-400 absolute right-3 top-2.5" />
               </div>
             </div>
 
             {error && (
-              <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-1.5">
+              <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-1.5">
                 <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
                 <span>{error}</span>
               </div>
@@ -80,7 +80,7 @@ export const LoginView: React.FC = () => {
 
             <button
               type="submit"
-              className="w-full py-2.5 px-4 text-xs font-semibold text-white bg-teal-600 hover:bg-teal-700 rounded-lg shadow-sm transition-colors cursor-pointer"
+              className="w-full py-2.5 px-4 text-xs font-bold text-white bg-[#6D28D9] hover:bg-[#5B21B6] rounded-xl shadow-sm transition-colors cursor-pointer"
             >
               เข้าสู่ระบบ (Sign In)
             </button>
@@ -96,20 +96,20 @@ export const LoginView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => handleQuickLogin('staff_patcharee')}
-                className="flex items-center justify-between p-2.5 rounded-lg border border-blue-200 bg-blue-50/70 hover:bg-blue-100/70 text-left transition-colors cursor-pointer"
+                className="flex items-center justify-between p-2.5 rounded-xl border border-indigo-200 bg-indigo-50/70 hover:bg-indigo-100/70 text-left transition-colors cursor-pointer"
               >
                 <div className="flex items-center gap-2">
-                  <UserCheck className="w-4 h-4 text-blue-700 shrink-0" />
+                  <UserCheck className="w-4 h-4 text-indigo-700 shrink-0" />
                   <div>
-                    <div className="text-xs font-bold text-blue-900">
+                    <div className="text-xs font-bold text-indigo-900">
                       นางสาวพัชรี (RESPONSIBLE_STAFF)
                     </div>
-                    <div className="text-[10px] text-blue-700">
-                      ตรวจเวลาทุกคน, บันทึกสาเหตุ NO_SCAN, ส่ง HOSOffice
+                    <div className="text-[10px] text-indigo-700">
+                      ตรวจเวลาทุกคน, รายงาน HR, บันทึกสาเหตุ NO_SCAN, ส่ง HOSOffice
                     </div>
                   </div>
                 </div>
-                <span className="text-[10px] font-mono text-blue-800 font-semibold bg-white px-1.5 py-0.5 rounded border border-blue-200">
+                <span className="text-[10px] font-mono text-indigo-800 font-semibold bg-white px-1.5 py-0.5 rounded border border-indigo-200">
                   Staff
                 </span>
               </button>
@@ -117,7 +117,7 @@ export const LoginView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => handleQuickLogin('dr_sudarat')}
-                className="flex items-center justify-between p-2.5 rounded-lg border border-emerald-200 bg-emerald-50/70 hover:bg-emerald-100/70 text-left transition-colors cursor-pointer"
+                className="flex items-center justify-between p-2.5 rounded-xl border border-emerald-200 bg-emerald-50/70 hover:bg-emerald-100/70 text-left transition-colors cursor-pointer"
               >
                 <div className="flex items-center gap-2">
                   <User className="w-4 h-4 text-emerald-700 shrink-0" />
@@ -138,20 +138,20 @@ export const LoginView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => handleQuickLogin('admin')}
-                className="flex items-center justify-between p-2.5 rounded-lg border border-indigo-200 bg-indigo-50/70 hover:bg-indigo-100/70 text-left transition-colors cursor-pointer"
+                className="flex items-center justify-between p-2.5 rounded-xl border border-violet-200 bg-violet-50/70 hover:bg-violet-100/70 text-left transition-colors cursor-pointer"
               >
                 <div className="flex items-center gap-2">
-                  <Shield className="w-4 h-4 text-indigo-700 shrink-0" />
+                  <Shield className="w-4 h-4 text-violet-700 shrink-0" />
                   <div>
-                    <div className="text-xs font-bold text-indigo-900">
+                    <div className="text-xs font-bold text-violet-900">
                       นายพิสิษฐ์ (ADMIN)
                     </div>
-                    <div className="text-[10px] text-indigo-700">
-                      จัดการเครื่องสแกน, ผูกบัญชีผู้ใช้, จัดการฐานข้อมูล
+                    <div className="text-[10px] text-violet-700">
+                      จัดการเครื่องสแกน, ผูกบัญชีผู้ใช้, จัดการฐานข้อมูลและกะเวลา
                     </div>
                   </div>
                 </div>
-                <span className="text-[10px] font-mono text-indigo-800 font-semibold bg-white px-1.5 py-0.5 rounded border border-indigo-200">
+                <span className="text-[10px] font-mono text-violet-800 font-semibold bg-white px-1.5 py-0.5 rounded border border-violet-200">
                   Admin
                 </span>
               </button>

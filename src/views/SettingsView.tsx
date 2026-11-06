@@ -1,56 +1,94 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { UserAccount } from '../types/attendance';
+import { UserAccount, PageSizeOption } from '../types/attendance';
+import { SharedModal } from '../components/common/SharedModal';
 import {
-  Sliders,
-  Database,
-  Shield,
-  CheckCircle,
-  AlertTriangle,
-  Server,
-  Lock,
-  UserPlus,
-} from 'lucide-react';
+  SortableHeader,
+  TablePaginationBar,
+} from '../components/common/TablePaginationBar';
+import { Database, Server, Lock, ShieldCheck } from 'lucide-react';
 
 export const SettingsView: React.FC = () => {
   const { availableUsers } = useAuth();
   const [dbTestResult, setDbTestResult] = useState<string | null>(null);
   const [hosTestResult, setHosTestResult] = useState<string | null>(null);
 
+  // Sorting & Pagination for User Accounts table
+  const [sortKey, setSortKey] = useState<string>('id');
+  const [sortDirection, setSortDirection] = useState<'ASC' | 'DESC'>('ASC');
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const [pageSize, setPageSize] = useState<PageSizeOption>(10);
+
+  // User Detail Popup
+  const [selectedUserPopup, setSelectedUserPopup] =
+    useState<UserAccount | null>(null);
+
+  const sortedUsers = useMemo(() => {
+    const list = [...availableUsers];
+    list.sort((a, b) => {
+      const strA = String((a as unknown as Record<string, unknown>)[sortKey] ?? '');
+      const strB = String((b as unknown as Record<string, unknown>)[sortKey] ?? '');
+      return sortDirection === 'ASC'
+        ? strA.localeCompare(strB, 'th')
+        : strB.localeCompare(strA, 'th');
+    });
+    return list;
+  }, [availableUsers, sortKey, sortDirection]);
+
+  const pagedUsers = useMemo(() => {
+    if (pageSize === 'ALL') return sortedUsers;
+    const start = (currentPage - 1) * pageSize;
+    return sortedUsers.slice(start, start + pageSize);
+  }, [sortedUsers, currentPage, pageSize]);
+
+  const handleSort = (key: string) => {
+    if (sortKey === key) {
+      setSortDirection((prev) => (prev === 'ASC' ? 'DESC' : 'ASC'));
+    } else {
+      setSortKey(key);
+      setSortDirection('ASC');
+    }
+    setCurrentPage(1);
+  };
+
   const handleTestDb = () => {
     setDbTestResult('กำลังตรวจสอบ...');
     setTimeout(() => {
       setDbTestResult(
-        'การเชื่อมต่อฐานข้อมูล samchuk_attendance สำเร็จ (Mock Verified): พบ 12 ตารางระบบ พร้อมรองรับการจัดเก็บ Raw Scans และ Attendance'
+        'การเชื่อมต่อฐานข้อมูล samchuk_attendance สำเร็จ (Mock Connection Test): พบ 12 ตารางระบบ พร้อมรองรับการจัดเก็บ Raw Scans และ Attendance'
       );
-    }, 500);
+    }, 450);
   };
 
   const handleTestHosOffice = () => {
     setHosTestResult('กำลังตรวจสอบ...');
     setTimeout(() => {
       setHosTestResult(
-        'การเชื่อมต่อ HOSOffice Database สำเร็จ (Mock Verified): อ่าน personnel และ schema สำเร็จใน 58ms'
+        'การเชื่อมต่อ HOSOffice Database สำเร็จ (Mock Connection Test): อ่าน personnel และ schema สำเร็จใน 52ms'
       );
-    }, 500);
+    }, 450);
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pb-8">
       {/* Header */}
-      <div>
+      <div className="bg-white border border-[#E9E5F2] rounded-2xl p-5 shadow-xs">
+        <div className="inline-flex items-center gap-2 px-2.5 py-0.5 rounded-md bg-violet-50 border border-violet-200 text-[11px] font-bold text-violet-700 mb-1.5">
+          <ShieldCheck className="w-3.5 h-3.5" />
+          ADMINISTRATION • SYSTEM SETTINGS & ROLE ACCESS
+        </div>
         <h1 className="text-xl font-bold text-slate-900 tracking-tight">
-          ตั้งค่าระบบ & การเชื่อมต่อ (System Settings)
+          ตั้งค่าระบบและสิทธิ์ผู้ใช้งาน (System Settings)
         </h1>
         <p className="text-xs text-slate-500 mt-0.5">
-          เฉพาะผู้ดูแลระบบ (ADMIN): จัดการฐานข้อมูลแยก, การเชื่อมต่อ HOSOffice, และบัญชีผู้ใช้งาน
+          เฉพาะผู้ดูแลระบบ (ADMIN): จัดการฐานข้อมูลแยก, การเชื่อมต่อ HOSOffice, และบัญชีผู้ใช้งาน 3 ระดับ
         </p>
       </div>
 
       {/* Gateway Integration Card */}
-      <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-3">
+      <div className="bg-white border border-[#E9E5F2] rounded-2xl p-5 shadow-xs space-y-3">
         <div className="flex items-center gap-2 text-sm font-bold text-slate-900">
-          <Server className="w-4 h-4 text-teal-600" />
+          <Server className="w-4 h-4 text-violet-600" />
           สถาปัตยกรรม Central API Gateway (MASTER DEVELOPMENT PROMPT §2)
         </div>
         <p className="text-xs text-slate-500">
@@ -58,28 +96,34 @@ export const SettingsView: React.FC = () => {
         </p>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
-          <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
-            <span className="text-[11px] text-slate-400 font-semibold uppercase">Frontend Web</span>
+          <div className="bg-violet-50/40 border border-violet-200 rounded-xl p-3.5">
+            <span className="text-[11px] text-violet-700 font-bold uppercase">
+              Frontend Web
+            </span>
             <div className="text-xs font-mono font-bold text-slate-900 mt-1">
               HTTPS Port 3001
             </div>
-            <div className="text-[11px] text-teal-700 font-mono mt-0.5">
+            <div className="text-[11px] text-violet-700 font-mono mt-0.5">
               URL Base: /Sam_Att/
             </div>
           </div>
 
-          <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
-            <span className="text-[11px] text-slate-400 font-semibold uppercase">Central API Gateway</span>
+          <div className="bg-violet-50/40 border border-violet-200 rounded-xl p-3.5">
+            <span className="text-[11px] text-violet-700 font-bold uppercase">
+              Central API Gateway
+            </span>
             <div className="text-xs font-mono font-bold text-slate-900 mt-1">
               Port 3002 (Shared Listener)
             </div>
-            <div className="text-[11px] text-teal-700 font-mono mt-0.5">
+            <div className="text-[11px] text-violet-700 font-mono mt-0.5">
               Mount: /api/Sam_Att/
             </div>
           </div>
 
-          <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
-            <span className="text-[11px] text-slate-400 font-semibold uppercase">Database Name</span>
+          <div className="bg-violet-50/40 border border-violet-200 rounded-xl p-3.5">
+            <span className="text-[11px] text-violet-700 font-bold uppercase">
+              Database Name
+            </span>
             <div className="text-xs font-mono font-bold text-slate-900 mt-1">
               samchuk_attendance
             </div>
@@ -93,13 +137,13 @@ export const SettingsView: React.FC = () => {
       {/* Database Connection Settings */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* samchuk_attendance DB */}
-        <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-4">
+        <div className="bg-white border border-[#E9E5F2] rounded-2xl p-5 shadow-xs space-y-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-sm font-bold text-slate-900">
-              <Database className="w-4 h-4 text-teal-600" />
+              <Database className="w-4 h-4 text-violet-600" />
               ฐานข้อมูล Sam_Att (samchuk_attendance)
             </div>
-            <span className="text-[11px] px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200 font-mono font-semibold">
+            <span className="text-[11px] px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200 font-mono font-semibold">
               Isolate DB
             </span>
           </div>
@@ -110,18 +154,20 @@ export const SettingsView: React.FC = () => {
               <input
                 type="text"
                 disabled
-                value="192.168.111.10:3306"
-                className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 font-mono text-slate-700"
+                value="10.2.0.201:3306"
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-mono text-slate-700"
               />
             </div>
 
             <div>
-              <label className="block text-slate-500 mb-1">Database Name:</label>
+              <label className="block text-slate-500 mb-1">
+                Database Name:
+              </label>
               <input
                 type="text"
                 disabled
                 value="samchuk_attendance"
-                className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 font-mono font-bold text-slate-900"
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-mono font-bold text-slate-900"
               />
             </div>
 
@@ -132,7 +178,7 @@ export const SettingsView: React.FC = () => {
                   type="text"
                   disabled
                   value="sam_att_app"
-                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 font-mono text-slate-700"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-mono text-slate-700"
                 />
               </div>
               <div>
@@ -142,7 +188,7 @@ export const SettingsView: React.FC = () => {
                     type="password"
                     disabled
                     value="••••••••••••••••"
-                    className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 font-mono text-slate-500"
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-mono text-slate-500"
                   />
                   <Lock className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-2.5" />
                 </div>
@@ -150,28 +196,28 @@ export const SettingsView: React.FC = () => {
             </div>
 
             {dbTestResult && (
-              <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-900 text-[11px]">
+              <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-[11px]">
                 {dbTestResult}
               </div>
             )}
 
             <button
               onClick={handleTestDb}
-              className="w-full py-2 px-3 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
+              className="w-full py-2 px-3 text-xs font-bold text-violet-800 bg-violet-50 hover:bg-violet-100 border border-violet-200 rounded-xl transition-colors cursor-pointer"
             >
-              ทดสอบการเชื่อมต่อ (Test Connection)
+              ทดสอบการเชื่อมต่อ (Mock Connection Test)
             </button>
           </div>
         </div>
 
         {/* HOSOffice Connection */}
-        <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-4">
+        <div className="bg-white border border-[#E9E5F2] rounded-2xl p-5 shadow-xs space-y-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-sm font-bold text-slate-900">
-              <Database className="w-4 h-4 text-blue-600" />
+              <Database className="w-4 h-4 text-indigo-600" />
               การเชื่อมต่อ HOSOffice (Authoritative)
             </div>
-            <span className="text-[11px] px-2 py-0.5 rounded bg-blue-50 text-blue-800 border border-blue-200 font-mono font-semibold">
+            <span className="text-[11px] px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-800 border border-indigo-200 font-mono font-semibold">
               Read / Direct Push
             </span>
           </div>
@@ -182,18 +228,20 @@ export const SettingsView: React.FC = () => {
               <input
                 type="text"
                 disabled
-                value="192.168.111.5:3306"
-                className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 font-mono text-slate-700"
+                value="10.2.0.201:3306"
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-mono text-slate-700"
               />
             </div>
 
             <div>
-              <label className="block text-slate-500 mb-1">Database Name:</label>
+              <label className="block text-slate-500 mb-1">
+                Database Name:
+              </label>
               <input
                 type="text"
                 disabled
-                value="hosoffice_samchuk"
-                className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 font-mono font-bold text-slate-900"
+                value="hosoffice"
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-mono font-bold text-slate-900"
               />
             </div>
 
@@ -204,7 +252,7 @@ export const SettingsView: React.FC = () => {
                   type="text"
                   disabled
                   value="hos_reader"
-                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 font-mono text-slate-700"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-mono text-slate-700"
                 />
               </div>
               <div>
@@ -214,7 +262,7 @@ export const SettingsView: React.FC = () => {
                     type="password"
                     disabled
                     value="••••••••••••••••"
-                    className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 font-mono text-slate-500"
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-mono text-slate-500"
                   />
                   <Lock className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-2.5" />
                 </div>
@@ -222,30 +270,30 @@ export const SettingsView: React.FC = () => {
             </div>
 
             {hosTestResult && (
-              <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-900 text-[11px]">
+              <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-[11px]">
                 {hosTestResult}
               </div>
             )}
 
             <button
               onClick={handleTestHosOffice}
-              className="w-full py-2 px-3 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
+              className="w-full py-2 px-3 text-xs font-bold text-indigo-800 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-xl transition-colors cursor-pointer"
             >
-              ทดสอบการเชื่อมต่อ HOSOffice
+              ทดสอบการเชื่อมต่อ HOSOffice (Mock Connection Test)
             </button>
           </div>
         </div>
       </div>
 
       {/* User Accounts & PERSON_ID Mapping */}
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+      <div className="bg-white border border-[#E9E5F2] rounded-2xl overflow-hidden shadow-xs">
         <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
           <div>
             <h2 className="text-sm font-bold text-slate-900">
               การจัดการผู้ใช้งาน & ผูกรหัสบุคคล (Users & Role Management)
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              3 บทบาทตามข้อกำหนด: ADMIN, RESPONSIBLE_STAFF, GENERAL_USER
+              3 บทบาทตามข้อกำหนด: ADMIN, RESPONSIBLE_STAFF, GENERAL_USER (คลิกที่แถวเพื่อดูรายละเอียด Popup)
             </p>
           </div>
         </div>
@@ -254,55 +302,93 @@ export const SettingsView: React.FC = () => {
           <table className="w-full text-left border-collapse text-xs">
             <thead>
               <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold">
-                <th className="py-2.5 px-4 font-mono">User ID</th>
-                <th className="py-2.5 px-4">ชื่อผู้ใช้ (Username)</th>
-                <th className="py-2.5 px-4">ชื่อ-นามสกุล</th>
-                <th className="py-2.5 px-4">บทบาท (Role)</th>
-                <th className="py-2.5 px-4 font-mono">PERSON_ID ที่ผูก</th>
+                <SortableHeader
+                  label="User ID"
+                  sortKey="id"
+                  currentSortKey={sortKey}
+                  currentSortDirection={sortDirection}
+                  onSort={handleSort}
+                />
+                <SortableHeader
+                  label="ชื่อผู้ใช้ (Username)"
+                  sortKey="username"
+                  currentSortKey={sortKey}
+                  currentSortDirection={sortDirection}
+                  onSort={handleSort}
+                />
+                <SortableHeader
+                  label="ชื่อ-นามสกุล"
+                  sortKey="fullName"
+                  currentSortKey={sortKey}
+                  currentSortDirection={sortDirection}
+                  onSort={handleSort}
+                />
+                <SortableHeader
+                  label="บทบาท (Role)"
+                  sortKey="role"
+                  currentSortKey={sortKey}
+                  currentSortDirection={sortDirection}
+                  onSort={handleSort}
+                />
+                <SortableHeader
+                  label="PERSON_ID ที่ผูก"
+                  sortKey="personId"
+                  currentSortKey={sortKey}
+                  currentSortDirection={sortDirection}
+                  onSort={handleSort}
+                />
                 <th className="py-2.5 px-4">ตำแหน่ง / ฝ่าย</th>
                 <th className="py-2.5 px-4 text-center">สถานะ</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {availableUsers.map((u) => (
-                <tr key={u.id} className="hover:bg-slate-50/70 transition-colors">
-                  <td className="py-3 px-4 font-mono text-slate-600">
+              {pagedUsers.map((u) => (
+                <tr
+                  key={u.id}
+                  onClick={() => setSelectedUserPopup(u)}
+                  className="hover:bg-violet-50/40 transition-colors cursor-pointer"
+                >
+                  <td className="py-3 px-3.5 font-mono text-slate-600">
                     {u.id}
                   </td>
-                  <td className="py-3 px-4 font-mono font-semibold text-slate-900">
+                  <td className="py-3 px-3.5 font-mono font-bold text-slate-900">
                     {u.username}
                   </td>
-                  <td className="py-3 px-4 font-medium text-slate-800">
+                  <td className="py-3 px-3.5 font-semibold text-slate-800">
                     {u.fullName}
                   </td>
-                  <td className="py-3 px-4">
+                  <td className="py-3 px-3.5">
                     <span
-                      className={`inline-flex items-center text-[11px] font-semibold px-2 py-0.5 rounded border ${
+                      className={`inline-flex items-center text-[11px] font-semibold px-2 py-0.5 rounded-md border ${
                         u.role === 'ADMIN'
-                          ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                          ? 'bg-violet-100 text-violet-800 border-violet-300'
                           : u.role === 'RESPONSIBLE_STAFF'
-                          ? 'bg-blue-50 text-blue-700 border-blue-200'
+                          ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
                           : 'bg-emerald-50 text-emerald-700 border-emerald-200'
                       }`}
                     >
                       {u.role}
                     </span>
                   </td>
-                  <td className="py-3 px-4 font-mono text-slate-700">
+                  <td className="py-3 px-3.5 font-mono text-slate-700">
                     {u.personId ? (
-                      <span className="font-bold text-teal-800 bg-teal-50 px-2 py-0.5 rounded border border-teal-200">
+                      <span className="font-bold text-violet-800 bg-violet-50 px-2 py-0.5 rounded-md border border-violet-200">
                         {u.personId}
                       </span>
                     ) : (
-                      <span className="text-slate-400 italic">ไม่ได้ผูก (Admin)</span>
+                      <span className="text-slate-400 italic">
+                        ไม่ได้ผูก (Admin)
+                      </span>
                     )}
                   </td>
                   <td className="py-3 px-4 text-slate-600">
                     <div>{u.position}</div>
-                    <div className="text-[11px] text-slate-400">{u.department}</div>
+                    <div className="text-[11px] text-slate-400">
+                      {u.department}
+                    </div>
                   </td>
                   <td className="py-3 px-4 text-center">
-                    <span className="inline-flex items-center text-xs font-semibold px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200">
+                    <span className="inline-flex items-center text-xs font-semibold px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200">
                       ใช้งานปกติ
                     </span>
                   </td>
@@ -311,7 +397,64 @@ export const SettingsView: React.FC = () => {
             </tbody>
           </table>
         </div>
+
+        <TablePaginationBar
+          totalItems={sortedUsers.length}
+          currentPage={currentPage}
+          pageSize={pageSize}
+          onPageChange={setCurrentPage}
+          onPageSizeChange={(sz) => {
+            setPageSize(sz);
+            setCurrentPage(1);
+          }}
+        />
       </div>
+
+      {/* Modal: User Detail Popup */}
+      <SharedModal
+        isOpen={!!selectedUserPopup}
+        onClose={() => setSelectedUserPopup(null)}
+        title={`ข้อมูลบัญชีผู้ใช้: ${selectedUserPopup?.fullName || ''}`}
+        subtitle={`Username: ${selectedUserPopup?.username} • Role: ${selectedUserPopup?.role}`}
+        maxWidth="max-w-md"
+      >
+        {selectedUserPopup && (
+          <div className="space-y-3 text-xs">
+            <div className="bg-violet-50/50 border border-violet-200 rounded-xl p-4 space-y-2">
+              <div className="flex justify-between">
+                <span className="text-slate-500">รหัสผู้ใช้งาน (User ID):</span>
+                <span className="font-mono font-bold text-slate-900">
+                  {selectedUserPopup.id}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">ชื่อผู้ใช้ (Username):</span>
+                <span className="font-mono font-bold text-violet-800">
+                  {selectedUserPopup.username}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">ระดับสิทธิ์ (Role):</span>
+                <span className="font-bold text-slate-900">
+                  {selectedUserPopup.role}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">รหัสบุคคลที่ผูก (PERSON_ID):</span>
+                <span className="font-mono font-bold text-violet-700">
+                  {selectedUserPopup.personId || 'ไม่ได้ผูก'}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">ตำแหน่ง / หน่วยงาน:</span>
+                <span className="font-medium text-slate-800">
+                  {selectedUserPopup.position} ({selectedUserPopup.department})
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+      </SharedModal>
     </div>
   );
 };

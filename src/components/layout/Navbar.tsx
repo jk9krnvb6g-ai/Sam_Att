@@ -1,6 +1,6 @@
 import React from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { Shield, UserCheck, User, LogOut, AlertTriangle } from 'lucide-react';
+import { Shield, UserCheck, User, LogOut, Sparkles } from 'lucide-react';
 
 interface NavbarProps {
   onToggleSidebar?: () => void;
@@ -14,21 +14,21 @@ export const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar }) => {
     switch (role) {
       case 'ADMIN':
         return (
-          <span className="inline-flex items-center text-xs font-semibold px-2 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-200">
+          <span className="inline-flex items-center text-[11px] font-bold px-2 py-0.5 rounded-md bg-violet-100 text-violet-800 border border-violet-200">
             <Shield className="w-3 h-3 mr-1" />
             ADMIN
           </span>
         );
       case 'RESPONSIBLE_STAFF':
         return (
-          <span className="inline-flex items-center text-xs font-semibold px-2 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200">
+          <span className="inline-flex items-center text-[11px] font-bold px-2 py-0.5 rounded-md bg-purple-50 text-purple-700 border border-purple-200">
             <UserCheck className="w-3 h-3 mr-1" />
             STAFF
           </span>
         );
       case 'GENERAL_USER':
         return (
-          <span className="inline-flex items-center text-xs font-semibold px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+          <span className="inline-flex items-center text-[11px] font-bold px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200">
             <User className="w-3 h-3 mr-1" />
             GENERAL USER
           </span>
@@ -39,29 +39,30 @@ export const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar }) => {
   };
 
   return (
-    <header className="sticky top-0 z-40 bg-white border-b border-slate-200 shadow-xs">
-      {/* Test / Prototype Banner */}
-      <div className="bg-amber-500/10 border-b border-amber-200/80 px-4 py-1.5 text-xs text-amber-900 flex flex-wrap items-center justify-between gap-2">
+    <header className="sticky top-0 z-40 bg-white border-b border-[#E9E5F2] shadow-2xs">
+      {/* Prototype Role Switcher & Mock Status Banner */}
+      <div className="bg-gradient-to-r from-violet-950 via-violet-900 to-purple-900 px-4 py-1.5 text-xs text-violet-100 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-          <span className="font-semibold">โหมดทดสอบระบบ (UI Prototype & Mock Data):</span>
-          <span className="text-amber-800">
-            จำลองการเชื่อมต่อเครื่องสแกนและ HOSOffice ด้วย Mock Adapter ตาม MASTER PROMPT
+          <Sparkles className="w-3.5 h-3.5 text-violet-300 shrink-0" />
+          <span className="font-semibold text-white">โหมดทดสอบระบบ (UI Prototype & Mock Data):</span>
+          <span className="text-violet-200">
+            จำลองการเชื่อมต่อเครื่องสแกน 3 จุด, ฐานข้อมูล samchuk_attendance และ HOSOffice ด้วย Mock State
           </span>
         </div>
+
         {/* Quick Persona Switcher for effortless GitHub & client testing */}
         <div className="flex items-center gap-1.5">
-          <span className="text-slate-500 text-[11px] font-medium mr-1">สลับบทบาททดสอบ:</span>
+          <span className="text-violet-200 text-[11px] font-medium mr-1">สลับบทบาททดสอบ:</span>
           {availableUsers.map((u) => {
             const isCurrent = currentUser?.id === u.id;
             return (
               <button
                 key={u.id}
                 onClick={() => switchUser(u.id)}
-                className={`text-[11px] px-2 py-0.5 rounded transition-all whitespace-nowrap cursor-pointer ${
+                className={`text-[11px] px-2.5 py-0.5 rounded-md transition-all whitespace-nowrap cursor-pointer ${
                   isCurrent
-                    ? 'bg-amber-600 text-white font-medium shadow-xs'
-                    : 'bg-white/80 hover:bg-white text-slate-700 border border-amber-200 hover:border-amber-300'
+                    ? 'bg-violet-500 text-white font-bold shadow-xs ring-1 ring-violet-300'
+                    : 'bg-white/10 hover:bg-white/20 text-violet-100 border border-white/15'
                 }`}
                 title={`สลับไปเป็น ${u.fullName} (${u.role})`}
               >
@@ -76,12 +77,12 @@ export const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar }) => {
       </div>
 
       {/* Main Top Bar */}
-      <div className="px-4 lg:px-6 py-2.5 flex items-center justify-between gap-8">
+      <div className="px-4 lg:px-6 py-2.5 flex items-center justify-between gap-6">
         {/* Zone 1: Brand Wordmark */}
         <div className="flex items-center gap-3 shrink-0">
           <button
             onClick={onToggleSidebar}
-            className="lg:hidden p-1.5 rounded-md text-slate-600 hover:text-slate-900 hover:bg-slate-100"
+            className="lg:hidden p-1.5 rounded-lg text-slate-600 hover:text-violet-700 hover:bg-violet-50 cursor-pointer"
             aria-label="Toggle menu"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -90,35 +91,33 @@ export const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar }) => {
           </button>
 
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-teal-600 text-white flex items-center justify-center font-bold text-sm shadow-xs">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-[#8B5CF6] to-[#6D28D9] text-white flex items-center justify-center font-bold text-sm shadow-xs">
               SA
             </div>
             <div>
               <div className="text-base font-bold tracking-tight text-slate-900 leading-none">
                 Sam_Att V2
               </div>
-              <div className="text-[11px] text-slate-500 leading-tight">
-                โรงพยาบาลสามชุก (Samchuk Hospital)
+              <div className="text-[11px] text-slate-500 leading-tight mt-0.5">
+                โรงพยาบาลสามชุก (Samchuk Hospital Attendance System)
               </div>
             </div>
           </div>
         </div>
 
-        {/* Zone 2: System Spec Badges / Status */}
-        <div className="hidden md:flex items-center gap-4 text-xs text-slate-600">
-          <div className="flex items-center gap-1.5">
-            <span className="text-slate-400">Gateway:</span>
-            <span className="font-mono text-slate-700 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">
-              :3002/api/Sam_Att/
-            </span>
-          </div>
-          <span className="text-slate-300">|</span>
-          <div className="flex items-center gap-1.5">
-            <span className="text-slate-400">Database:</span>
-            <span className="font-mono text-slate-700 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">
-              samchuk_attendance
-            </span>
-          </div>
+        {/* Zone 2: System Architecture Metadata */}
+        <div className="hidden xl:flex items-center gap-3 text-xs text-slate-600">
+          <span className="font-mono text-[11px] text-violet-800 bg-violet-50 px-2 py-0.5 rounded-md border border-violet-200/80">
+            Frontend :3001/Sam_Att/
+          </span>
+          <span className="text-slate-300">·</span>
+          <span className="font-mono text-[11px] text-violet-800 bg-violet-50 px-2 py-0.5 rounded-md border border-violet-200/80">
+            Gateway :3002/api/Sam_Att/
+          </span>
+          <span className="text-slate-300">·</span>
+          <span className="font-mono text-[11px] text-slate-700 bg-[#F8F7FC] px-2 py-0.5 rounded-md border border-[#E9E5F2]">
+            DB: samchuk_attendance
+          </span>
         </div>
 
         {/* Zone 3: User Profile & Actions */}
@@ -127,19 +126,19 @@ export const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar }) => {
             <div className="flex items-center gap-2.5 text-right">
               <div>
                 <div className="flex items-center justify-end gap-1.5">
-                  <span className="text-xs font-semibold text-slate-900 truncate max-w-[180px]">
+                  <span className="text-xs font-bold text-slate-900 truncate max-w-[190px]">
                     {currentUser.fullName}
                   </span>
                   {getRoleBadge(currentUser.role)}
                 </div>
-                <div className="text-[11px] text-slate-500 truncate max-w-[200px]">
+                <div className="text-[11px] text-slate-500 truncate max-w-[210px]">
                   {currentUser.department}
                 </div>
               </div>
 
               <button
                 onClick={logout}
-                className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors"
+                className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
                 title="ออกจากระบบ (Logout)"
               >
                 <LogOut className="w-4 h-4" />

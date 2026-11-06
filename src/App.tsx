@@ -5,15 +5,15 @@ import { Sidebar } from './components/layout/Sidebar';
 import { LoginView } from './views/LoginView';
 import { MyAttendanceView } from './views/MyAttendanceView';
 import { DashboardView } from './views/DashboardView';
+import { HRAttendanceManagementView } from './views/HRAttendanceManagementView';
 import { AttendanceReviewView } from './views/AttendanceReviewView';
 import { RawScansView } from './views/RawScansView';
 import { ScannerManagementView } from './views/ScannerManagementView';
 import { PersonnelView } from './views/PersonnelView';
 import { ShiftsView } from './views/ShiftsView';
-import { ReportsView } from './views/ReportsView';
 import { HOSOfficePushView } from './views/HOSOfficePushView';
+import { SystemLogsView } from './views/SystemLogsView';
 import { SettingsView } from './views/SettingsView';
-import { GatewayDocView } from './views/GatewayDocView';
 
 const MainLayout: React.FC = () => {
   const { currentUser, isAuthenticated } = useAuth();
@@ -30,9 +30,9 @@ const MainLayout: React.FC = () => {
     return <LoginView />;
   }
 
-  // Render view component
+  // Render view component with strict role-based access enforcement
   const renderView = () => {
-    // Enforcement: GENERAL_USER cannot see other views
+    // Enforcement: GENERAL_USER can only view their own attendance
     if (currentUser?.role === 'GENERAL_USER') {
       return <MyAttendanceView />;
     }
@@ -42,10 +42,13 @@ const MainLayout: React.FC = () => {
         return (
           <DashboardView
             onNavigateToReview={() => setActiveView('attendance-review')}
+            onNavigateToView={(v) => setActiveView(v)}
           />
         );
       case 'my-attendance':
         return <MyAttendanceView />;
+      case 'hr-reports':
+        return <HRAttendanceManagementView />;
       case 'attendance-review':
         return <AttendanceReviewView />;
       case 'raw-scans':
@@ -56,22 +59,32 @@ const MainLayout: React.FC = () => {
         return <PersonnelView />;
       case 'shifts':
         return <ShiftsView />;
-      case 'reports':
-        return <ReportsView />;
       case 'hosoffice-push':
         return <HOSOfficePushView />;
+      case 'system-logs':
+        return <SystemLogsView />;
       case 'settings':
         // Guard ADMIN only
-        return currentUser?.role === 'ADMIN' ? <SettingsView /> : <DashboardView />;
-      case 'gateway-doc':
-        return <GatewayDocView />;
+        return currentUser?.role === 'ADMIN' ? (
+          <SettingsView />
+        ) : (
+          <DashboardView
+            onNavigateToReview={() => setActiveView('attendance-review')}
+            onNavigateToView={(v) => setActiveView(v)}
+          />
+        );
       default:
-        return <DashboardView />;
+        return (
+          <DashboardView
+            onNavigateToReview={() => setActiveView('attendance-review')}
+            onNavigateToView={(v) => setActiveView(v)}
+          />
+        );
     }
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col text-slate-800">
+    <div className="min-h-screen bg-[#F8F7FC] flex flex-col text-[#1F2937]">
       <Navbar
         onToggleSidebar={() => setIsSidebarOpen((prev) => !prev)}
         activeView={activeView}
@@ -85,7 +98,7 @@ const MainLayout: React.FC = () => {
           onClose={() => setIsSidebarOpen(false)}
         />
 
-        <main className="flex-1 p-4 lg:p-6 overflow-y-auto max-w-7xl mx-auto w-full">
+        <main className="flex-1 p-4 lg:p-6 overflow-y-auto max-w-[1440px] mx-auto w-full">
           {renderView()}
         </main>
       </div>
