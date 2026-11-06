@@ -1,0 +1,6 @@
+{
+  "name": "Sam_Att V2 — Samchuk Hospital Attendance System",
+  "description": "ระบบบริหารจัดการเวลาการปฏิบัติงาน โรงพยาบาลสามชุก V2 (Samchuk Hospital Attendance Management System)",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
