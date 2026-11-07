@@ -107,48 +107,59 @@ export class MySqlSamAttRepository implements ISamAttRepository {
         connectionLimit: Number(process.env.SAM_ATT_DB_CONNECTION_LIMIT || 10),
       };
 
-      if (!cfg.host || !cfg.user) {
-        throw new DatabaseUnavailableError(
-          'Database Connection Error: SAM_ATT_DB_HOST and SAM_ATT_DB_USER must be configured for REAL MySQL mode (ระบบไม่สลับไปใช้ Mock Data อัตโนมัติตามข้อกำหนด §2.12).'
-        );
-      }
-
       this.databaseName = cfg.database;
-      const realPool: Pool = mysql.createPool({
-        host: cfg.host,
-        port: cfg.port,
-        user: cfg.user,
-        password: cfg.password,
-        database: cfg.database,
-        waitForConnections: true,
-        connectionLimit: cfg.connectionLimit || 10,
-        queueLimit: 0,
-        timezone: '+07:00',
-        dateStrings: true,
-      });
 
-      this.pool = {
-        getConnection: async () => {
-          try {
-            const conn: PoolConnection = await realPool.getConnection();
-            return conn as unknown as SqlQueryableConnection;
-          } catch (err) {
-            throw new DatabaseUnavailableError(
-              `ไม่สามารถเชื่อมต่อฐานข้อมูล MySQL (${cfg.host}:${cfg.port}/${cfg.database}): ${(err as Error).message}`
-            );
-          }
-        },
-        execute: async <T = any>(sql: string, values?: any): Promise<[T, mysql.FieldPacket[]]> => {
-          try {
-            return (await realPool.execute(sql, values)) as unknown as [T, mysql.FieldPacket[]];
-          } catch (err) {
-            throw new DatabaseUnavailableError(
-              `MySQL Query Execution Failed (${cfg.database}): ${(err as Error).message}`
-            );
-          }
-        },
-        end: () => realPool.end(),
-      };
+      if (!cfg.host || !cfg.user) {
+        const unconfiguredErr = () =>
+          new DatabaseUnavailableError(
+            'Database Connection Error: SAM_ATT_DB_HOST and SAM_ATT_DB_USER must be configured for REAL MySQL mode (ระบบไม่สลับไปใช้ Mock Data อัตโนมัติตามข้อกำหนด §2).'
+          );
+        this.pool = {
+          getConnection: async () => {
+            throw unconfiguredErr();
+          },
+          execute: async () => {
+            throw unconfiguredErr();
+          },
+          end: async () => {},
+        };
+      } else {
+        const realPool: Pool = mysql.createPool({
+          host: cfg.host,
+          port: cfg.port,
+          user: cfg.user,
+          password: cfg.password,
+          database: cfg.database,
+          waitForConnections: true,
+          connectionLimit: cfg.connectionLimit || 10,
+          queueLimit: 0,
+          timezone: '+07:00',
+          dateStrings: true,
+        });
+
+        this.pool = {
+          getConnection: async () => {
+            try {
+              const conn: PoolConnection = await realPool.getConnection();
+              return conn as unknown as SqlQueryableConnection;
+            } catch (err) {
+              throw new DatabaseUnavailableError(
+                `ไม่สามารถเชื่อมต่อฐานข้อมูล MySQL (${cfg.host}:${cfg.port}/${cfg.database}): ${(err as Error).message}`
+              );
+            }
+          },
+          execute: async <T = any>(sql: string, values?: any): Promise<[T, mysql.FieldPacket[]]> => {
+            try {
+              return (await realPool.execute(sql, values)) as unknown as [T, mysql.FieldPacket[]];
+            } catch (err) {
+              throw new DatabaseUnavailableError(
+                `MySQL Query Execution Failed (${cfg.database}): ${(err as Error).message}`
+              );
+            }
+          },
+          end: () => realPool.end(),
+        };
+      }
     }
   }
 
@@ -1631,7 +1642,7 @@ export class MySqlSamAttRepository implements ISamAttRepository {
   }
 
   // ==========================================
-  // 7. Persistent Session Revocation & Login Rate Limiting (§9)
+  // 7. Persistent Session Revocation & Distributed Login Rate Limiting (§3 & §9)
   // ==========================================
   public async revokeSessionJti(
     jti: string,
@@ -1639,8 +1650,10 @@ export class MySqlSamAttRepository implements ISamAttRepository {
     expiresAtSec: number
   ): Promise<void> {
     await this.executeMutation(
-      `INSERT IGNORE INTO revoked_sessions (jti, user_id, expires_at_sec)
-       VALUES (?, ?, ?)`,
+      `INSERT INTO revoked_sessions (jti, user_id, expires_at_sec)
+       VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         expires_at_sec = VALUES(expires_at_sec)`,
       [jti, userId, expiresAtSec]
     );
   }
@@ -1651,6 +1664,32 @@ export class MySqlSamAttRepository implements ISamAttRepository {
       [jti]
     );
     return rows.length > 0;
+  }
+
+  public async revokeUserSessionsBefore(
+    userId: string,
+    revokedBeforeSec: number
+  ): Promise<void> {
+    const sentinelJti = `USER_ALL_${userId}`;
+    await this.executeMutation(
+      `INSERT INTO revoked_sessions (jti, user_id, expires_at_sec)
+       VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         expires_at_sec = GREATEST(expires_at_sec, VALUES(expires_at_sec))`,
+      [sentinelJti, userId, revokedBeforeSec]
+    );
+  }
+
+  public async getUserSessionsRevokedBefore(
+    userId: string
+  ): Promise<number | null> {
+    const sentinelJti = `USER_ALL_${userId}`;
+    const rows = await this.queryRows(
+      `SELECT expires_at_sec FROM revoked_sessions WHERE jti = ? LIMIT 1`,
+      [sentinelJti]
+    );
+    if (rows.length === 0) return null;
+    return Number(rows[0].expires_at_sec || 0);
   }
 
   public async getRateLimitEntry(
@@ -1674,6 +1713,83 @@ export class MySqlSamAttRepository implements ISamAttRepository {
           ? Number(r.locked_until_ms)
           : null,
     };
+  }
+
+  public async recordFailedRateLimitAttempt(params: {
+    rateKey: string;
+    nowMs: number;
+    windowMs: number;
+    maxAttempts: number;
+    lockoutMs: number;
+  }): Promise<RepositoryRateLimitEntry> {
+    return this.withTransaction(async (txRepo) => {
+      const tx = txRepo as MySqlSamAttRepository;
+      const lockedUntilIfFirst =
+        1 >= params.maxAttempts ? params.nowMs + params.lockoutMs : null;
+      const lockedUntilIfIncrement = params.nowMs + params.lockoutMs;
+
+      await tx.executeMutation(
+        `INSERT INTO auth_rate_limits (rate_key, failed_attempts, first_failed_at_ms, locked_until_ms)
+         VALUES (?, 1, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           failed_attempts = CASE
+             WHEN (? - first_failed_at_ms) > ? THEN 1
+             ELSE failed_attempts + 1
+           END,
+           first_failed_at_ms = CASE
+             WHEN (? - first_failed_at_ms) > ? THEN ?
+             ELSE first_failed_at_ms
+           END,
+           locked_until_ms = CASE
+             WHEN (? - first_failed_at_ms) > ? THEN ?
+             WHEN (failed_attempts + 1) >= ? THEN COALESCE(locked_until_ms, ?)
+             ELSE locked_until_ms
+           END`,
+        [
+          params.rateKey,
+          params.nowMs,
+          lockedUntilIfFirst,
+          params.nowMs,
+          params.windowMs,
+          params.nowMs,
+          params.windowMs,
+          params.nowMs,
+          params.nowMs,
+          params.windowMs,
+          lockedUntilIfFirst,
+          params.maxAttempts,
+          lockedUntilIfIncrement,
+        ]
+      );
+
+      const rows = await tx.queryRows(
+        `SELECT rate_key, failed_attempts, first_failed_at_ms, locked_until_ms
+         FROM auth_rate_limits
+         WHERE rate_key = ?
+         LIMIT 1`,
+        [params.rateKey]
+      );
+
+      if (rows.length === 0) {
+        return {
+          rateKey: params.rateKey,
+          failedAttempts: 1,
+          firstFailedAtMs: params.nowMs,
+          lockedUntilMs: lockedUntilIfFirst,
+        };
+      }
+
+      const r = rows[0];
+      return {
+        rateKey: String(r.rate_key),
+        failedAttempts: Number(r.failed_attempts || 1),
+        firstFailedAtMs: Number(r.first_failed_at_ms || params.nowMs),
+        lockedUntilMs:
+          r.locked_until_ms !== null && r.locked_until_ms !== undefined
+            ? Number(r.locked_until_ms)
+            : null,
+      };
+    });
   }
 
   public async saveRateLimitEntry(entry: RepositoryRateLimitEntry): Promise<void> {

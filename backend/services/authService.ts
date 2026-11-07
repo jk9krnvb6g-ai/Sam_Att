@@ -188,7 +188,9 @@ export class AuthService {
   }
 
   /**
-   * Verify token signature, expiration (`exp`), and session revocation (`jti` & user revocation timestamp) (§4.7 & §4.8).
+   * Verify token signature and expiration (`exp`) (§4.7 & §4.8).
+   * Note: In REAL mode, session revocation MUST be checked against the shared persistent repository
+   * on every request (in-memory cache is never trusted as authoritative in REAL mode — §3).
    */
   public static verifySignedToken(
     token: string,
@@ -197,6 +199,7 @@ export class AuthService {
     valid: boolean;
     userId?: string;
     jti?: string;
+    iat?: number;
     exp?: number;
     reason?: string;
   } {
@@ -230,19 +233,38 @@ export class AuthService {
         return { valid: false, reason: 'Token expired' };
       }
 
-      if (payload.jti && this.revokedTokenJtis.has(payload.jti)) {
-        return { valid: false, reason: 'Session has been revoked' };
+      if (!payload.jti || typeof payload.jti !== 'string') {
+        return { valid: false, reason: 'Missing token jti' };
       }
 
-      const revokedBefore = this.userRevokedBeforeSec.get(payload.sub);
-      if (revokedBefore !== undefined && typeof payload.iat === 'number' && payload.iat <= revokedBefore) {
-        return { valid: false, reason: 'All user sessions prior to revocation have been invalidated' };
+      // Only check process-local fallback sets when NOT in REAL/Production mode
+      const isRealOrProd =
+        mode === 'REAL' ||
+        process.env.SAM_ATT_REPO_MODE === 'REAL' ||
+        process.env.NODE_ENV === 'production';
+
+      if (!isRealOrProd) {
+        if (this.revokedTokenJtis.has(payload.jti)) {
+          return { valid: false, reason: 'Session has been revoked' };
+        }
+        const revokedBefore = this.userRevokedBeforeSec.get(payload.sub);
+        if (
+          revokedBefore !== undefined &&
+          typeof payload.iat === 'number' &&
+          payload.iat <= revokedBefore
+        ) {
+          return {
+            valid: false,
+            reason: 'All user sessions prior to revocation have been invalidated',
+          };
+        }
       }
 
       return {
         valid: true,
         userId: payload.sub,
         jti: payload.jti,
+        iat: typeof payload.iat === 'number' ? payload.iat : undefined,
         exp: payload.exp,
       };
     } catch {
@@ -251,42 +273,83 @@ export class AuthService {
   }
 
   /**
-   * Revoke a specific token immediately (e.g., on logout) and persist revocation to Repository (§4.8 & §9).
+   * Revoke a specific token immediately (e.g., on logout) and persist revocation to Repository (§3 & §4.8).
+   * - Must persist to Repository before returning success.
+   * - Fails closed (throws error) if Repository revocation persistence fails.
    */
   public static async revokeToken(
     token: string,
     mode: RepositoryMode = 'MOCK',
     repository?: ISamAttRepository
   ): Promise<boolean> {
-    const verified = this.verifySignedToken(token, mode) as {
-      valid: boolean;
-      userId?: string;
-      jti?: string;
-      exp?: number;
-    };
-    if (verified.jti) {
-      this.revokedTokenJtis.add(verified.jti);
-      if (repository?.revokeSessionJti && verified.userId) {
-        await repository.revokeSessionJti(
-          verified.jti,
-          verified.userId,
-          verified.exp || Math.floor(Date.now() / 1000) + 28800
+    const verified = this.verifySignedToken(token, mode);
+    if (!verified.valid || !verified.jti || !verified.userId) {
+      return false;
+    }
+
+    const isRealOrProd =
+      mode === 'REAL' ||
+      repository?.mode === 'REAL' ||
+      process.env.SAM_ATT_REPO_MODE === 'REAL' ||
+      process.env.NODE_ENV === 'production';
+
+    if (isRealOrProd && (!repository || typeof repository.revokeSessionJti !== 'function')) {
+      throw new Error(
+        'CRITICAL SECURITY ERROR: Persistent repository is required for session revocation in REAL/Production mode (Fail Closed).'
+      );
+    }
+
+    if (repository) {
+      if (typeof repository.revokeSessionJti !== 'function') {
+        throw new Error(
+          'CRITICAL SECURITY ERROR: Repository does not implement revokeSessionJti (Fail Closed).'
         );
       }
-      return true;
+      await repository.revokeSessionJti(
+        verified.jti,
+        verified.userId,
+        verified.exp || Math.floor(Date.now() / 1000) + 28800
+      );
     }
-    return false;
+
+    if (!isRealOrProd) {
+      this.revokedTokenJtis.add(verified.jti);
+    }
+    return true;
   }
 
   /**
-   * Revoke all active sessions for a user ID (§4.8).
+   * Revoke all active sessions for a user ID across processes via shared Repository (§3 & §4.8).
    */
-  public static revokeAllUserSessions(userId: string): void {
-    this.userRevokedBeforeSec.set(userId, Math.floor(Date.now() / 1000));
+  public static async revokeAllUserSessions(
+    userId: string,
+    repository?: ISamAttRepository
+  ): Promise<void> {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const isRealOrProd =
+      repository?.mode === 'REAL' ||
+      process.env.SAM_ATT_REPO_MODE === 'REAL' ||
+      process.env.NODE_ENV === 'production';
+
+    if (isRealOrProd && (!repository || typeof repository.revokeUserSessionsBefore !== 'function')) {
+      throw new Error(
+        'CRITICAL SECURITY ERROR: Persistent repository is required for user-wide session revocation in REAL/Production mode (Fail Closed).'
+      );
+    }
+
+    if (repository?.revokeUserSessionsBefore) {
+      await repository.revokeUserSessionsBefore(userId, nowSec);
+    }
+    if (!isRealOrProd) {
+      this.userRevokedBeforeSec.set(userId, nowSec);
+    }
   }
 
   /**
-   * Check and update login rate limiter for brute-force protection, reading from persistent repository when available (§4.9, §4.10 & §9).
+   * Check login rate limiter for brute-force protection (§3, §4.9 & §4.10).
+   * - Always queries the shared Persistent Repository when `repository` is provided so all processes see the same state.
+   * - Never trusts process-local in-memory cache over the shared Repository.
+   * - Fails closed if the Repository is unavailable or throws an error.
    */
   public static async checkRateLimit(
     rateLimitKey: string,
@@ -297,9 +360,25 @@ export class AuthService {
     retryAfterSeconds?: number;
   }> {
     const nowMs = Date.now();
-    let state: RateLimitState | undefined = this.loginRateLimitMap.get(rateLimitKey);
+    const isRealOrProd =
+      repository?.mode === 'REAL' ||
+      process.env.SAM_ATT_REPO_MODE === 'REAL' ||
+      process.env.NODE_ENV === 'production';
 
-    if (!state && repository?.getRateLimitEntry) {
+    if (isRealOrProd && (!repository || typeof repository.getRateLimitEntry !== 'function')) {
+      throw new Error(
+        'CRITICAL SECURITY ERROR: Persistent rate-limit repository is required in REAL/Production mode (Fail Closed).'
+      );
+    }
+
+    let state: RateLimitState | undefined;
+
+    if (repository) {
+      if (typeof repository.getRateLimitEntry !== 'function') {
+        throw new Error(
+          'CRITICAL SECURITY ERROR: Repository does not implement getRateLimitEntry (Fail Closed).'
+        );
+      }
       const persisted = await repository.getRateLimitEntry(rateLimitKey);
       if (persisted) {
         state = {
@@ -307,8 +386,9 @@ export class AuthService {
           firstFailedAtMs: persisted.firstFailedAtMs,
           lockedUntilMs: persisted.lockedUntilMs,
         };
-        this.loginRateLimitMap.set(rateLimitKey, state);
       }
+    } else {
+      state = this.loginRateLimitMap.get(rateLimitKey);
     }
 
     if (!state) {
@@ -324,9 +404,10 @@ export class AuthService {
     }
 
     if (nowMs - state.firstFailedAtMs > RATE_LIMIT_WINDOW_MS) {
-      this.loginRateLimitMap.delete(rateLimitKey);
-      if (repository?.deleteRateLimitEntry) {
+      if (repository) {
         await repository.deleteRateLimitEntry(rateLimitKey);
+      } else {
+        this.loginRateLimitMap.delete(rateLimitKey);
       }
       return { allowed: true, remainingAttempts: RATE_LIMIT_MAX_ATTEMPTS };
     }
@@ -337,27 +418,60 @@ export class AuthService {
     };
   }
 
+  /**
+   * Atomically increment failed login attempts in the shared Persistent Repository (§3).
+   * - Prevents race conditions across concurrent login requests from multiple processes.
+   * - Fails closed if the Repository fails.
+   */
   private static async recordFailedLoginAttempt(
     rateLimitKey: string,
     repository?: ISamAttRepository
   ): Promise<{
     locked: boolean;
     failedAttempts: number;
+    retryAfterSeconds?: number;
   }> {
     const nowMs = Date.now();
-    let current = this.loginRateLimitMap.get(rateLimitKey);
+    const isRealOrProd =
+      repository?.mode === 'REAL' ||
+      process.env.SAM_ATT_REPO_MODE === 'REAL' ||
+      process.env.NODE_ENV === 'production';
 
-    if (!current && repository?.getRateLimitEntry) {
-      const persisted = await repository.getRateLimitEntry(rateLimitKey);
-      if (persisted) {
-        current = {
-          failedAttempts: persisted.failedAttempts,
-          firstFailedAtMs: persisted.firstFailedAtMs,
-          lockedUntilMs: persisted.lockedUntilMs,
-        };
-      }
+    if (
+      isRealOrProd &&
+      (!repository || typeof repository.recordFailedRateLimitAttempt !== 'function')
+    ) {
+      throw new Error(
+        'CRITICAL SECURITY ERROR: Atomic persistent rate-limit repository is required in REAL/Production mode (Fail Closed).'
+      );
     }
 
+    if (repository) {
+      if (typeof repository.recordFailedRateLimitAttempt !== 'function') {
+        throw new Error(
+          'CRITICAL SECURITY ERROR: Repository does not implement recordFailedRateLimitAttempt (Fail Closed).'
+        );
+      }
+      const updated = await repository.recordFailedRateLimitAttempt({
+        rateKey: rateLimitKey,
+        nowMs,
+        windowMs: RATE_LIMIT_WINDOW_MS,
+        maxAttempts: RATE_LIMIT_MAX_ATTEMPTS,
+        lockoutMs: RATE_LIMIT_LOCKOUT_MS,
+      });
+      const locked = Boolean(updated.lockedUntilMs && updated.lockedUntilMs > nowMs);
+      return {
+        locked,
+        failedAttempts: updated.failedAttempts,
+        retryAfterSeconds:
+          locked && updated.lockedUntilMs
+            ? Math.ceil((updated.lockedUntilMs - nowMs) / 1000)
+            : undefined,
+      };
+    }
+
+    // Fallback only when called in unit tests without a repository instance
+    const current = this.loginRateLimitMap.get(rateLimitKey);
     if (!current || nowMs - current.firstFailedAtMs > RATE_LIMIT_WINDOW_MS) {
       const nextState: RateLimitState = {
         failedAttempts: 1,
@@ -365,12 +479,6 @@ export class AuthService {
         lockedUntilMs: null,
       };
       this.loginRateLimitMap.set(rateLimitKey, nextState);
-      if (repository?.saveRateLimitEntry) {
-        await repository.saveRateLimitEntry({
-          rateKey: rateLimitKey,
-          ...nextState,
-        });
-      }
       return { locked: false, failedAttempts: 1 };
     }
 
@@ -379,19 +487,14 @@ export class AuthService {
       current.lockedUntilMs = nowMs + RATE_LIMIT_LOCKOUT_MS;
     }
     this.loginRateLimitMap.set(rateLimitKey, current);
-
-    if (repository?.saveRateLimitEntry) {
-      await repository.saveRateLimitEntry({
-        rateKey: rateLimitKey,
-        failedAttempts: current.failedAttempts,
-        firstFailedAtMs: current.firstFailedAtMs,
-        lockedUntilMs: current.lockedUntilMs,
-      });
-    }
-
+    const locked = Boolean(current.lockedUntilMs && current.lockedUntilMs > nowMs);
     return {
-      locked: Boolean(current.lockedUntilMs && current.lockedUntilMs > nowMs),
+      locked,
       failedAttempts: current.failedAttempts,
+      retryAfterSeconds:
+        locked && current.lockedUntilMs
+          ? Math.ceil((current.lockedUntilMs - nowMs) / 1000)
+          : undefined,
     };
   }
 
@@ -406,8 +509,8 @@ export class AuthService {
   }
 
   /**
-   * Authenticate user credentials (`username` + `password`) with persistent rate limiting, bcrypt verification,
-   * legacy hash migration, and audit logging without leaking sensitive values (§4.1–§4.11 & §9).
+   * Authenticate user credentials (`username` + `password`) with persistent distributed rate limiting,
+   * bcrypt verification, legacy hash migration, and audit logging without leaking sensitive values (§3 & §4).
    */
   public static async authenticateCredentials(
     repository: ISamAttRepository,
@@ -442,6 +545,7 @@ export class AuthService {
     const normalizedUsername = username.trim().toLowerCase();
     const rateKey = `${normalizedUsername}@${clientIp}`;
 
+    // Fail-closed rate limit check against shared persistent repository
     const rateCheck = await this.checkRateLimit(rateKey, repository);
     if (!rateCheck.allowed) {
       await repository.recordAuditLog({
@@ -461,7 +565,15 @@ export class AuthService {
 
     const account = await repository.findUserByUsername(normalizedUsername);
     if (!account || !account.active) {
-      await this.recordFailedLoginAttempt(rateKey, repository);
+      const failState = await this.recordFailedLoginAttempt(rateKey, repository);
+      if (failState.locked) {
+        return {
+          success: false,
+          statusCode: 429,
+          retryAfterSeconds: failState.retryAfterSeconds || 900,
+          error: `บัญชีถูกระงับการเข้าสู่ระบบชั่วคราวเนื่องจากใส่รหัสผ่านผิดเกิน ${RATE_LIMIT_MAX_ATTEMPTS} ครั้ง`,
+        };
+      }
       return {
         success: false,
         statusCode: 401,
@@ -489,11 +601,10 @@ export class AuthService {
       });
 
       if (failState.locked) {
-        const retryCheck = await this.checkRateLimit(rateKey, repository);
         return {
           success: false,
           statusCode: 429,
-          retryAfterSeconds: retryCheck.retryAfterSeconds || 900,
+          retryAfterSeconds: failState.retryAfterSeconds || 900,
           error: `บัญชีถูกระงับการเข้าสู่ระบบชั่วคราวเนื่องจากใส่รหัสผ่านผิดเกิน ${RATE_LIMIT_MAX_ATTEMPTS} ครั้ง`,
         };
       }
@@ -507,9 +618,7 @@ export class AuthService {
 
     // Reset failed attempts upon successful login
     this.loginRateLimitMap.delete(rateKey);
-    if (repository.deleteRateLimitEntry) {
-      await repository.deleteRateLimitEntry(rateKey);
-    }
+    await repository.deleteRateLimitEntry(rateKey);
 
     const token = this.issueSignedToken(account, 28800, repository.mode);
     const authUser: AuthenticatedUser = {
@@ -542,9 +651,11 @@ export class AuthService {
   }
 
   /**
-   * Express authentication middleware (§4, §7 & §9).
-   * - Verifies Bearer token signature, expiration, and both in-memory & repository-persisted session revocation.
-   * - Re-queries the authoritative repository for `role` and `personId` (never trusts client claims).
+   * Express authentication middleware (§3, §4, §7 & §9).
+   * - Verifies Bearer token signature and expiration.
+   * - Queries the shared Persistent Repository on EVERY request for session revocation (`isSessionJtiRevoked` & `getUserSessionsRevokedBefore`).
+   * - NEVER trusts in-memory revocation cache as authoritative in REAL mode.
+   * - Fails CLOSED (HTTP 503) if the revocation repository or user lookup fails (never accepts a token when repository check fails).
    * - Strictly disables Mock Role Fallback when `repository.mode === 'REAL'` or `NODE_ENV === 'production'`.
    */
   public static createAuthMiddleware(repository: ISamAttRepository) {
@@ -559,21 +670,45 @@ export class AuthService {
         if (authHeader && authHeader.startsWith('Bearer ')) {
           const token = authHeader.slice(7).trim();
           const verification = AuthService.verifySignedToken(token, repository.mode);
-          if (!verification.valid || !verification.userId) {
+          if (!verification.valid || !verification.userId || !verification.jti) {
             return res.status(401).json({
               success: false,
               error: `การยืนยันตัวตนไม่ผ่าน (${verification.reason || 'Invalid token'})`,
             });
           }
 
-          // Check persistent session revocation in repository (survives backend restart & multi-process)
-          if (verification.jti && repository.isSessionJtiRevoked) {
-            const isRevokedInRepo = await repository.isSessionJtiRevoked(verification.jti);
-            if (isRevokedInRepo) {
-              this.revokedTokenJtis.add(verification.jti);
+          // Mandatory shared persistent repository revocation check on EVERY authenticated request (§3 Problem A)
+          if (typeof repository.isSessionJtiRevoked !== 'function') {
+            return res.status(503).json({
+              success: false,
+              code: 'SAM_ATT_SECURITY_REPO_UNAVAILABLE',
+              repositoryMode: repository.mode,
+              error:
+                'Security Error: Session revocation repository is not available (Fail Closed).',
+            });
+          }
+
+          const isRevokedInRepo = await repository.isSessionJtiRevoked(verification.jti);
+          if (isRevokedInRepo) {
+            return res.status(401).json({
+              success: false,
+              error: 'การยืนยันตัวตนไม่ผ่าน (Session has been revoked)',
+            });
+          }
+
+          if (typeof repository.getUserSessionsRevokedBefore === 'function') {
+            const revokedBeforeSec = await repository.getUserSessionsRevokedBefore(
+              verification.userId
+            );
+            if (
+              revokedBeforeSec !== null &&
+              typeof verification.iat === 'number' &&
+              verification.iat <= revokedBeforeSec
+            ) {
               return res.status(401).json({
                 success: false,
-                error: 'การยืนยันตัวตนไม่ผ่าน (Session has been revoked)',
+                error:
+                  'การยืนยันตัวตนไม่ผ่าน (All user sessions prior to revocation have been invalidated)',
               });
             }
           }
@@ -632,8 +767,20 @@ export class AuthService {
         } satisfies AuthenticatedUser;
 
         return next();
-      } catch (err) {
-        return next(err);
+      } catch (err: any) {
+        // Fail closed when Revocation / User Repository throws an error! Never bypass authentication.
+        const errCode = err?.code === 'SAM_ATT_MYSQL_UNAVAILABLE'
+          ? 'SAM_ATT_MYSQL_UNAVAILABLE'
+          : 'SAM_ATT_SECURITY_REPO_UNAVAILABLE';
+        return res.status(503).json({
+          success: false,
+          code: errCode,
+          repositoryMode: repository.mode,
+          error:
+            err instanceof Error
+              ? err.message
+              : 'Security repository unavailable (Fail Closed)',
+        });
       }
     };
   }

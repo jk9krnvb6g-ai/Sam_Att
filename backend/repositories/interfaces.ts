@@ -275,12 +275,21 @@ export interface ISamAttRepository {
   recordPushPreviewHistory(entry: RepositoryPushHistory): Promise<void> | void;
   getPushHistory(): Promise<RepositoryPushHistory[]> | RepositoryPushHistory[];
 
-  // Persistent Session Revocation & Login Rate Limiting across Restart / Multi-Process (§9)
-  revokeSessionJti?(jti: string, userId: string, expiresAtSec: number): Promise<void> | void;
-  isSessionJtiRevoked?(jti: string): Promise<boolean> | boolean;
-  getRateLimitEntry?(rateKey: string): Promise<RepositoryRateLimitEntry | undefined> | RepositoryRateLimitEntry | undefined;
-  saveRateLimitEntry?(entry: RepositoryRateLimitEntry): Promise<void> | void;
-  deleteRateLimitEntry?(rateKey: string): Promise<void> | void;
+  // Persistent Session Revocation & Distributed Login Rate Limiting across Restart / Multi-Process (§3 & §9)
+  revokeSessionJti(jti: string, userId: string, expiresAtSec: number): Promise<void> | void;
+  isSessionJtiRevoked(jti: string): Promise<boolean> | boolean;
+  revokeUserSessionsBefore?(userId: string, revokedBeforeSec: number): Promise<void> | void;
+  getUserSessionsRevokedBefore?(userId: string): Promise<number | null> | number | null;
+  getRateLimitEntry(rateKey: string): Promise<RepositoryRateLimitEntry | undefined> | RepositoryRateLimitEntry | undefined;
+  recordFailedRateLimitAttempt(params: {
+    rateKey: string;
+    nowMs: number;
+    windowMs: number;
+    maxAttempts: number;
+    lockoutMs: number;
+  }): Promise<RepositoryRateLimitEntry> | RepositoryRateLimitEntry;
+  saveRateLimitEntry(entry: RepositoryRateLimitEntry): Promise<void> | void;
+  deleteRateLimitEntry(rateKey: string): Promise<void> | void;
 }
 
 export interface RepositoryRateLimitEntry {

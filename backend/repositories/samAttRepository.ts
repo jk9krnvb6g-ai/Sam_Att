@@ -55,6 +55,14 @@ export type {
 };
 export { MySqlSamAttRepository, DatabaseUnavailableError };
 
+export class ProductionRepositoryConfigurationError extends Error {
+  public readonly code = 'SAM_ATT_PRODUCTION_REPO_CONFIG_ERROR';
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProductionRepositoryConfigurationError';
+  }
+}
+
 interface DatabaseSnapshot {
   users: RepositoryUserAccount[];
   personnel: EnginePersonnel[];
@@ -69,10 +77,12 @@ interface DatabaseSnapshot {
   pushHistory: RepositoryPushHistory[];
   auditLogs: RepositoryAuditLog[];
   revokedSessionJtis: Set<string>;
+  userRevokedBeforeSec: Map<string, number>;
   rateLimits: Map<string, RepositoryRateLimitEntry>;
 }
 
 export class SamAttRepository implements ISamAttRepository {
+  private static sharedFileMutexes = new Map<string, Promise<unknown>>();
   public readonly mode: RepositoryMode;
   private persistenceFilePath: string | null = null;
   private txMutexChain: Promise<unknown> = Promise.resolve();
@@ -90,6 +100,7 @@ export class SamAttRepository implements ISamAttRepository {
   private pushHistory: RepositoryPushHistory[] = [];
   private auditLogs: RepositoryAuditLog[] = [];
   private revokedSessionJtis = new Set<string>();
+  private userRevokedBeforeSec = new Map<string, number>();
   private rateLimits = new Map<string, RepositoryRateLimitEntry>();
   private parameterizedQueryLog: ParameterizedSqlRecord[] = [];
 
@@ -113,6 +124,12 @@ export class SamAttRepository implements ISamAttRepository {
     const resolvedPath = options?.persistenceFilePath || seed?.persistenceFilePath || null;
     this.mode = options?.mode || seed?.mode || (resolvedPath ? 'TEST' : 'MOCK');
     this.persistenceFilePath = resolvedPath;
+
+    if (process.env.NODE_ENV === 'production') {
+      throw new ProductionRepositoryConfigurationError(
+        `CRITICAL CONFIGURATION ERROR: Cannot instantiate ${this.mode} repository (SamAttRepository) when NODE_ENV=production. Production strictly requires SAM_ATT_REPO_MODE=REAL with MySqlSamAttRepository.`
+      );
+    }
 
     // If a persistence file exists on disk (e.g., after Backend Restart in TEST mode), load state from disk!
     if (this.persistenceFilePath && fs.existsSync(this.persistenceFilePath)) {
@@ -145,6 +162,12 @@ export class SamAttRepository implements ISamAttRepository {
     this.flushToDiskIfConfigured();
   }
 
+  private reloadFromDiskIfConfigured(): void {
+    if (this.persistenceFilePath && fs.existsSync(this.persistenceFilePath)) {
+      this.loadFromDiskFile(this.persistenceFilePath);
+    }
+  }
+
   private flushToDiskIfConfigured(): void {
     if (!this.persistenceFilePath) return;
     const serialized = {
@@ -161,6 +184,7 @@ export class SamAttRepository implements ISamAttRepository {
       pushHistory: this.pushHistory,
       auditLogs: this.auditLogs,
       revokedSessionJtis: Array.from(this.revokedSessionJtis),
+      userRevokedBeforeEntries: Array.from(this.userRevokedBeforeSec.entries()),
       rateLimitEntries: Array.from(this.rateLimits.entries()),
     };
     fs.writeFileSync(this.persistenceFilePath, JSON.stringify(serialized, null, 2), 'utf8');
@@ -184,6 +208,7 @@ export class SamAttRepository implements ISamAttRepository {
     this.pushHistory = parsed.pushHistory || [];
     this.auditLogs = parsed.auditLogs || [];
     this.revokedSessionJtis = new Set(parsed.revokedSessionJtis || []);
+    this.userRevokedBeforeSec = new Map(parsed.userRevokedBeforeEntries || []);
     this.rateLimits = new Map(parsed.rateLimitEntries || []);
   }
 
@@ -222,6 +247,7 @@ export class SamAttRepository implements ISamAttRepository {
    */
   public async withTransaction<T>(fn: (repo: this) => Promise<T> | T): Promise<T> {
     const runTx = async (): Promise<T> => {
+      this.reloadFromDiskIfConfigured();
       const snapshot: DatabaseSnapshot = {
         users: structuredClone(this.users),
         personnel: structuredClone(this.personnel),
@@ -236,6 +262,7 @@ export class SamAttRepository implements ISamAttRepository {
         pushHistory: structuredClone(this.pushHistory),
         auditLogs: structuredClone(this.auditLogs),
         revokedSessionJtis: new Set(this.revokedSessionJtis),
+        userRevokedBeforeSec: new Map(this.userRevokedBeforeSec),
         rateLimits: structuredClone(this.rateLimits),
       };
 
@@ -260,11 +287,27 @@ export class SamAttRepository implements ISamAttRepository {
         this.pushHistory = snapshot.pushHistory;
         this.auditLogs = snapshot.auditLogs;
         this.revokedSessionJtis = snapshot.revokedSessionJtis;
+        this.userRevokedBeforeSec = snapshot.userRevokedBeforeSec;
         this.rateLimits = snapshot.rateLimits;
         this.flushToDiskIfConfigured();
         throw err;
       }
     };
+
+    if (this.persistenceFilePath) {
+      const prevFileMutex =
+        SamAttRepository.sharedFileMutexes.get(this.persistenceFilePath) ||
+        Promise.resolve();
+      const nextFileMutex = prevFileMutex.then(runTx, runTx);
+      SamAttRepository.sharedFileMutexes.set(
+        this.persistenceFilePath,
+        nextFileMutex.then(
+          () => undefined,
+          () => undefined
+        )
+      );
+      return nextFileMutex;
+    }
 
     const nextInQueue = this.txMutexChain.then(runTx, runTx);
     this.txMutexChain = nextInQueue.then(
@@ -1324,11 +1367,12 @@ export class SamAttRepository implements ISamAttRepository {
   }
 
   // ==========================================
-  // Persistent Session Revocation & Login Rate Limiting (§9)
+  // Persistent Session Revocation & Distributed Login Rate Limiting (§3 & §9)
   // ==========================================
   public revokeSessionJti(jti: string, userId: string, expiresAtSec: number): void {
+    this.reloadFromDiskIfConfigured();
     this.recordSql(
-      'INSERT IGNORE INTO revoked_sessions (jti, user_id, expires_at_sec) VALUES (?, ?, ?)',
+      'INSERT INTO revoked_sessions (jti, user_id, expires_at_sec) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE expires_at_sec = VALUES(expires_at_sec)',
       [jti, userId, expiresAtSec]
     );
     this.revokedSessionJtis.add(jti);
@@ -1336,15 +1380,78 @@ export class SamAttRepository implements ISamAttRepository {
   }
 
   public isSessionJtiRevoked(jti: string): boolean {
+    this.reloadFromDiskIfConfigured();
     return this.revokedSessionJtis.has(jti);
   }
 
+  public revokeUserSessionsBefore(userId: string, revokedBeforeSec: number): void {
+    this.reloadFromDiskIfConfigured();
+    const prev = this.userRevokedBeforeSec.get(userId) || 0;
+    this.userRevokedBeforeSec.set(userId, Math.max(prev, revokedBeforeSec));
+    this.flushToDiskIfConfigured();
+  }
+
+  public getUserSessionsRevokedBefore(userId: string): number | null {
+    this.reloadFromDiskIfConfigured();
+    const val = this.userRevokedBeforeSec.get(userId);
+    return val !== undefined ? val : null;
+  }
+
   public getRateLimitEntry(rateKey: string): RepositoryRateLimitEntry | undefined {
+    this.reloadFromDiskIfConfigured();
     const entry = this.rateLimits.get(rateKey);
     return entry ? { ...entry } : undefined;
   }
 
+  public async recordFailedRateLimitAttempt(params: {
+    rateKey: string;
+    nowMs: number;
+    windowMs: number;
+    maxAttempts: number;
+    lockoutMs: number;
+  }): Promise<RepositoryRateLimitEntry> {
+    return this.withTransaction((tx) => {
+      const current = tx.rateLimits.get(params.rateKey);
+      let nextEntry: RepositoryRateLimitEntry;
+
+      if (!current || params.nowMs - current.firstFailedAtMs > params.windowMs) {
+        nextEntry = {
+          rateKey: params.rateKey,
+          failedAttempts: 1,
+          firstFailedAtMs: params.nowMs,
+          lockedUntilMs:
+            1 >= params.maxAttempts ? params.nowMs + params.lockoutMs : null,
+        };
+      } else {
+        const failedAttempts = current.failedAttempts + 1;
+        const lockedUntilMs =
+          failedAttempts >= params.maxAttempts
+            ? current.lockedUntilMs ?? params.nowMs + params.lockoutMs
+            : current.lockedUntilMs;
+        nextEntry = {
+          rateKey: params.rateKey,
+          failedAttempts,
+          firstFailedAtMs: current.firstFailedAtMs,
+          lockedUntilMs,
+        };
+      }
+
+      tx.recordSql(
+        'INSERT INTO auth_rate_limits (rate_key, failed_attempts, first_failed_at_ms, locked_until_ms) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE failed_attempts = VALUES(failed_attempts), first_failed_at_ms = VALUES(first_failed_at_ms), locked_until_ms = VALUES(locked_until_ms)',
+        [
+          nextEntry.rateKey,
+          nextEntry.failedAttempts,
+          nextEntry.firstFailedAtMs,
+          nextEntry.lockedUntilMs,
+        ]
+      );
+      tx.rateLimits.set(params.rateKey, nextEntry);
+      return { ...nextEntry };
+    });
+  }
+
   public saveRateLimitEntry(entry: RepositoryRateLimitEntry): void {
+    this.reloadFromDiskIfConfigured();
     this.recordSql(
       'INSERT INTO auth_rate_limits (rate_key, failed_attempts, first_failed_at_ms, locked_until_ms) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE failed_attempts = VALUES(failed_attempts), first_failed_at_ms = VALUES(first_failed_at_ms), locked_until_ms = VALUES(locked_until_ms)',
       [entry.rateKey, entry.failedAttempts, entry.firstFailedAtMs, entry.lockedUntilMs]
@@ -1354,6 +1461,7 @@ export class SamAttRepository implements ISamAttRepository {
   }
 
   public deleteRateLimitEntry(rateKey: string): void {
+    this.reloadFromDiskIfConfigured();
     this.recordSql('DELETE FROM auth_rate_limits WHERE rate_key = ?', [rateKey]);
     this.rateLimits.delete(rateKey);
     this.flushToDiskIfConfigured();
@@ -1362,16 +1470,34 @@ export class SamAttRepository implements ISamAttRepository {
 
 /**
  * Factory to create the appropriate Repository instance based on `RepositoryMode` (`MOCK` | `TEST` | `REAL`) (§2).
- * - `REAL` creates `MySqlSamAttRepository` with zero seed data and throws `DatabaseUnavailableError` if unconfigured.
+ * - In `NODE_ENV=production`, strictly requires `SAM_ATT_REPO_MODE=REAL` and `mode='REAL'` (never allows Mock/Test fallback).
+ * - `REAL` creates `MySqlSamAttRepository` with zero seed data and throws `DatabaseUnavailableError` if unconfigured/unreachable.
  */
 export function createRepositoryForMode(options?: {
   mode?: RepositoryMode;
   mysqlPoolOrConfig?: SqlConnectionPool | MySqlConnectionConfig;
   persistenceFilePath?: string;
 }): ISamAttRepository {
+  const isProduction = process.env.NODE_ENV === 'production';
+  const envModeRaw = process.env.SAM_ATT_REPO_MODE?.trim();
+
+  if (isProduction) {
+    if (envModeRaw !== 'REAL') {
+      throw new ProductionRepositoryConfigurationError(
+        `CRITICAL CONFIGURATION ERROR: NODE_ENV=production requires SAM_ATT_REPO_MODE=REAL (received: "${envModeRaw || 'undefined'}"). Mock or Test repositories are strictly prohibited in Production.`
+      );
+    }
+    if (options?.mode && options.mode !== 'REAL') {
+      throw new ProductionRepositoryConfigurationError(
+        `CRITICAL CONFIGURATION ERROR: Cannot request ${options.mode} repository when NODE_ENV=production. Only REAL repository mode is permitted.`
+      );
+    }
+    return new MySqlSamAttRepository(options?.mysqlPoolOrConfig);
+  }
+
   const mode: RepositoryMode =
     options?.mode ||
-    ((process.env.SAM_ATT_REPO_MODE as RepositoryMode) || 'MOCK');
+    ((envModeRaw as RepositoryMode) || 'MOCK');
 
   if (mode === 'REAL') {
     return new MySqlSamAttRepository(options?.mysqlPoolOrConfig);

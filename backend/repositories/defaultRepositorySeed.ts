@@ -3,7 +3,11 @@
  * Bridges initial dataset into `SamAttRepository` when no custom repository instance is injected.
  */
 
-import { SamAttRepository, RepositoryUserAccount } from './samAttRepository';
+import {
+  SamAttRepository,
+  RepositoryUserAccount,
+  ProductionRepositoryConfigurationError,
+} from './samAttRepository';
 import { AuthService } from '../services/authService';
 import {
   MOCK_PERSONNEL,
@@ -25,6 +29,14 @@ import {
 } from '../types';
 
 export function createDefaultSeededRepository(): SamAttRepository {
+  if (
+    process.env.NODE_ENV === 'production' ||
+    process.env.SAM_ATT_REPO_MODE?.trim() === 'REAL'
+  ) {
+    throw new ProductionRepositoryConfigurationError(
+      'CRITICAL CONFIGURATION ERROR: Seeded Mock Repository (createDefaultSeededRepository) is strictly prohibited in Production or REAL mode.'
+    );
+  }
   const users: RepositoryUserAccount[] = MOCK_USERS.map((u) => ({
     id: u.id,
     username: u.username,

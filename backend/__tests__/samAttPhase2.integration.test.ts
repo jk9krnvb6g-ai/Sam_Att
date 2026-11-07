@@ -28,13 +28,18 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import express from 'express';
-import { SamAttRepository } from '../repositories/samAttRepository';
+import {
+  SamAttRepository,
+  createRepositoryForMode,
+  ProductionRepositoryConfigurationError,
+} from '../repositories/samAttRepository';
 import {
   MySqlSamAttRepository,
   DatabaseUnavailableError,
   SqlConnectionPool,
   SqlQueryableConnection,
 } from '../repositories/mysqlSamAttRepository';
+import { createDefaultSeededRepository } from '../repositories/defaultRepositorySeed';
 import { AuthService } from '../services/authService';
 import { createSamAttRouter } from '../router';
 
@@ -1098,5 +1103,546 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
       false,
       'Migration must NOT use MariaDB-only ADD COLUMN IF NOT EXISTS syntax in executable SQL'
     );
+  });
+
+  it('Scenario 18: FIX #1 — Prevent Production Mock Repository Fallback (All 8 Required Production/Dev/Test Cases) (§2)', async () => {
+    const origNodeEnv = process.env.NODE_ENV;
+    const origRepoMode = process.env.SAM_ATT_REPO_MODE;
+    const origSecret = process.env.SAM_ATT_JWT_SECRET;
+    const origDbHost = process.env.SAM_ATT_DB_HOST;
+    const origDbUser = process.env.SAM_ATT_DB_USER;
+
+    process.env.SAM_ATT_JWT_SECRET =
+      'samchuk_hospital_production_jwt_secret_key_min_32_characters';
+
+    // Create mock and test repositories BEFORE switching NODE_ENV to 'production'
+    process.env.NODE_ENV = 'test';
+    const mockRepo = new SamAttRepository({}, { mode: 'MOCK' });
+    const testRepo = new SamAttRepository({}, { mode: 'TEST' });
+
+    const unavailablePool: SqlConnectionPool = {
+      async execute() {
+        throw new DatabaseUnavailableError(
+          'ECONNREFUSED 10.2.0.201:3306 — MySQL samchuk_attendance is unreachable in Production'
+        );
+      },
+      async getConnection() {
+        throw new DatabaseUnavailableError(
+          'ECONNREFUSED 10.2.0.201:3306 — MySQL samchuk_attendance is unreachable in Production'
+        );
+      },
+      async end() {},
+    };
+    const realRepo = new MySqlSamAttRepository(unavailablePool);
+
+    try {
+      // 1. Production + REAL Repository → Allowed
+      process.env.NODE_ENV = 'production';
+      process.env.SAM_ATT_REPO_MODE = 'REAL';
+      const prodRealRouter = createSamAttRouter(realRepo);
+      assert.ok(prodRealRouter, 'Production + REAL Repository must be allowed');
+
+      // 2. Production + MOCK Repository → Rejected
+      process.env.NODE_ENV = 'production';
+      process.env.SAM_ATT_REPO_MODE = 'MOCK';
+      assert.throws(
+        () => createSamAttRouter(),
+        (err: any) =>
+          err instanceof ProductionRepositoryConfigurationError &&
+          err.code === 'SAM_ATT_PRODUCTION_REPO_CONFIG_ERROR',
+        'Production + SAM_ATT_REPO_MODE=MOCK must be rejected'
+      );
+      process.env.SAM_ATT_REPO_MODE = 'REAL';
+      assert.throws(
+        () => createSamAttRouter(mockRepo),
+        (err: any) => err instanceof ProductionRepositoryConfigurationError,
+        'Production + injected MOCK repository must be rejected'
+      );
+      assert.throws(
+        () => new SamAttRepository({}, { mode: 'MOCK' }),
+        (err: any) => err instanceof ProductionRepositoryConfigurationError,
+        'Direct SamAttRepository(MOCK) instantiation in Production must be rejected'
+      );
+      assert.throws(
+        () => createDefaultSeededRepository(),
+        (err: any) => err instanceof ProductionRepositoryConfigurationError,
+        'createDefaultSeededRepository() in Production must be rejected'
+      );
+
+      // 3. Production + TEST Repository → Rejected
+      process.env.NODE_ENV = 'production';
+      process.env.SAM_ATT_REPO_MODE = 'TEST';
+      assert.throws(
+        () => createSamAttRouter(),
+        (err: any) => err instanceof ProductionRepositoryConfigurationError,
+        'Production + SAM_ATT_REPO_MODE=TEST must be rejected'
+      );
+      process.env.SAM_ATT_REPO_MODE = 'REAL';
+      assert.throws(
+        () => createSamAttRouter(testRepo),
+        (err: any) => err instanceof ProductionRepositoryConfigurationError,
+        'Production + injected TEST repository must be rejected'
+      );
+      assert.throws(
+        () => createRepositoryForMode({ mode: 'TEST' }),
+        (err: any) => err instanceof ProductionRepositoryConfigurationError,
+        'createRepositoryForMode({ mode: TEST }) in Production must be rejected'
+      );
+
+      // 4. Production + Missing Repository Mode → Rejected
+      process.env.NODE_ENV = 'production';
+      delete process.env.SAM_ATT_REPO_MODE;
+      assert.throws(
+        () => createSamAttRouter(),
+        (err: any) => err instanceof ProductionRepositoryConfigurationError,
+        'Production + Missing SAM_ATT_REPO_MODE must be rejected'
+      );
+      assert.throws(
+        () => createRepositoryForMode(),
+        (err: any) => err instanceof ProductionRepositoryConfigurationError,
+        'createRepositoryForMode() with missing SAM_ATT_REPO_MODE in Production must be rejected'
+      );
+
+      // 5. Development + MOCK Repository → Allowed
+      process.env.NODE_ENV = 'development';
+      process.env.SAM_ATT_REPO_MODE = 'MOCK';
+      const devMockRouter = createSamAttRouter(mockRepo);
+      assert.ok(devMockRouter, 'Development + MOCK Repository must be allowed');
+
+      // 6. Test + TEST Repository → Allowed
+      process.env.NODE_ENV = 'test';
+      process.env.SAM_ATT_REPO_MODE = 'TEST';
+      const testModeRouter = createSamAttRouter(testRepo);
+      assert.ok(testModeRouter, 'Test + TEST Repository must be allowed');
+
+      // 7 & 8. Production + MySQL Unavailable → HTTP 503 & No Silent Mock Fallback
+      process.env.NODE_ENV = 'production';
+      process.env.SAM_ATT_REPO_MODE = 'REAL';
+      delete process.env.SAM_ATT_DB_HOST;
+      delete process.env.SAM_ATT_DB_USER;
+
+      // Mount default router in Production with no arguments (unconfigured/unavailable MySQL)
+      const prodApp = express();
+      prodApp.use('/api/Sam_Att', createSamAttRouter());
+
+      const prodLoginRes = await invokeGatewayRoute(prodApp, {
+        method: 'POST',
+        url: '/api/Sam_Att/auth/login',
+        body: { username: 'admin_test', password: 'admin_secret_123' },
+      });
+      assert.equal(prodLoginRes.status, 503);
+      assert.equal(prodLoginRes.body.code, 'SAM_ATT_MYSQL_UNAVAILABLE');
+      assert.equal(prodLoginRes.body.repositoryMode, 'REAL');
+
+      // Issue a valid signed token and query `/api/Sam_Att/attendance` in Production when MySQL is unavailable -> HTTP 503, NEVER Mock Data!
+      const validProdToken = AuthService.issueSignedToken(
+        {
+          id: 'USR_ADMIN',
+          username: 'admin_test',
+          passwordHash: '',
+          fullName: 'นายสมศักดิ์ บริหารงาน',
+          role: 'ADMIN',
+          personId: null,
+          department: 'HR',
+          position: 'Admin',
+          active: true,
+        },
+        3600,
+        'REAL'
+      );
+
+      const prodAttRes = await invokeGatewayRoute(prodApp, {
+        method: 'GET',
+        url: '/api/Sam_Att/attendance',
+        headers: { Authorization: `Bearer ${validProdToken}` },
+      });
+      assert.equal(prodAttRes.status, 503);
+      assert.equal(prodAttRes.body.code, 'SAM_ATT_MYSQL_UNAVAILABLE');
+      assert.equal(prodAttRes.body.repositoryMode, 'REAL');
+      assert.equal(prodAttRes.body.items, undefined);
+    } finally {
+      if (origNodeEnv !== undefined) process.env.NODE_ENV = origNodeEnv;
+      else delete process.env.NODE_ENV;
+      if (origRepoMode !== undefined) process.env.SAM_ATT_REPO_MODE = origRepoMode;
+      else delete process.env.SAM_ATT_REPO_MODE;
+      if (origSecret !== undefined) process.env.SAM_ATT_JWT_SECRET = origSecret;
+      else delete process.env.SAM_ATT_JWT_SECRET;
+      if (origDbHost !== undefined) process.env.SAM_ATT_DB_HOST = origDbHost;
+      else delete process.env.SAM_ATT_DB_HOST;
+      if (origDbUser !== undefined) process.env.SAM_ATT_DB_USER = origDbUser;
+      else delete process.env.SAM_ATT_DB_USER;
+    }
+  });
+
+  it('Scenario 19: FIX #2 — Multi-Process Session Revocation, Atomic Distributed Rate Limiting & Fail-Closed Repository Tests (Fake SQL Pool & Multi-Process Simulation) (§3)', async () => {
+    const origSecret = process.env.SAM_ATT_JWT_SECRET;
+    process.env.SAM_ATT_JWT_SECRET =
+      'samchuk_hospital_distributed_security_secret_key_min_32_chars';
+
+    try {
+      // Shared state simulating a shared MySQL `samchuk_attendance` database accessed by Process A and Process B
+      const sharedRevokedJtis = new Map<string, { userId: string; expiresAtSec: number }>();
+      const sharedRateLimits = new Map<
+        string,
+        { failedAttempts: number; firstFailedAtMs: number; lockedUntilMs: number | null }
+      >();
+      const sharedAuditLogs: Array<{ action: string; summary: string; metadata: string }> = [];
+      let simulateRevocationRepoDown = false;
+      let simulateRateLimitRepoDown = false;
+      let sharedTxChain: Promise<unknown> = Promise.resolve();
+
+      const adminPasswordHash = AuthService.hashPassword('admin_secret_123');
+      const nursePasswordHash = AuthService.hashPassword('user_secret_123');
+
+      function createSharedFakeMySqlPool(): SqlConnectionPool {
+        const executeSql = async <T = any>(
+          sql: string,
+          params: ReadonlyArray<unknown> = []
+        ): Promise<[T, any]> => {
+          const norm = sql.trim();
+
+          if (norm.includes('revoked_sessions')) {
+            if (simulateRevocationRepoDown) {
+              throw new DatabaseUnavailableError(
+                'Revocation table query failed: MySQL connection lost (Fail Closed)'
+              );
+            }
+            if (norm.startsWith('INSERT INTO revoked_sessions')) {
+              const [jti, userId, expiresAtSec] = params as [string, string, number];
+              sharedRevokedJtis.set(String(jti), {
+                userId: String(userId),
+                expiresAtSec: Number(expiresAtSec),
+              });
+              return [{ affectedRows: 1 } as unknown as T, []];
+            }
+            if (norm.startsWith('SELECT jti FROM revoked_sessions')) {
+              const [jti] = params as [string];
+              const found = sharedRevokedJtis.has(String(jti));
+              return [(found ? [{ jti }] : []) as unknown as T, []];
+            }
+            if (norm.startsWith('SELECT expires_at_sec FROM revoked_sessions')) {
+              const [sentinelJti] = params as [string];
+              const entry = sharedRevokedJtis.get(String(sentinelJti));
+              return [
+                (entry ? [{ expires_at_sec: entry.expiresAtSec }] : []) as unknown as T,
+                [],
+              ];
+            }
+          }
+
+          if (norm.includes('auth_rate_limits')) {
+            if (simulateRateLimitRepoDown) {
+              throw new DatabaseUnavailableError(
+                'Rate limit table query failed: MySQL connection lost (Fail Closed)'
+              );
+            }
+            if (norm.startsWith('SELECT rate_key, failed_attempts')) {
+              const [rateKey] = params as [string];
+              const entry = sharedRateLimits.get(String(rateKey));
+              if (!entry) return [[] as unknown as T, []];
+              return [
+                [
+                  {
+                    rate_key: String(rateKey),
+                    failed_attempts: entry.failedAttempts,
+                    first_failed_at_ms: entry.firstFailedAtMs,
+                    locked_until_ms: entry.lockedUntilMs,
+                  },
+                ] as unknown as T,
+                [],
+              ];
+            }
+            if (norm.startsWith('INSERT INTO auth_rate_limits')) {
+              // Simulate MySQL InnoDB atomic `INSERT ... ON DUPLICATE KEY UPDATE`
+              const rateKey = String(params[0]);
+              const nowMs = Number(params[1]);
+              const lockedUntilIfFirst =
+                params[2] !== null && params[2] !== undefined ? Number(params[2]) : null;
+              const windowMs = Number(params[4]);
+              const maxAttempts = Number(params[11]);
+              const lockedUntilIfIncrement = Number(params[12]);
+
+              const existing = sharedRateLimits.get(rateKey);
+              if (!existing || nowMs - existing.firstFailedAtMs > windowMs) {
+                sharedRateLimits.set(rateKey, {
+                  failedAttempts: 1,
+                  firstFailedAtMs: nowMs,
+                  lockedUntilMs: lockedUntilIfFirst,
+                });
+              } else {
+                const nextAttempts = existing.failedAttempts + 1;
+                const nextLocked =
+                  nextAttempts >= maxAttempts
+                    ? existing.lockedUntilMs ?? lockedUntilIfIncrement
+                    : existing.lockedUntilMs;
+                sharedRateLimits.set(rateKey, {
+                  failedAttempts: nextAttempts,
+                  firstFailedAtMs: existing.firstFailedAtMs,
+                  lockedUntilMs: nextLocked,
+                });
+              }
+              return [{ affectedRows: 1 } as unknown as T, []];
+            }
+            if (norm.startsWith('DELETE FROM auth_rate_limits')) {
+              const [rateKey] = params as [string];
+              sharedRateLimits.delete(String(rateKey));
+              return [{ affectedRows: 1 } as unknown as T, []];
+            }
+          }
+
+          if (norm.includes('FROM users')) {
+            const param = String(params[0] || '').toLowerCase();
+            if (param === 'admin_test' || param === 'usr_admin') {
+              return [
+                [
+                  {
+                    id: 'USR_ADMIN',
+                    username: 'admin_test',
+                    password_hash: adminPasswordHash,
+                    full_name: 'นายสมศักดิ์ บริหารงาน',
+                    role: 'ADMIN',
+                    person_id: null,
+                    department: 'บริหารทั่วไป',
+                    position: 'นักวิชาการคอมพิวเตอร์',
+                    active: 1,
+                  },
+                ] as unknown as T,
+                [],
+              ];
+            }
+            if (param === 'nurse_kanda' || param === 'usr_gen_1') {
+              return [
+                [
+                  {
+                    id: 'USR_GEN_1',
+                    username: 'nurse_kanda',
+                    password_hash: nursePasswordHash,
+                    full_name: 'นางสาวกานดา สุขใจ',
+                    role: 'GENERAL_USER',
+                    person_id: 'P001',
+                    department: 'IPD',
+                    position: 'พยาบาลวิชาชีพ',
+                    active: 1,
+                  },
+                ] as unknown as T,
+                [],
+              ];
+            }
+            return [[] as unknown as T, []];
+          }
+
+          if (norm.startsWith('INSERT INTO audit_logs')) {
+            sharedAuditLogs.push({
+              action: String(params[3] || ''),
+              summary: String(params[6] || ''),
+              metadata: String(params[8] || ''),
+            });
+            return [{ affectedRows: 1 } as unknown as T, []];
+          }
+
+          return [[] as unknown as T, []];
+        };
+
+        return {
+          execute: executeSql,
+          async getConnection(): Promise<SqlQueryableConnection> {
+            let releaseLock!: () => void;
+            const prevLock = sharedTxChain;
+            sharedTxChain = new Promise<void>((resolve) => {
+              releaseLock = resolve;
+            });
+            await prevLock;
+
+            return {
+              execute: executeSql,
+              async beginTransaction() {},
+              async commit() {},
+              async rollback() {},
+              release() {
+                releaseLock();
+              },
+            };
+          },
+          async end() {},
+        };
+      }
+
+      // Instantiate Process A and Process B with two separate MySqlSamAttRepository instances (REAL mode)
+      const repoProcessA = new MySqlSamAttRepository(createSharedFakeMySqlPool());
+      const repoProcessB = new MySqlSamAttRepository(createSharedFakeMySqlPool());
+
+      const appProcessA = express();
+      appProcessA.use('/api/Sam_Att', createSamAttRouter(repoProcessA));
+
+      const appProcessB = express();
+      appProcessB.use('/api/Sam_Att', createSamAttRouter(repoProcessB));
+
+      // 1. Valid Login on Process A works normally when not locked out
+      const loginRes = await invokeGatewayRoute(appProcessA, {
+        method: 'POST',
+        url: '/api/Sam_Att/auth/login',
+        headers: { 'x-forwarded-for': '10.2.0.101' },
+        body: { username: 'nurse_kanda', password: 'user_secret_123' },
+      });
+      assert.equal(loginRes.status, 200);
+      const token = loginRes.body.token;
+      assert.ok(token);
+
+      // Verify token works on Process B before logout
+      const meOnB1 = await invokeGatewayRoute(appProcessB, {
+        method: 'GET',
+        url: '/api/Sam_Att/auth/me',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      assert.equal(meOnB1.status, 200);
+      assert.equal(meOnB1.body.user.username, 'nurse_kanda');
+
+      // 2. Revocation Repository Unavailable on Logout -> Fail Closed (HTTP 503, does NOT report logout success)
+      simulateRevocationRepoDown = true;
+      const failedLogoutOnA = await invokeGatewayRoute(appProcessA, {
+        method: 'POST',
+        url: '/api/Sam_Att/auth/logout',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      assert.equal(failedLogoutOnA.status, 503);
+
+      // 3. Revocation Repository Unavailable on Authenticated Request -> Fail Closed (HTTP 503, NEVER trusts cache to allow token)
+      const failClosedAuthOnB = await invokeGatewayRoute(appProcessB, {
+        method: 'GET',
+        url: '/api/Sam_Att/auth/me',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      assert.equal(failClosedAuthOnB.status, 503);
+      simulateRevocationRepoDown = false;
+
+      // 4. Process A Logout -> Persists to Repository -> Process B Immediately Rejects Token (401)
+      const logoutOnA = await invokeGatewayRoute(appProcessA, {
+        method: 'POST',
+        url: '/api/Sam_Att/auth/logout',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      assert.equal(logoutOnA.status, 200);
+
+      // Clear in-memory cache completely to prove REAL mode never relies on in-memory cache
+      AuthService.resetSecurityStateForTests();
+
+      const rejectedOnA = await invokeGatewayRoute(appProcessA, {
+        method: 'GET',
+        url: '/api/Sam_Att/auth/me',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      assert.equal(rejectedOnA.status, 401);
+
+      const rejectedOnB = await invokeGatewayRoute(appProcessB, {
+        method: 'GET',
+        url: '/api/Sam_Att/auth/me',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      assert.equal(rejectedOnB.status, 401);
+
+      // Verify raw token and secret are NEVER written to Audit Logs (§3 Problem A #6)
+      assert.equal(
+        sharedAuditLogs.some(
+          (l) =>
+            l.summary.includes(token) ||
+            l.metadata.includes(token) ||
+            l.summary.includes('samchuk_hospital_distributed_security_secret')
+        ),
+        false,
+        'Audit logs must NEVER contain raw session tokens or signing secrets'
+      );
+
+      // 5. Process A and Process B see the same Distributed Rate Limit state
+      // Send 2 failed attempts to Process A, 2 failed attempts to Process B, and the 5th failed attempt to Process A
+      for (let i = 1; i <= 2; i++) {
+        const resA = await invokeGatewayRoute(appProcessA, {
+          method: 'POST',
+          url: '/api/Sam_Att/auth/login',
+          headers: { 'x-forwarded-for': '10.2.0.150' },
+          body: { username: 'admin_test', password: `wrong_A_${i}` },
+        });
+        assert.equal(resA.status, 401);
+      }
+      for (let i = 1; i <= 2; i++) {
+        const resB = await invokeGatewayRoute(appProcessB, {
+          method: 'POST',
+          url: '/api/Sam_Att/auth/login',
+          headers: { 'x-forwarded-for': '10.2.0.150' },
+          body: { username: 'admin_test', password: `wrong_B_${i}` },
+        });
+        assert.equal(resB.status, 401);
+      }
+      // 5th attempt on Process B triggers lockout (HTTP 429)
+      const fifthOnB = await invokeGatewayRoute(appProcessB, {
+        method: 'POST',
+        url: '/api/Sam_Att/auth/login',
+        headers: { 'x-forwarded-for': '10.2.0.150' },
+        body: { username: 'admin_test', password: 'wrong_B_5' },
+      });
+      assert.equal(fifthOnB.status, 429);
+
+      // Process A immediately sees the lockout produced on Process B (even with the correct password!)
+      const blockedOnA = await invokeGatewayRoute(appProcessA, {
+        method: 'POST',
+        url: '/api/Sam_Att/auth/login',
+        headers: { 'x-forwarded-for': '10.2.0.150' },
+        body: { username: 'admin_test', password: 'admin_secret_123' },
+      });
+      assert.equal(blockedOnA.status, 429);
+
+      // 6. Concurrent Failed Attempts across Process A and Process B do NOT lose increments
+      const concurrentResponses = await Promise.all(
+        [1, 2, 3, 4, 5].map((idx) =>
+          invokeGatewayRoute(idx % 2 === 0 ? appProcessA : appProcessB, {
+            method: 'POST',
+            url: '/api/Sam_Att/auth/login',
+            headers: { 'x-forwarded-for': '10.2.0.199' },
+            body: { username: 'nurse_kanda', password: `concurrent_wrong_${idx}` },
+          })
+        )
+      );
+
+      const recordedEntry = sharedRateLimits.get('nurse_kanda@10.2.0.199');
+      assert.ok(recordedEntry, 'Rate limit entry must exist after concurrent attempts');
+      assert.equal(
+        recordedEntry.failedAttempts,
+        5,
+        'All 5 concurrent failed attempts across Process A and Process B must be counted atomically with zero lost increments'
+      );
+      assert.ok(
+        recordedEntry.lockedUntilMs && recordedEntry.lockedUntilMs > Date.now(),
+        'Account must be locked after 5 concurrent failed attempts'
+      );
+      assert.ok(
+        concurrentResponses.some((r) => r.status === 429),
+        'At least one of the 5 concurrent requests (the 5th processed) must receive HTTP 429'
+      );
+
+      // Subsequent attempt on either process returns 429
+      const postConcurrentAttempt = await invokeGatewayRoute(appProcessA, {
+        method: 'POST',
+        url: '/api/Sam_Att/auth/login',
+        headers: { 'x-forwarded-for': '10.2.0.199' },
+        body: { username: 'nurse_kanda', password: 'user_secret_123' },
+      });
+      assert.equal(postConcurrentAttempt.status, 429);
+
+      // 7. Rate Limit Repository Unavailable -> Fail Closed (HTTP 503, never bypasses rate limit to allow login)
+      simulateRateLimitRepoDown = true;
+      const loginWhenRateLimitRepoDown = await invokeGatewayRoute(appProcessB, {
+        method: 'POST',
+        url: '/api/Sam_Att/auth/login',
+        headers: { 'x-forwarded-for': '10.2.0.210' },
+        body: { username: 'nurse_kanda', password: 'user_secret_123' },
+      });
+      assert.equal(loginWhenRateLimitRepoDown.status, 503);
+      simulateRateLimitRepoDown = false;
+    } finally {
+      if (origSecret !== undefined) {
+        process.env.SAM_ATT_JWT_SECRET = origSecret;
+      } else {
+        delete process.env.SAM_ATT_JWT_SECRET;
+      }
+    }
   });
 });

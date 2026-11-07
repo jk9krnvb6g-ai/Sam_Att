@@ -14,7 +14,10 @@
 
 import { Router, Request, Response, NextFunction } from 'express';
 import { ISamAttRepository } from './repositories/interfaces';
-import { createRepositoryForMode } from './repositories/samAttRepository';
+import {
+  createRepositoryForMode,
+  ProductionRepositoryConfigurationError,
+} from './repositories/samAttRepository';
 import { DatabaseUnavailableError } from './repositories/mysqlSamAttRepository';
 import { createDefaultSeededRepository } from './repositories/defaultRepositorySeed';
 import { AuthService } from './services/authService';
@@ -22,13 +25,40 @@ import { ScannerAdapter } from './services/scannerAdapter';
 import { HosOfficeAdapter } from './services/hosofficeAdapter';
 import { AuthenticatedUser, EngineHRReviewStatus } from './types';
 
+export { ProductionRepositoryConfigurationError };
+
 export function createSamAttRouter(customRepository?: ISamAttRepository): Router {
+  const isProduction = process.env.NODE_ENV === 'production';
+  const envRepoMode = process.env.SAM_ATT_REPO_MODE?.trim();
+
+  // FIX #1 (§2): In Production, strictly require SAM_ATT_REPO_MODE=REAL and forbid Mock/Test repositories
+  if (isProduction) {
+    if (envRepoMode !== 'REAL') {
+      throw new ProductionRepositoryConfigurationError(
+        `CRITICAL CONFIGURATION ERROR: NODE_ENV=production requires SAM_ATT_REPO_MODE=REAL (received: "${envRepoMode || 'undefined'}"). Mock or Test repositories are strictly prohibited in Production.`
+      );
+    }
+    if (customRepository && customRepository.mode !== 'REAL') {
+      throw new ProductionRepositoryConfigurationError(
+        `CRITICAL CONFIGURATION ERROR: Cannot mount Sam_Att Router with ${customRepository.mode} repository when NODE_ENV=production. Only REAL MySQL repository is permitted in Production.`
+      );
+    }
+  }
+
   const router = Router();
   const repo: ISamAttRepository =
     customRepository ||
-    (process.env.SAM_ATT_REPO_MODE === 'REAL'
+    (isProduction || envRepoMode === 'REAL'
       ? createRepositoryForMode({ mode: 'REAL' })
+      : envRepoMode === 'TEST'
+      ? createRepositoryForMode({ mode: 'TEST' })
       : createDefaultSeededRepository());
+
+  if (isProduction && repo.mode !== 'REAL') {
+    throw new ProductionRepositoryConfigurationError(
+      `CRITICAL CONFIGURATION ERROR: Production requires REAL repository mode, but resolved mode is "${repo.mode}".`
+    );
+  }
 
   // Enforce SAM_ATT_JWT_SECRET in REAL / production mode (§4)
   AuthService.assertRealModeSecretConfigured(repo.mode);
@@ -66,24 +96,40 @@ export function createSamAttRouter(customRepository?: ISamAttRepository): Router
         req.ip ||
         '127.0.0.1';
 
-      const authRes = await AuthService.authenticateCredentials(
-        repo,
-        username,
-        password,
-        clientIp
-      );
-      if (!authRes.success) {
-        return res.status(authRes.statusCode).json({
+      try {
+        const authRes = await AuthService.authenticateCredentials(
+          repo,
+          username,
+          password,
+          clientIp
+        );
+        if (!authRes.success) {
+          return res.status(authRes.statusCode).json({
+            success: false,
+            error: authRes.error,
+            retryAfterSeconds: authRes.retryAfterSeconds,
+          });
+        }
+        return res.json({
+          success: true,
+          token: authRes.token,
+          user: authRes.user,
+        });
+      } catch (err: unknown) {
+        if (err instanceof DatabaseUnavailableError) {
+          throw err;
+        }
+        // Fail closed (HTTP 503) if rate-limit or auth repository fails — never bypass rate limit!
+        return res.status(503).json({
           success: false,
-          error: authRes.error,
-          retryAfterSeconds: authRes.retryAfterSeconds,
+          code: 'SAM_ATT_SECURITY_REPO_UNAVAILABLE',
+          repositoryMode: repo.mode,
+          error:
+            err instanceof Error
+              ? err.message
+              : 'Authentication/Rate-Limit repository unavailable (Fail Closed)',
         });
       }
-      return res.json({
-        success: true,
-        token: authRes.token,
-        user: authRes.user,
-      });
     })
   );
 
@@ -111,19 +157,47 @@ export function createSamAttRouter(customRepository?: ISamAttRepository): Router
     asyncRoute(async (req: Request, res: Response) => {
       const user = (req as any).user as AuthenticatedUser;
       const rawToken = (req as any).rawToken as string | undefined;
-      if (rawToken) {
-        await AuthService.revokeToken(rawToken, repo.mode, repo);
+
+      try {
+        if (rawToken) {
+          const revoked = await AuthService.revokeToken(rawToken, repo.mode, repo);
+          if (!revoked) {
+            return res.status(400).json({
+              success: false,
+              error: 'ไม่สามารถเพิกถอน Session Token ได้',
+            });
+          }
+        } else if (repo.mode === 'REAL' || process.env.NODE_ENV === 'production') {
+          return res.status(401).json({
+            success: false,
+            error: 'Missing Bearer session token for logout',
+          });
+        }
+
+        await repo.recordAuditLog({
+          actor: user.username,
+          actorName: user.fullName,
+          actorRole: user.role,
+          action: 'AUTH_LOGOUT',
+          entityType: 'User',
+          entityId: user.userId,
+          summary: `ผู้ใช้งาน ${user.username} ออกจากระบบและเพิกถอน Session Token`,
+        });
+        return res.json({ success: true, message: 'Logged out and session token revoked' });
+      } catch (err: unknown) {
+        if (err instanceof DatabaseUnavailableError) {
+          throw err;
+        }
+        return res.status(503).json({
+          success: false,
+          code: 'SAM_ATT_SECURITY_REPO_UNAVAILABLE',
+          repositoryMode: repo.mode,
+          error:
+            err instanceof Error
+              ? err.message
+              : 'Session revocation repository unavailable (Fail Closed)',
+        });
       }
-      await repo.recordAuditLog({
-        actor: user.username,
-        actorName: user.fullName,
-        actorRole: user.role,
-        action: 'AUTH_LOGOUT',
-        entityType: 'User',
-        entityId: user.userId,
-        summary: `ผู้ใช้งาน ${user.username} ออกจากระบบและเพิกถอน Session Token`,
-      });
-      res.json({ success: true, message: 'Logged out and session token revoked' });
     })
   );
 
