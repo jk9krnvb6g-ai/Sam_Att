@@ -43,6 +43,8 @@ import {
   MOCK_SHIFT_ASSIGNMENTS,
   MOCK_SCHEDULED_DAY_OFFS,
 } from '../mock/mockData';
+import { ScannerAdapter } from '../../backend/services/scannerAdapter';
+import { AttendanceCalculator } from '../../backend/services/attendanceCalculator';
 
 export const CURRENT_SYSTEM_DATE = '2026-11-06';
 
@@ -529,8 +531,17 @@ class MockAttendanceService {
     const activeFingleIds = new Set(this.personnel.filter((p) => p.active).map((p) => p.fingleId));
 
     for (const scan of incomingScans) {
-      const dedupeKey = `${scan.machineNo}_${scan.enrollNumber}_${scan.scanDateTime}`;
-      const isMapped = activeFingleIds.has(scan.enrollNumber);
+      const validation = ScannerAdapter.validateScanRecord(scan);
+      if (!validation.valid) {
+        continue;
+      }
+      const validScan = validation.value;
+      const dedupeKey = ScannerAdapter.generateDedupeKey(
+        validScan.machineNo,
+        validScan.enrollNumber,
+        validScan.scanDateTime
+      );
+      const isMapped = activeFingleIds.has(validScan.enrollNumber);
       if (!isMapped) {
         unmappedCount++;
       }
@@ -540,18 +551,18 @@ class MockAttendanceService {
         continue;
       }
 
-      const newEvent: RawScanEvent = {
+      const newEvent: RawScanEvent = Object.freeze({
         id: `RAW_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-        machineNo: scan.machineNo,
-        enrollNumber: scan.enrollNumber,
-        scanDateTime: scan.scanDateTime,
-        verifyMode: scan.verifyMode,
-        inOutMode: scan.inOutMode,
-        workCode: scan.workCode,
+        machineNo: validScan.machineNo,
+        enrollNumber: validScan.enrollNumber,
+        scanDateTime: validScan.scanDateTime,
+        verifyMode: validScan.verifyMode,
+        inOutMode: validScan.inOutMode,
+        workCode: validScan.workCode,
         importedAt: nowIso,
         dedupeKey,
         isNew: true,
-      };
+      });
 
       existingKeys.add(dedupeKey);
       this.rawScans.unshift(newEvent);
@@ -961,28 +972,70 @@ class MockAttendanceService {
       }
 
       reprocessed++;
-      const key = `${att.fingleId}_${att.workDate}`;
-      const scans = [...(rawByPersonDate.get(key) || [])].sort((a, b) =>
-        a.scanDateTime.localeCompare(b.scanDateTime)
-      );
 
-      if (scans.length > 0) {
-        const shift =
-          this.shifts.find((s) => s.id === att.shiftId) || this.shifts[3];
-        const shiftStart = att.shiftStartTime || shift.startTime;
-        const graceMins = att.graceMinutes ?? shift.graceMinutes ?? 15;
+      // Resolve shift configuration and compute exact shift window (supports multi-shift & cross-midnight)
+      const shift =
+        this.shifts.find((s) => s.id === att.shiftId) || this.shifts[3];
+      const shiftStart = att.shiftStartTime || shift.startTime;
+      const shiftEnd = att.shiftEndTime || shift.endTime;
+      const graceMins = att.graceMinutes ?? shift.graceMinutes ?? 15;
+      const crossMidnight = Boolean(att.crossMidnight ?? shift.crossMidnight);
 
-        const firstScan = scans[0];
-        const lastScan = scans.length > 1 ? scans[scans.length - 1] : null;
+      const shiftWindow = AttendanceCalculator.computeShiftWindow(att.workDate, {
+        startTime: shiftStart,
+        endTime: shiftEnd,
+        crossMidnight,
+        graceMinutes: graceMins,
+        earlyScanWindowMinutes: shift.earlyScanWindowMinutes ?? 180,
+        lateScanWindowMinutes: shift.lateScanWindowMinutes ?? 240,
+      });
+
+      // Match raw scans for this person that fall inside THIS shift's real epoch window
+      const personScansInWindow = this.rawScans
+        .filter((raw) => {
+          if (raw.enrollNumber !== att.fingleId) return false;
+          const epochMs = ScannerAdapter.parseScanDateTimeToEpochMs(raw.scanDateTime);
+          if (epochMs === null) return false;
+          return (
+            epochMs >= shiftWindow.earlyCheckInStartMs &&
+            epochMs <= shiftWindow.lateCheckOutEndMs
+          );
+        })
+        .sort((a, b) => a.scanDateTime.localeCompare(b.scanDateTime));
+
+      if (personScansInWindow.length > 0) {
+        const checkInCandidates = personScansInWindow.filter((s) => {
+          const ms = ScannerAdapter.parseScanDateTimeToEpochMs(s.scanDateTime)!;
+          return ms <= shiftWindow.lateCheckInMaxMs;
+        });
+        const firstScan = checkInCandidates[0] || personScansInWindow[0];
+        const firstScanMs = ScannerAdapter.parseScanDateTimeToEpochMs(
+          firstScan.scanDateTime
+        )!;
+
+        // Avoid treating a rapid second tap within 20 minutes of check-in as check-out
+        const checkOutCandidates = personScansInWindow.filter((s) => {
+          if (s.id === firstScan.id) return false;
+          const ms = ScannerAdapter.parseScanDateTimeToEpochMs(s.scanDateTime)!;
+          return ms - firstScanMs >= 20 * 60000;
+        });
+        const lastScan =
+          checkOutCandidates.length > 0
+            ? checkOutCandidates[checkOutCandidates.length - 1]
+            : null;
+
         const checkInTime =
           att.checkInAt || firstScan.scanDateTime.split(' ')[1];
         const checkOutTime =
           att.checkOutAt ||
-          (lastScan && lastScan.id !== firstScan.id
-            ? lastScan.scanDateTime.split(' ')[1]
-            : null);
+          (lastScan ? lastScan.scanDateTime.split(' ')[1] : null);
 
-        const lateCalc = this.calculateLate(checkInTime, shiftStart, graceMins);
+        const lateCalc = AttendanceCalculator.calculateLate(checkInTime, {
+          startTime: shiftStart,
+          endTime: shiftEnd,
+          graceMinutes: graceMins,
+          crossMidnight,
+        });
         const previousStatus = att.status;
         const previousCheckOut = att.checkOutAt;
 
@@ -1092,8 +1145,8 @@ class MockAttendanceService {
         responseStatus: 'SUCCESS',
         responseSummary:
           att.status === 'NO_SCAN' && att.notes
-            ? `บันทึกหมายเหตุ (${att.notes.reasonLabel}) สำเร็จ [HOS-BATCH-${nowIso.slice(0, 10)}]`
-            : `บันทึกเวลาเข้า (${att.checkInAt || 'ไม่มี'}) สถานะ ${att.status} สำเร็จ`,
+            ? `[Phase 2 Preview / Dry-Run] ตรวจสอบ Payload หมายเหตุ (${att.notes.reasonLabel}) สำเร็จ (ยังไม่ได้เขียนลง HOSOffice จริง)`
+            : `[Phase 2 Preview / Dry-Run] ตรวจสอบ Payload เวลาเข้า (${att.checkInAt || 'ไม่มี'}) สถานะ ${att.status} สำเร็จ (ยังไม่ได้เขียนลง HOSOffice จริง)`,
       };
 
       att.isPushedToHosOffice = true;

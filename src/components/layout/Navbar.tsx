@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { Shield, UserCheck, User, LogOut, Sparkles } from 'lucide-react';
+import { apiAttendanceAdapter, DataSourceMode } from '../../services/apiAttendanceAdapter';
+import { Shield, UserCheck, User, LogOut, Sparkles, Database } from 'lucide-react';
 
 interface NavbarProps {
   onToggleSidebar?: () => void;
@@ -9,6 +10,26 @@ interface NavbarProps {
 
 export const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar }) => {
   const { currentUser, logout, switchUser, availableUsers } = useAuth();
+  const [dataMode, setDataMode] = useState<DataSourceMode>(() =>
+    apiAttendanceAdapter.getDataSourceMode()
+  );
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const custom = e as CustomEvent<{ mode: DataSourceMode }>;
+      if (custom.detail?.mode) {
+        setDataMode(custom.detail.mode);
+      }
+    };
+    window.addEventListener('sam-att-data-mode-changed', handler);
+    return () => window.removeEventListener('sam-att-data-mode-changed', handler);
+  }, []);
+
+  const handleToggleDataMode = () => {
+    const next: DataSourceMode = dataMode === 'MOCK' ? 'API' : 'MOCK';
+    apiAttendanceAdapter.setDataSourceMode(next);
+    setDataMode(next);
+  };
 
   const getRoleBadge = (role: string) => {
     switch (role) {
@@ -40,14 +61,28 @@ export const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar }) => {
 
   return (
     <header className="sticky top-0 z-40 bg-white border-b border-[#E9E5F2] shadow-2xs">
-      {/* Prototype Role Switcher & Mock Status Banner */}
+      {/* Prototype Role Switcher & Mock/API Adapter Status Banner */}
       <div className="bg-gradient-to-r from-violet-950 via-violet-900 to-purple-900 px-4 py-1.5 text-xs text-violet-100 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <Sparkles className="w-3.5 h-3.5 text-violet-300 shrink-0" />
-          <span className="font-semibold text-white">โหมดทดสอบระบบ (UI Prototype & Mock Data):</span>
-          <span className="text-violet-200">
-            จำลองการเชื่อมต่อเครื่องสแกน 3 จุด, ฐานข้อมูล samchuk_attendance และ HOSOffice ด้วย Mock State
+          <span className="font-semibold text-white">
+            {dataMode === 'MOCK'
+              ? 'โหมดข้อมูล: Mock Adapter (UI Prototype & Phase 1 Engine):'
+              : 'โหมดข้อมูล: API Adapter (/api/Sam_Att/ Gateway):'}
           </span>
+          <span className="text-violet-200">
+            {dataMode === 'MOCK'
+              ? 'ประมวลผลด้วย Phase 1 Attendance Engine บน Shared In-Memory State'
+              : 'เชื่อมต่อผ่าน Central API Gateway (/api/Sam_Att/) พร้อมตรวจสอบสิทธิ์ฝั่ง Backend'}
+          </span>
+          <button
+            onClick={handleToggleDataMode}
+            className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md bg-white/15 hover:bg-white/25 text-white border border-white/20 cursor-pointer transition-colors"
+            title="สลับแหล่งข้อมูลระหว่าง Mock Adapter และ API Adapter (/api/Sam_Att/)"
+          >
+            <Database className="w-3 h-3 text-violet-200" />
+            <span>สลับเป็น {dataMode === 'MOCK' ? 'API Mode' : 'Mock Mode'}</span>
+          </button>
         </div>
 
         {/* Quick Persona Switcher for effortless GitHub & client testing */}
