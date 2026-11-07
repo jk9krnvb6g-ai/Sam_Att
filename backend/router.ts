@@ -112,7 +112,7 @@ export function createSamAttRouter(customRepository?: ISamAttRepository): Router
       const user = (req as any).user as AuthenticatedUser;
       const rawToken = (req as any).rawToken as string | undefined;
       if (rawToken) {
-        AuthService.revokeToken(rawToken, repo.mode);
+        await AuthService.revokeToken(rawToken, repo.mode, repo);
       }
       await repo.recordAuditLog({
         actor: user.username,

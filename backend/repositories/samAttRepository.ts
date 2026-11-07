@@ -30,6 +30,7 @@ import {
   RepositoryAuditLog,
   RepositoryMode,
   RepositoryPushHistory,
+  RepositoryRateLimitEntry,
   RepositoryShiftCancellationLog,
   RepositoryUserAccount,
 } from './interfaces';
@@ -48,6 +49,7 @@ export type {
   RepositoryAuditLog,
   RepositoryMode,
   RepositoryPushHistory,
+  RepositoryRateLimitEntry,
   RepositoryShiftCancellationLog,
   RepositoryUserAccount,
 };
@@ -66,6 +68,8 @@ interface DatabaseSnapshot {
   reviewHistory: Map<string, EngineHRReviewHistoryItem[]>;
   pushHistory: RepositoryPushHistory[];
   auditLogs: RepositoryAuditLog[];
+  revokedSessionJtis: Set<string>;
+  rateLimits: Map<string, RepositoryRateLimitEntry>;
 }
 
 export class SamAttRepository implements ISamAttRepository {
@@ -85,6 +89,8 @@ export class SamAttRepository implements ISamAttRepository {
   private reviewHistory = new Map<string, EngineHRReviewHistoryItem[]>();
   private pushHistory: RepositoryPushHistory[] = [];
   private auditLogs: RepositoryAuditLog[] = [];
+  private revokedSessionJtis = new Set<string>();
+  private rateLimits = new Map<string, RepositoryRateLimitEntry>();
   private parameterizedQueryLog: ParameterizedSqlRecord[] = [];
 
   constructor(
@@ -154,6 +160,8 @@ export class SamAttRepository implements ISamAttRepository {
       reviewHistoryEntries: Array.from(this.reviewHistory.entries()),
       pushHistory: this.pushHistory,
       auditLogs: this.auditLogs,
+      revokedSessionJtis: Array.from(this.revokedSessionJtis),
+      rateLimitEntries: Array.from(this.rateLimits.entries()),
     };
     fs.writeFileSync(this.persistenceFilePath, JSON.stringify(serialized, null, 2), 'utf8');
   }
@@ -175,6 +183,8 @@ export class SamAttRepository implements ISamAttRepository {
     this.reviewHistory = new Map(parsed.reviewHistoryEntries || []);
     this.pushHistory = parsed.pushHistory || [];
     this.auditLogs = parsed.auditLogs || [];
+    this.revokedSessionJtis = new Set(parsed.revokedSessionJtis || []);
+    this.rateLimits = new Map(parsed.rateLimitEntries || []);
   }
 
   public async checkHealth(): Promise<{
@@ -225,6 +235,8 @@ export class SamAttRepository implements ISamAttRepository {
         reviewHistory: structuredClone(this.reviewHistory),
         pushHistory: structuredClone(this.pushHistory),
         auditLogs: structuredClone(this.auditLogs),
+        revokedSessionJtis: new Set(this.revokedSessionJtis),
+        rateLimits: structuredClone(this.rateLimits),
       };
 
       this.recordSql('START TRANSACTION', []);
@@ -247,6 +259,8 @@ export class SamAttRepository implements ISamAttRepository {
         this.reviewHistory = snapshot.reviewHistory;
         this.pushHistory = snapshot.pushHistory;
         this.auditLogs = snapshot.auditLogs;
+        this.revokedSessionJtis = snapshot.revokedSessionJtis;
+        this.rateLimits = snapshot.rateLimits;
         this.flushToDiskIfConfigured();
         throw err;
       }
@@ -1307,6 +1321,42 @@ export class SamAttRepository implements ISamAttRepository {
 
   public getPushHistory(): RepositoryPushHistory[] {
     return structuredClone(this.pushHistory);
+  }
+
+  // ==========================================
+  // Persistent Session Revocation & Login Rate Limiting (§9)
+  // ==========================================
+  public revokeSessionJti(jti: string, userId: string, expiresAtSec: number): void {
+    this.recordSql(
+      'INSERT IGNORE INTO revoked_sessions (jti, user_id, expires_at_sec) VALUES (?, ?, ?)',
+      [jti, userId, expiresAtSec]
+    );
+    this.revokedSessionJtis.add(jti);
+    this.flushToDiskIfConfigured();
+  }
+
+  public isSessionJtiRevoked(jti: string): boolean {
+    return this.revokedSessionJtis.has(jti);
+  }
+
+  public getRateLimitEntry(rateKey: string): RepositoryRateLimitEntry | undefined {
+    const entry = this.rateLimits.get(rateKey);
+    return entry ? { ...entry } : undefined;
+  }
+
+  public saveRateLimitEntry(entry: RepositoryRateLimitEntry): void {
+    this.recordSql(
+      'INSERT INTO auth_rate_limits (rate_key, failed_attempts, first_failed_at_ms, locked_until_ms) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE failed_attempts = VALUES(failed_attempts), first_failed_at_ms = VALUES(first_failed_at_ms), locked_until_ms = VALUES(locked_until_ms)',
+      [entry.rateKey, entry.failedAttempts, entry.firstFailedAtMs, entry.lockedUntilMs]
+    );
+    this.rateLimits.set(entry.rateKey, { ...entry });
+    this.flushToDiskIfConfigured();
+  }
+
+  public deleteRateLimitEntry(rateKey: string): void {
+    this.recordSql('DELETE FROM auth_rate_limits WHERE rate_key = ?', [rateKey]);
+    this.rateLimits.delete(rateKey);
+    this.flushToDiskIfConfigured();
   }
 }
 

@@ -33,6 +33,7 @@ import {
   RepositoryAuditLog,
   RepositoryMode,
   RepositoryPushHistory,
+  RepositoryRateLimitEntry,
   RepositoryShiftCancellationLog,
   RepositoryUserAccount,
 } from './interfaces';
@@ -1127,15 +1128,19 @@ export class MySqlSamAttRepository implements ISamAttRepository {
   // ==========================================
   // 6. Attendance, Reprocess & HR Notes
   // ==========================================
-  private async fetchHydratedAttendanceAll(): Promise<EngineAttendanceRecord[]> {
+  private async fetchHydratedAttendanceAll(
+    whereClauseSql = '',
+    whereParams: unknown[] = []
+  ): Promise<EngineAttendanceRecord[]> {
     const attRows = await this.queryRows(
       `SELECT a.*, p.fingle_id_current, p.prefix, p.first_name, p.last_name, p.department, p.group_name, p.personnel_type,
               s.name AS shift_name, s.start_time AS shift_start_time, s.end_time AS shift_end_time, s.cross_midnight, s.grace_minutes, s.category AS shift_category
        FROM attendance a
        LEFT JOIN personnel p ON p.person_id = a.person_id
        LEFT JOIN shifts s ON s.id = a.shift_id
+       ${whereClauseSql}
        ORDER BY a.work_date DESC`,
-      []
+      whereParams
     );
 
     const noteRows = await this.queryRows(
@@ -1478,7 +1483,41 @@ export class MySqlSamAttRepository implements ISamAttRepository {
     page: number;
     pageSize: number;
   }> {
-    let list = await this.fetchHydratedAttendanceAll();
+    const whereClauses: string[] = [];
+    const whereParams: unknown[] = [];
+
+    if (filters?.workDate) {
+      whereClauses.push('a.work_date = ?');
+      whereParams.push(filters.workDate);
+    }
+    if (filters?.fromDate) {
+      whereClauses.push('a.work_date >= ?');
+      whereParams.push(filters.fromDate);
+    }
+    if (filters?.toDate) {
+      whereClauses.push('a.work_date <= ?');
+      whereParams.push(filters.toDate);
+    }
+    if (filters?.personId) {
+      whereClauses.push('a.person_id = ?');
+      whereParams.push(filters.personId);
+    }
+    if (filters?.department && filters.department !== 'ALL') {
+      whereClauses.push('(p.department = ? OR p.group_name = ?)');
+      whereParams.push(filters.department, filters.department);
+    }
+    if (filters?.status && filters.status !== 'ALL') {
+      whereClauses.push('a.status = ?');
+      whereParams.push(filters.status);
+    }
+    if (filters?.hrReviewStatus && filters.hrReviewStatus !== 'ALL') {
+      whereClauses.push('a.hr_review_status = ?');
+      whereParams.push(filters.hrReviewStatus);
+    }
+
+    const whereSql =
+      whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+    let list = await this.fetchHydratedAttendanceAll(whereSql, whereParams);
 
     if (filters?.workDate) {
       list = list.filter((a) => a.workDate === filters.workDate);
@@ -1590,4 +1629,75 @@ export class MySqlSamAttRepository implements ISamAttRepository {
       payloadJson: r.payload_json ? String(r.payload_json) : undefined,
     }));
   }
+
+  // ==========================================
+  // 7. Persistent Session Revocation & Login Rate Limiting (§9)
+  // ==========================================
+  public async revokeSessionJti(
+    jti: string,
+    userId: string,
+    expiresAtSec: number
+  ): Promise<void> {
+    await this.executeMutation(
+      `INSERT IGNORE INTO revoked_sessions (jti, user_id, expires_at_sec)
+       VALUES (?, ?, ?)`,
+      [jti, userId, expiresAtSec]
+    );
+  }
+
+  public async isSessionJtiRevoked(jti: string): Promise<boolean> {
+    const rows = await this.queryRows(
+      `SELECT jti FROM revoked_sessions WHERE jti = ? LIMIT 1`,
+      [jti]
+    );
+    return rows.length > 0;
+  }
+
+  public async getRateLimitEntry(
+    rateKey: string
+  ): Promise<RepositoryRateLimitEntry | undefined> {
+    const rows = await this.queryRows(
+      `SELECT rate_key, failed_attempts, first_failed_at_ms, locked_until_ms
+       FROM auth_rate_limits
+       WHERE rate_key = ?
+       LIMIT 1`,
+      [rateKey]
+    );
+    if (rows.length === 0) return undefined;
+    const r = rows[0];
+    return {
+      rateKey: String(r.rate_key),
+      failedAttempts: Number(r.failed_attempts || 0),
+      firstFailedAtMs: Number(r.first_failed_at_ms || 0),
+      lockedUntilMs:
+        r.locked_until_ms !== null && r.locked_until_ms !== undefined
+          ? Number(r.locked_until_ms)
+          : null,
+    };
+  }
+
+  public async saveRateLimitEntry(entry: RepositoryRateLimitEntry): Promise<void> {
+    await this.executeMutation(
+      `INSERT INTO auth_rate_limits (rate_key, failed_attempts, first_failed_at_ms, locked_until_ms)
+       VALUES (?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         failed_attempts = VALUES(failed_attempts),
+         first_failed_at_ms = VALUES(first_failed_at_ms),
+         locked_until_ms = VALUES(locked_until_ms)`,
+      [
+        entry.rateKey,
+        entry.failedAttempts,
+        entry.firstFailedAtMs,
+        entry.lockedUntilMs,
+      ]
+    );
+  }
+
+  public async deleteRateLimitEntry(rateKey: string): Promise<void> {
+    await this.executeMutation(
+      `DELETE FROM auth_rate_limits WHERE rate_key = ?`,
+      [rateKey]
+    );
+  }
 }
+

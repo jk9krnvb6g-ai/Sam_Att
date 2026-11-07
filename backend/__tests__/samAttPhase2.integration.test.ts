@@ -582,6 +582,22 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
     });
     assert.equal(crossPersonRes.status, 403);
 
+    // Also block uppercase/snake_case query (`PERSON_ID=P002`) and Request Body (`{ person_id: 'P002' }`)
+    const crossPersonUpperRes = await invokeGatewayRoute(app, {
+      method: 'GET',
+      url: '/api/Sam_Att/me/attendance?PERSON_ID=P002',
+      headers: { Authorization: `Bearer ${userToken}` },
+    });
+    assert.equal(crossPersonUpperRes.status, 403);
+
+    const crossPersonBodyRes = await invokeGatewayRoute(app, {
+      method: 'GET',
+      url: '/api/Sam_Att/me/raw-scans',
+      headers: { Authorization: `Bearer ${userToken}` },
+      body: { person_id: 'P002' },
+    });
+    assert.equal(crossPersonBodyRes.status, 403);
+
     const unauthReprocess = await invokeGatewayRoute(app, {
       method: 'POST',
       url: '/api/Sam_Att/attendance/reprocess',
@@ -656,7 +672,7 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
     }
   });
 
-  it('Scenario 13 & 14: Atomic Transaction Rollback, Concurrent Updates Serialization & Persistence After Restart (§2 & §8)', async () => {
+  it('Scenario 13 & 14: Atomic Transaction Rollback, Concurrent Updates Serialization & Persistence After Restart (including Session Revocation & Rate Limits) (§2, §8 & §9)', async () => {
     const tempFile = path.join(
       os.tmpdir(),
       `sam_att_persist_test_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.json`
@@ -664,7 +680,7 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
 
     try {
       // 1. Create Instance #1 backed by `tempFile`
-      const { repo: repo1 } = createTestEnvironment('TEST', tempFile);
+      const { repo: repo1, app: app1 } = createTestEnvironment('TEST', tempFile);
 
       // 2. Concurrent Updates Test: Run 5 concurrent shift creations via `Promise.all`
       await Promise.all(
@@ -755,11 +771,40 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
         });
       });
 
-      // 5. Simulate Backend Restart: Instantiate a brand-new SamAttRepository with empty seed, loading exclusively from `tempFile`
+      // 4B. Also login & revoke a session token AND trigger a brute-force rate limit lockout on Instance #1 before restart
+      const loginBeforeRestart = await invokeGatewayRoute(app1, {
+        method: 'POST',
+        url: '/api/Sam_Att/auth/login',
+        headers: { 'x-forwarded-for': '10.2.0.77' },
+        body: { username: 'nurse_kanda', password: 'user_secret_123' },
+      });
+      assert.equal(loginBeforeRestart.status, 200);
+      const revokedTokenBeforeRestart = loginBeforeRestart.body.token;
+
+      const logoutBeforeRestart = await invokeGatewayRoute(app1, {
+        method: 'POST',
+        url: '/api/Sam_Att/auth/logout',
+        headers: { Authorization: `Bearer ${revokedTokenBeforeRestart}` },
+      });
+      assert.equal(logoutBeforeRestart.status, 200);
+
+      for (let i = 1; i <= 5; i++) {
+        await invokeGatewayRoute(app1, {
+          method: 'POST',
+          url: '/api/Sam_Att/auth/login',
+          headers: { 'x-forwarded-for': '10.2.0.88' },
+          body: { username: 'staff_test', password: `wrong_${i}` },
+        });
+      }
+
+      // 5. Simulate Backend Process Restart: Clear in-memory AuthService caches and instantiate a brand-new SamAttRepository + Express Router from `tempFile`
+      AuthService.resetSecurityStateForTests();
       const repoAfterRestart = new SamAttRepository(
         {},
         { mode: 'TEST', persistenceFilePath: tempFile }
       );
+      const appAfterRestart = express();
+      appAfterRestart.use('/api/Sam_Att', createSamAttRouter(repoAfterRestart));
 
       assert.equal(repoAfterRestart.getShifts().length, 8);
       assert.equal(repoAfterRestart.getRawScans({}).total, 2);
@@ -770,6 +815,23 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
       assert.equal(attAfterRestart.items[0].hrReviewStatus, 'REVIEWED');
       assert.equal(attAfterRestart.items[0].notes?.reasonCode, 'TRAFFIC_DELAY');
       assert.equal(attAfterRestart.items[0].noteHistory?.length, 1);
+
+      // Verify revoked session token is STILL rejected with 401 after backend restart!
+      const replayRevokedAfterRestart = await invokeGatewayRoute(appAfterRestart, {
+        method: 'GET',
+        url: '/api/Sam_Att/me/attendance',
+        headers: { Authorization: `Bearer ${revokedTokenBeforeRestart}` },
+      });
+      assert.equal(replayRevokedAfterRestart.status, 401);
+
+      // Verify brute-force rate limit lockout is STILL enforced with 429 after backend restart!
+      const bruteForceAfterRestart = await invokeGatewayRoute(appAfterRestart, {
+        method: 'POST',
+        url: '/api/Sam_Att/auth/login',
+        headers: { 'x-forwarded-for': '10.2.0.88' },
+        body: { username: 'staff_test', password: 'staff_secret_123' },
+      });
+      assert.equal(bruteForceAfterRestart.status, 429);
     } finally {
       if (fs.existsSync(tempFile)) {
         fs.unlinkSync(tempFile);
@@ -777,7 +839,7 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
     }
   });
 
-  it('Scenario 15 & 16: Real MySQL Repository (`MySqlSamAttRepository`) Parameterized SQL, Transactions, Row Locks (`FOR UPDATE`), and HTTP 503 When MySQL Unavailable (Zero Mock Fallback)', async () => {
+  it('Scenario 15 & 16: Real MySQL Repository (`MySqlSamAttRepository`) Parameterized SQL, SQL-Level WHERE Filtering, Transactions, Row Locks (`FOR UPDATE`), and HTTP 503 When MySQL Unavailable (Zero Mock Fallback)', async () => {
     const origSecret = process.env.SAM_ATT_JWT_SECRET;
     process.env.SAM_ATT_JWT_SECRET =
       'samchuk_hospital_test_jwt_secret_key_at_least_32_chars_long';
@@ -949,6 +1011,24 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
       };
 
       const mysqlRepo = new MySqlSamAttRepository(recordingPool);
+
+      // Verify `getAttendance` pushes parameterized SQL WHERE clauses directly to MySQL
+      const filteredSqlResult = await mysqlRepo.getAttendance({
+        workDate: '2026-11-06',
+        personId: 'P001',
+        status: 'NO_SCAN',
+      });
+      assert.equal(filteredSqlResult.total, 1);
+      assert.ok(
+        executedQueries.some(
+          (q) =>
+            q.sql.includes('WHERE a.work_date = ? AND a.person_id = ? AND a.status = ?') &&
+            q.params[0] === '2026-11-06' &&
+            q.params[1] === 'P001' &&
+            q.params[2] === 'NO_SCAN'
+        ),
+        'MySqlSamAttRepository.getAttendance must push parameterized WHERE clauses to SQL'
+      );
 
       // Execute transactional HR Review update via MySqlSamAttRepository
       const updatedAtt = await mysqlRepo.withTransaction((tx) =>

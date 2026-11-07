@@ -336,3 +336,23 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   INDEX idx_audit_timestamp (timestamp),
   INDEX idx_audit_entity (entity_type, entity_id)
 );
+
+-- 18. Revoked Sessions Table (Persists revoked JWT jti across Backend Restarts & Multiple Processes — §9)
+CREATE TABLE IF NOT EXISTS revoked_sessions (
+  jti VARCHAR(80) PRIMARY KEY,
+  user_id VARCHAR(36) NOT NULL,
+  revoked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  expires_at_sec BIGINT NOT NULL,
+  INDEX idx_revoked_user (user_id),
+  INDEX idx_revoked_expires (expires_at_sec)
+);
+
+-- 19. Auth Login Rate Limits Table (Persists brute-force lockout counters across Backend Restarts & Multiple Processes — §9)
+CREATE TABLE IF NOT EXISTS auth_rate_limits (
+  rate_key VARCHAR(120) PRIMARY KEY,
+  failed_attempts INT NOT NULL DEFAULT 0,
+  first_failed_at_ms BIGINT NOT NULL,
+  locked_until_ms BIGINT NULL,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+

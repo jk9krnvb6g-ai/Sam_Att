@@ -197,6 +197,7 @@ export class AuthService {
     valid: boolean;
     userId?: string;
     jti?: string;
+    exp?: number;
     reason?: string;
   } {
     if (!token || typeof token !== 'string' || !token.includes('.')) {
@@ -242,6 +243,7 @@ export class AuthService {
         valid: true,
         userId: payload.sub,
         jti: payload.jti,
+        exp: payload.exp,
       };
     } catch {
       return { valid: false, reason: 'Invalid token payload' };
@@ -249,12 +251,28 @@ export class AuthService {
   }
 
   /**
-   * Revoke a specific token immediately (e.g., on logout) (§4.8).
+   * Revoke a specific token immediately (e.g., on logout) and persist revocation to Repository (§4.8 & §9).
    */
-  public static revokeToken(token: string, mode: RepositoryMode = 'MOCK'): boolean {
-    const verified = this.verifySignedToken(token, mode);
+  public static async revokeToken(
+    token: string,
+    mode: RepositoryMode = 'MOCK',
+    repository?: ISamAttRepository
+  ): Promise<boolean> {
+    const verified = this.verifySignedToken(token, mode) as {
+      valid: boolean;
+      userId?: string;
+      jti?: string;
+      exp?: number;
+    };
     if (verified.jti) {
       this.revokedTokenJtis.add(verified.jti);
+      if (repository?.revokeSessionJti && verified.userId) {
+        await repository.revokeSessionJti(
+          verified.jti,
+          verified.userId,
+          verified.exp || Math.floor(Date.now() / 1000) + 28800
+        );
+      }
       return true;
     }
     return false;
@@ -268,15 +286,30 @@ export class AuthService {
   }
 
   /**
-   * Check and update login rate limiter for brute-force protection (§4.9 & §4.10).
+   * Check and update login rate limiter for brute-force protection, reading from persistent repository when available (§4.9, §4.10 & §9).
    */
-  public static checkRateLimit(rateLimitKey: string): {
+  public static async checkRateLimit(
+    rateLimitKey: string,
+    repository?: ISamAttRepository
+  ): Promise<{
     allowed: boolean;
     remainingAttempts: number;
     retryAfterSeconds?: number;
-  } {
+  }> {
     const nowMs = Date.now();
-    const state = this.loginRateLimitMap.get(rateLimitKey);
+    let state: RateLimitState | undefined = this.loginRateLimitMap.get(rateLimitKey);
+
+    if (!state && repository?.getRateLimitEntry) {
+      const persisted = await repository.getRateLimitEntry(rateLimitKey);
+      if (persisted) {
+        state = {
+          failedAttempts: persisted.failedAttempts,
+          firstFailedAtMs: persisted.firstFailedAtMs,
+          lockedUntilMs: persisted.lockedUntilMs,
+        };
+        this.loginRateLimitMap.set(rateLimitKey, state);
+      }
+    }
 
     if (!state) {
       return { allowed: true, remainingAttempts: RATE_LIMIT_MAX_ATTEMPTS };
@@ -292,6 +325,9 @@ export class AuthService {
 
     if (nowMs - state.firstFailedAtMs > RATE_LIMIT_WINDOW_MS) {
       this.loginRateLimitMap.delete(rateLimitKey);
+      if (repository?.deleteRateLimitEntry) {
+        await repository.deleteRateLimitEntry(rateLimitKey);
+      }
       return { allowed: true, remainingAttempts: RATE_LIMIT_MAX_ATTEMPTS };
     }
 
@@ -301,12 +337,26 @@ export class AuthService {
     };
   }
 
-  private static recordFailedLoginAttempt(rateLimitKey: string): {
+  private static async recordFailedLoginAttempt(
+    rateLimitKey: string,
+    repository?: ISamAttRepository
+  ): Promise<{
     locked: boolean;
     failedAttempts: number;
-  } {
+  }> {
     const nowMs = Date.now();
-    const current = this.loginRateLimitMap.get(rateLimitKey);
+    let current = this.loginRateLimitMap.get(rateLimitKey);
+
+    if (!current && repository?.getRateLimitEntry) {
+      const persisted = await repository.getRateLimitEntry(rateLimitKey);
+      if (persisted) {
+        current = {
+          failedAttempts: persisted.failedAttempts,
+          firstFailedAtMs: persisted.firstFailedAtMs,
+          lockedUntilMs: persisted.lockedUntilMs,
+        };
+      }
+    }
 
     if (!current || nowMs - current.firstFailedAtMs > RATE_LIMIT_WINDOW_MS) {
       const nextState: RateLimitState = {
@@ -315,16 +365,34 @@ export class AuthService {
         lockedUntilMs: null,
       };
       this.loginRateLimitMap.set(rateLimitKey, nextState);
+      if (repository?.saveRateLimitEntry) {
+        await repository.saveRateLimitEntry({
+          rateKey: rateLimitKey,
+          ...nextState,
+        });
+      }
       return { locked: false, failedAttempts: 1 };
     }
 
     current.failedAttempts += 1;
     if (current.failedAttempts >= RATE_LIMIT_MAX_ATTEMPTS) {
       current.lockedUntilMs = nowMs + RATE_LIMIT_LOCKOUT_MS;
-      return { locked: true, failedAttempts: current.failedAttempts };
+    }
+    this.loginRateLimitMap.set(rateLimitKey, current);
+
+    if (repository?.saveRateLimitEntry) {
+      await repository.saveRateLimitEntry({
+        rateKey: rateLimitKey,
+        failedAttempts: current.failedAttempts,
+        firstFailedAtMs: current.firstFailedAtMs,
+        lockedUntilMs: current.lockedUntilMs,
+      });
     }
 
-    return { locked: false, failedAttempts: current.failedAttempts };
+    return {
+      locked: Boolean(current.lockedUntilMs && current.lockedUntilMs > nowMs),
+      failedAttempts: current.failedAttempts,
+    };
   }
 
   public static clearRateLimitForTest(): void {
@@ -338,8 +406,8 @@ export class AuthService {
   }
 
   /**
-   * Authenticate user credentials (`username` + `password`) with rate limiting, bcrypt verification,
-   * legacy hash migration, and audit logging without leaking sensitive values (§4.1–§4.11).
+   * Authenticate user credentials (`username` + `password`) with persistent rate limiting, bcrypt verification,
+   * legacy hash migration, and audit logging without leaking sensitive values (§4.1–§4.11 & §9).
    */
   public static async authenticateCredentials(
     repository: ISamAttRepository,
@@ -374,7 +442,7 @@ export class AuthService {
     const normalizedUsername = username.trim().toLowerCase();
     const rateKey = `${normalizedUsername}@${clientIp}`;
 
-    const rateCheck = this.checkRateLimit(rateKey);
+    const rateCheck = await this.checkRateLimit(rateKey, repository);
     if (!rateCheck.allowed) {
       await repository.recordAuditLog({
         actor: normalizedUsername,
@@ -393,7 +461,7 @@ export class AuthService {
 
     const account = await repository.findUserByUsername(normalizedUsername);
     if (!account || !account.active) {
-      this.recordFailedLoginAttempt(rateKey);
+      await this.recordFailedLoginAttempt(rateKey, repository);
       return {
         success: false,
         statusCode: 401,
@@ -409,7 +477,7 @@ export class AuthService {
     );
 
     if (!verifyRes.valid) {
-      const failState = this.recordFailedLoginAttempt(rateKey);
+      const failState = await this.recordFailedLoginAttempt(rateKey, repository);
       await repository.recordAuditLog({
         actor: account.username,
         actorName: account.fullName,
@@ -421,7 +489,7 @@ export class AuthService {
       });
 
       if (failState.locked) {
-        const retryCheck = this.checkRateLimit(rateKey);
+        const retryCheck = await this.checkRateLimit(rateKey, repository);
         return {
           success: false,
           statusCode: 429,
@@ -439,6 +507,9 @@ export class AuthService {
 
     // Reset failed attempts upon successful login
     this.loginRateLimitMap.delete(rateKey);
+    if (repository.deleteRateLimitEntry) {
+      await repository.deleteRateLimitEntry(rateKey);
+    }
 
     const token = this.issueSignedToken(account, 28800, repository.mode);
     const authUser: AuthenticatedUser = {
@@ -471,8 +542,8 @@ export class AuthService {
   }
 
   /**
-   * Express authentication middleware (§4 & §7).
-   * - Verifies Bearer token signature, expiration, and session revocation.
+   * Express authentication middleware (§4, §7 & §9).
+   * - Verifies Bearer token signature, expiration, and both in-memory & repository-persisted session revocation.
    * - Re-queries the authoritative repository for `role` and `personId` (never trusts client claims).
    * - Strictly disables Mock Role Fallback when `repository.mode === 'REAL'` or `NODE_ENV === 'production'`.
    */
@@ -493,6 +564,18 @@ export class AuthService {
               success: false,
               error: `การยืนยันตัวตนไม่ผ่าน (${verification.reason || 'Invalid token'})`,
             });
+          }
+
+          // Check persistent session revocation in repository (survives backend restart & multi-process)
+          if (verification.jti && repository.isSessionJtiRevoked) {
+            const isRevokedInRepo = await repository.isSessionJtiRevoked(verification.jti);
+            if (isRevokedInRepo) {
+              this.revokedTokenJtis.add(verification.jti);
+              return res.status(401).json({
+                success: false,
+                error: 'การยืนยันตัวตนไม่ผ่าน (Session has been revoked)',
+              });
+            }
           }
 
           const dbUser = await repository.findUserById(verification.userId);
@@ -591,7 +674,7 @@ export class AuthService {
   }
 
   /**
-   * Verify that a `GENERAL_USER` is only accessing their own `personId` (§4 & §7.12).
+   * Verify that a `GENERAL_USER` is only accessing their own `personId` across URL, Query, and Body (§4 & §10).
    */
   public static async verifyGeneralUserOwnAccess(
     req: Request,
@@ -612,12 +695,33 @@ export class AuthService {
       return { allowed: false };
     }
 
-    const requestedPersonId =
-      (req.query?.personId as string | undefined) ||
-      (req.params?.personId as string | undefined) ||
-      (req.body?.personId as string | undefined);
+    // Collect any personId / PERSON_ID / person_id candidate passed in URL params, Query string, or Request Body
+    const candidateValues: string[] = [];
+    const extractCandidates = (source: Record<string, unknown> | undefined) => {
+      if (!source || typeof source !== 'object') return;
+      for (const [k, v] of Object.entries(source)) {
+        const lower = k.toLowerCase();
+        if (lower === 'personid' || lower === 'person_id') {
+          if (Array.isArray(v)) {
+            v.forEach((item) => {
+              if (item !== undefined && item !== null && String(item).trim() !== '') {
+                candidateValues.push(String(item).trim());
+              }
+            });
+          } else if (v !== undefined && v !== null && String(v).trim() !== '') {
+            candidateValues.push(String(v).trim());
+          }
+        }
+      }
+    };
 
-    if (requestedPersonId && requestedPersonId !== user.personId && user.role === 'GENERAL_USER') {
+    extractCandidates(req.params as Record<string, unknown>);
+    extractCandidates(req.query as Record<string, unknown>);
+    extractCandidates(req.body as Record<string, unknown>);
+
+    const unauthorizedTarget = candidateValues.find((val) => val !== user.personId);
+
+    if (unauthorizedTarget && user.role === 'GENERAL_USER') {
       if (repository) {
         await repository.recordAuditLog({
           actor: user.username,
@@ -625,8 +729,8 @@ export class AuthService {
           actorRole: user.role,
           action: 'SECURITY_VIOLATION_CROSS_PERSON_ACCESS',
           entityType: 'Personnel',
-          entityId: requestedPersonId,
-          summary: `บล็อกความพยายามของ GENERAL_USER (${user.username}, personId=${user.personId}) ที่พยายามอ่านข้อมูลของ ${requestedPersonId}`,
+          entityId: unauthorizedTarget,
+          summary: `บล็อกความพยายามของ GENERAL_USER (${user.username}, personId=${user.personId}) ที่พยายามเข้าถึงข้อมูลของ ${unauthorizedTarget}`,
         });
       }
       res.status(403).json({
@@ -640,3 +744,4 @@ export class AuthService {
     return { allowed: true, personId: user.personId };
   }
 }
+

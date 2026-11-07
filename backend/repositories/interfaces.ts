@@ -274,9 +274,24 @@ export interface ISamAttRepository {
   // HOSOffice Push History
   recordPushPreviewHistory(entry: RepositoryPushHistory): Promise<void> | void;
   getPushHistory(): Promise<RepositoryPushHistory[]> | RepositoryPushHistory[];
+
+  // Persistent Session Revocation & Login Rate Limiting across Restart / Multi-Process (§9)
+  revokeSessionJti?(jti: string, userId: string, expiresAtSec: number): Promise<void> | void;
+  isSessionJtiRevoked?(jti: string): Promise<boolean> | boolean;
+  getRateLimitEntry?(rateKey: string): Promise<RepositoryRateLimitEntry | undefined> | RepositoryRateLimitEntry | undefined;
+  saveRateLimitEntry?(entry: RepositoryRateLimitEntry): Promise<void> | void;
+  deleteRateLimitEntry?(rateKey: string): Promise<void> | void;
+}
+
+export interface RepositoryRateLimitEntry {
+  rateKey: string;
+  failedAttempts: number;
+  firstFailedAtMs: number;
+  lockedUntilMs: number | null;
 }
 
 export type {
   EngineHRNote,
   EngineHRReviewHistoryItem,
 };
+
