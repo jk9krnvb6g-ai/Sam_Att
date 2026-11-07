@@ -663,4 +663,85 @@ describe('Sam_Att V2 Phase 1 — Attendance Engine & Raw Scan Unit Tests (§5)',
     assert.equal(rec.checkInAt, null);
     assert.equal(rec.relatedRawScanIds.length, 1);
   });
+
+  it('Test 19: Timezone Asia/Bangkok, 24:00 Shift Config & inOutMode Non-Assumption (§5)', () => {
+    assert.equal(AttendanceCalculator.TIMEZONE, 'Asia/Bangkok');
+    assert.equal(AttendanceCalculator.parseTimeToMinutes('24:00'), 1440);
+    assert.equal(AttendanceCalculator.parseTimeToMinutes('24:00:00'), 1440);
+
+    const assignments: EngineShiftAssignment[] = [
+      { id: 'SA19', personId: 'P001', workDate: '2026-11-06', shiftId: 'SH_AFTERNOON', assignmentType: 'DAILY' },
+    ];
+    // Both check-in and check-out scans have inOutMode = 0 (or inverted inOutMode = 2 for check-in, 1 for check-out)
+    // Engine must NOT rely on inOutMode and must pair by shift window accurately
+    const rawScans: RawScanDto[] = [
+      { machineNo: 1, enrollNumber: 101, scanDateTime: '2026-11-06 15:55:00', verifyMode: 1, inOutMode: 2, workCode: null },
+      { machineNo: 1, enrollNumber: 101, scanDateTime: '2026-11-06 23:59:30', verifyMode: 1, inOutMode: 0, workCode: null },
+    ];
+
+    const res = AttendanceCalculator.evaluateAndReprocess({
+      fromDate: '2026-11-06',
+      toDate: '2026-11-06',
+      referenceDateTime: '2026-11-07 01:00:00',
+      personnel: TEST_PERSONNEL,
+      shifts: TEST_SHIFTS,
+      assignments,
+      rawScans,
+    });
+
+    assert.equal(res.records.length, 1);
+    assert.equal(res.records[0].status, 'NORMAL');
+    assert.equal(res.records[0].checkInAt, '15:55:00');
+    assert.equal(res.records[0].checkOutAt, '23:59:30');
+  });
+
+  it('Test 20: Invalid Scan Timestamp Rejection without Crashing Reprocess (§5)', () => {
+    const assignments: EngineShiftAssignment[] = [
+      { id: 'SA20', personId: 'P001', workDate: '2026-11-06', shiftId: 'SH_MORNING', assignmentType: 'DAILY' },
+    ];
+    const rawScans: RawScanDto[] = [
+      { machineNo: 1, enrollNumber: 101, scanDateTime: '2026-02-31 25:99:00', verifyMode: 1, inOutMode: 1, workCode: null },
+      { machineNo: 1, enrollNumber: 101, scanDateTime: '2026-11-06 07:55:00', verifyMode: 1, inOutMode: 1, workCode: null },
+      { machineNo: 1, enrollNumber: 101, scanDateTime: '2026-11-06 16:05:00', verifyMode: 1, inOutMode: 2, workCode: null },
+    ];
+
+    const res = AttendanceCalculator.evaluateAndReprocess({
+      fromDate: '2026-11-06',
+      toDate: '2026-11-06',
+      referenceDateTime: '2026-11-06 18:00:00',
+      personnel: TEST_PERSONNEL,
+      shifts: TEST_SHIFTS,
+      assignments,
+      rawScans,
+    });
+
+    assert.equal(res.errorsCount, 1);
+    assert.equal(res.records.length, 1);
+    assert.equal(res.records[0].status, 'NORMAL');
+  });
+
+  it('Test 21: Date-Range Reprocess Starting on fromDate Consumes Previous Night Cross-Midnight Checkout Scan (§5)', () => {
+    // Person P001 had a cross-midnight shift on 2026-11-05 (23:30 - 07:30) and checked out on 2026-11-06 07:35:00,
+    // and has NO shift on 2026-11-06. Reprocessing ONLY fromDate=2026-11-06..toDate=2026-11-06 must NOT treat 07:35:00 as NO_SCHEDULE!
+    const assignments: EngineShiftAssignment[] = [
+      { id: 'SA21_PREV', personId: 'P001', workDate: '2026-11-05', shiftId: 'SH_NIGHT_CROSS', assignmentType: 'DAILY' },
+    ];
+    const rawScans: RawScanDto[] = [
+      { machineNo: 1, enrollNumber: 101, scanDateTime: '2026-11-05 23:20:00', verifyMode: 1, inOutMode: 1, workCode: null },
+      { machineNo: 1, enrollNumber: 101, scanDateTime: '2026-11-06 07:35:00', verifyMode: 1, inOutMode: 2, workCode: null },
+    ];
+
+    const res = AttendanceCalculator.evaluateAndReprocess({
+      fromDate: '2026-11-06',
+      toDate: '2026-11-06',
+      referenceDateTime: '2026-11-06 18:00:00',
+      personnel: TEST_PERSONNEL,
+      shifts: TEST_SHIFTS,
+      assignments,
+      rawScans,
+    });
+
+    assert.equal(res.noScheduleCount, 0);
+    assert.equal(res.records.length, 0);
+  });
 });

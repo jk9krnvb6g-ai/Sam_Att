@@ -1,42 +1,77 @@
 -- =====================================================================
--- Sam_Att V2 — Safe Non-Destructive Migration (001_phase1_phase2_safe_migration.sql)
+-- Sam_Att V2 — Version-Aware Idempotent Migration (Phase 1+2 Hardening)
+-- File: 001_phase1_phase2_safe_migration.sql
 -- Target Database: samchuk_attendance
--- Rules (§6 & §7):
--- 1. Zero DROP TABLE / Zero TRUNCATE statements.
--- 2. Preserves all existing production/staging rows.
--- 3. Adds only missing columns, tables, and indexes required for Phase 1 + Phase 2.
+-- Target Environment: TEST / STAGING ONLY (Do NOT run on Production without backup verification)
+--
+-- IMPORTANT MYSQL VERSION COMPATIBILITY NOTE (§3):
+-- Standard Oracle MySQL 8.0 / 5.7 does NOT support `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
+-- (which is MariaDB-only syntax and causes ER_PARSE_ERROR on Oracle MySQL).
+-- Therefore, this migration uses `INFORMATION_SCHEMA.COLUMNS` inspection inside a temporary
+-- Stored Procedure (`sam_att_add_column_if_missing`) so it works safely on BOTH
+-- Oracle MySQL 8.0+ and MariaDB 10.4+ without syntax errors!
+--
+-- RULES (§3):
+-- 1. Zero DROP TABLE / Zero TRUNCATE on any domain table.
+-- 2. Does NOT mutate existing production data rows automatically.
+-- 3. Verifies MySQL/MariaDB server version before applying DDL.
 -- =====================================================================
 
--- 1. Upgrade `users` table with full_name, department, position
-ALTER TABLE users
-  ADD COLUMN IF NOT EXISTS full_name VARCHAR(150) NOT NULL DEFAULT '' AFTER password_hash,
-  ADD COLUMN IF NOT EXISTS department VARCHAR(100) NULL AFTER person_id,
-  ADD COLUMN IF NOT EXISTS position VARCHAR(150) NULL AFTER department;
+-- Step 0: Record and verify MySQL / MariaDB Server Version
+SELECT VERSION() AS detected_db_version, DATABASE() AS current_database;
 
--- 2. Upgrade `personnel` table with mapping_status and cid_masked
-ALTER TABLE personnel
-  ADD COLUMN IF NOT EXISTS cid_masked VARCHAR(30) NULL AFTER fingle_id_current,
-  ADD COLUMN IF NOT EXISTS mapping_status ENUM('MAPPED', 'UNMAPPED', 'DISPUTED') NOT NULL DEFAULT 'MAPPED' AFTER personnel_type;
+-- Helper Stored Procedure for MySQL 8.0+ & MariaDB safe column addition
+DROP PROCEDURE IF EXISTS sam_att_add_column_if_missing;
+DELIMITER $$
+CREATE PROCEDURE sam_att_add_column_if_missing(
+  IN p_table_name VARCHAR(64),
+  IN p_column_name VARCHAR(64),
+  IN p_column_ddl TEXT
+)
+BEGIN
+  DECLARE v_col_exists INT DEFAULT 0;
 
--- 3. Upgrade `shifts` table with category, personnel_type_rule_id, deactivation audit fields
-ALTER TABLE shifts
-  ADD COLUMN IF NOT EXISTS category ENUM('MORNING', 'AFTERNOON', 'NIGHT', 'MORNING_AFTERNOON', 'AFTERNOON_NIGHT', 'ALL_DAY', 'OFFICE', 'SPECIAL', 'OTHER') NOT NULL DEFAULT 'MORNING' AFTER name,
-  ADD COLUMN IF NOT EXISTS personnel_type_rule_id VARCHAR(36) NULL AFTER late_scan_window_minutes,
-  ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMP NULL AFTER active,
-  ADD COLUMN IF NOT EXISTS deactivated_reason VARCHAR(255) NULL AFTER deactivated_at;
+  SELECT COUNT(*) INTO v_col_exists
+  FROM INFORMATION_SCHEMA.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = p_table_name
+    AND COLUMN_NAME = p_column_name;
 
--- 4. Upgrade `shift_assignments` with historical snapshots and soft-cancellation audit fields
-ALTER TABLE shift_assignments
-  ADD COLUMN IF NOT EXISTS shift_name_snapshot VARCHAR(120) NULL AFTER assignment_type,
-  ADD COLUMN IF NOT EXISTS shift_start_snapshot TIME NULL AFTER shift_name_snapshot,
-  ADD COLUMN IF NOT EXISTS shift_end_snapshot TIME NULL AFTER shift_start_snapshot,
-  ADD COLUMN IF NOT EXISTS cross_midnight_snapshot BOOLEAN NOT NULL DEFAULT FALSE AFTER shift_end_snapshot,
-  ADD COLUMN IF NOT EXISTS grace_minutes_snapshot INT NOT NULL DEFAULT 15 AFTER cross_midnight_snapshot,
-  ADD COLUMN IF NOT EXISTS shift_category_snapshot VARCHAR(30) NULL AFTER grace_minutes_snapshot,
-  ADD COLUMN IF NOT EXISTS status ENUM('ACTIVE', 'CANCELLED') NOT NULL DEFAULT 'ACTIVE' AFTER shift_category_snapshot,
-  ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP NULL AFTER status,
-  ADD COLUMN IF NOT EXISTS cancelled_by VARCHAR(100) NULL AFTER cancelled_at,
-  ADD COLUMN IF NOT EXISTS cancel_reason VARCHAR(255) NULL AFTER cancelled_by;
+  IF v_col_exists = 0 THEN
+    SET @sql_stmt = CONCAT('ALTER TABLE `', p_table_name, '` ADD COLUMN ', p_column_ddl);
+    PREPARE stmt FROM @sql_stmt;
+    EXECUTE stmt;
+    DEALLOCATE PREPARE stmt;
+  END IF;
+END$$
+DELIMITER ;
+
+-- 1. Upgrade `users` table
+CALL sam_att_add_column_if_missing('users', 'full_name', '`full_name` VARCHAR(150) NOT NULL DEFAULT '''' AFTER `password_hash`');
+CALL sam_att_add_column_if_missing('users', 'department', '`department` VARCHAR(100) NULL AFTER `person_id`');
+CALL sam_att_add_column_if_missing('users', 'position', '`position` VARCHAR(150) NULL AFTER `department`');
+
+-- 2. Upgrade `personnel` table
+CALL sam_att_add_column_if_missing('personnel', 'cid_masked', '`cid_masked` VARCHAR(30) NULL AFTER `fingle_id_current`');
+CALL sam_att_add_column_if_missing('personnel', 'mapping_status', '`mapping_status` ENUM(''MAPPED'', ''UNMAPPED'', ''DISPUTED'') NOT NULL DEFAULT ''MAPPED'' AFTER `personnel_type`');
+
+-- 3. Upgrade `shifts` table
+CALL sam_att_add_column_if_missing('shifts', 'category', '`category` ENUM(''MORNING'', ''AFTERNOON'', ''NIGHT'', ''MORNING_AFTERNOON'', ''AFTERNOON_NIGHT'', ''ALL_DAY'', ''OFFICE'', ''SPECIAL'', ''OTHER'') NOT NULL DEFAULT ''MORNING'' AFTER `name`');
+CALL sam_att_add_column_if_missing('shifts', 'personnel_type_rule_id', '`personnel_type_rule_id` VARCHAR(36) NULL AFTER `late_scan_window_minutes`');
+CALL sam_att_add_column_if_missing('shifts', 'deactivated_at', '`deactivated_at` TIMESTAMP NULL AFTER `active`');
+CALL sam_att_add_column_if_missing('shifts', 'deactivated_reason', '`deactivated_reason` VARCHAR(255) NULL AFTER `deactivated_at`');
+
+-- 4. Upgrade `shift_assignments` table
+CALL sam_att_add_column_if_missing('shift_assignments', 'shift_name_snapshot', '`shift_name_snapshot` VARCHAR(120) NULL AFTER `assignment_type`');
+CALL sam_att_add_column_if_missing('shift_assignments', 'shift_start_snapshot', '`shift_start_snapshot` TIME NULL AFTER `shift_name_snapshot`');
+CALL sam_att_add_column_if_missing('shift_assignments', 'shift_end_snapshot', '`shift_end_snapshot` TIME NULL AFTER `shift_start_snapshot`');
+CALL sam_att_add_column_if_missing('shift_assignments', 'cross_midnight_snapshot', '`cross_midnight_snapshot` BOOLEAN NOT NULL DEFAULT FALSE AFTER `shift_end_snapshot`');
+CALL sam_att_add_column_if_missing('shift_assignments', 'grace_minutes_snapshot', '`grace_minutes_snapshot` INT NOT NULL DEFAULT 15 AFTER `cross_midnight_snapshot`');
+CALL sam_att_add_column_if_missing('shift_assignments', 'shift_category_snapshot', '`shift_category_snapshot` VARCHAR(30) NULL AFTER `grace_minutes_snapshot`');
+CALL sam_att_add_column_if_missing('shift_assignments', 'status', '`status` ENUM(''ACTIVE'', ''CANCELLED'') NOT NULL DEFAULT ''ACTIVE'' AFTER `shift_category_snapshot`');
+CALL sam_att_add_column_if_missing('shift_assignments', 'cancelled_at', '`cancelled_at` TIMESTAMP NULL AFTER `status`');
+CALL sam_att_add_column_if_missing('shift_assignments', 'cancelled_by', '`cancelled_by` VARCHAR(100) NULL AFTER `cancelled_at`');
+CALL sam_att_add_column_if_missing('shift_assignments', 'cancel_reason', '`cancel_reason` VARCHAR(255) NULL AFTER `cancelled_by`');
 
 -- 5. Create `shift_cancellation_logs` table if not exists
 CREATE TABLE IF NOT EXISTS shift_cancellation_logs (
@@ -53,24 +88,22 @@ CREATE TABLE IF NOT EXISTS shift_cancellation_logs (
   INDEX idx_shift_cancel_person_date (person_id, work_date)
 );
 
--- 6. Upgrade `raw_scans` with mapping tracking fields (preserving immutable 6 core fields)
-ALTER TABLE raw_scans
-  ADD COLUMN IF NOT EXISTS mapped_person_id VARCHAR(20) NULL AFTER work_code,
-  ADD COLUMN IF NOT EXISTS mapping_status ENUM('MAPPED', 'PENDING_MAPPING', 'DISPUTED_MAPPING') NOT NULL DEFAULT 'MAPPED' AFTER mapped_person_id;
+-- 6. Upgrade `raw_scans` table (preserving immutable 6 core fields + Unique dedupe_key)
+CALL sam_att_add_column_if_missing('raw_scans', 'mapped_person_id', '`mapped_person_id` VARCHAR(20) NULL AFTER `work_code`');
+CALL sam_att_add_column_if_missing('raw_scans', 'mapping_status', '`mapping_status` ENUM(''MAPPED'', ''PENDING_MAPPING'', ''DISPUTED_MAPPING'') NOT NULL DEFAULT ''MAPPED'' AFTER `mapped_person_id`');
 
--- 7. Upgrade `attendance` table for cross-midnight full datetime, HR review status, and ambiguous scan flag
-ALTER TABLE attendance
-  ADD COLUMN IF NOT EXISTS checkin_datetime DATETIME NULL AFTER checkout_at,
-  ADD COLUMN IF NOT EXISTS checkout_datetime DATETIME NULL AFTER checkin_datetime,
-  ADD COLUMN IF NOT EXISTS early_checkout_minutes INT NOT NULL DEFAULT 0 AFTER late_minutes,
-  ADD COLUMN IF NOT EXISTS has_missing_checkout BOOLEAN NOT NULL DEFAULT FALSE AFTER early_checkout_minutes,
-  ADD COLUMN IF NOT EXISTS evaluation_state ENUM('EVALUATED', 'IN_PROGRESS', 'FUTURE', 'AMBIGUOUS_REQUIRES_REVIEW') NOT NULL DEFAULT 'EVALUATED' AFTER status,
-  ADD COLUMN IF NOT EXISTS hr_review_status ENUM('PENDING_REVIEW', 'REVIEWED', 'NOT_REQUIRED') NOT NULL DEFAULT 'NOT_REQUIRED' AFTER evaluation_state,
-  ADD COLUMN IF NOT EXISTS ambiguous_scan_flag BOOLEAN NOT NULL DEFAULT FALSE AFTER hr_review_status,
-  ADD COLUMN IF NOT EXISTS evaluation_note VARCHAR(255) NULL AFTER ambiguous_scan_flag,
-  ADD COLUMN IF NOT EXISTS related_raw_scan_ids JSON NULL AFTER raw_scan_out_id;
+-- 7. Upgrade `attendance` table
+CALL sam_att_add_column_if_missing('attendance', 'checkin_datetime', '`checkin_datetime` DATETIME NULL AFTER `checkout_at`');
+CALL sam_att_add_column_if_missing('attendance', 'checkout_datetime', '`checkout_datetime` DATETIME NULL AFTER `checkin_datetime`');
+CALL sam_att_add_column_if_missing('attendance', 'early_checkout_minutes', '`early_checkout_minutes` INT NOT NULL DEFAULT 0 AFTER `late_minutes`');
+CALL sam_att_add_column_if_missing('attendance', 'has_missing_checkout', '`has_missing_checkout` BOOLEAN NOT NULL DEFAULT FALSE AFTER `early_checkout_minutes`');
+CALL sam_att_add_column_if_missing('attendance', 'evaluation_state', '`evaluation_state` ENUM(''EVALUATED'', ''IN_PROGRESS'', ''FUTURE'', ''AMBIGUOUS_REQUIRES_REVIEW'') NOT NULL DEFAULT ''EVALUATED'' AFTER `status`');
+CALL sam_att_add_column_if_missing('attendance', 'hr_review_status', '`hr_review_status` ENUM(''PENDING_REVIEW'', ''REVIEWED'', ''NOT_REQUIRED'') NOT NULL DEFAULT ''NOT_REQUIRED'' AFTER `evaluation_state`');
+CALL sam_att_add_column_if_missing('attendance', 'ambiguous_scan_flag', '`ambiguous_scan_flag` BOOLEAN NOT NULL DEFAULT FALSE AFTER `hr_review_status`');
+CALL sam_att_add_column_if_missing('attendance', 'evaluation_note', '`evaluation_note` VARCHAR(255) NULL AFTER `ambiguous_scan_flag`');
+CALL sam_att_add_column_if_missing('attendance', 'related_raw_scan_ids', '`related_raw_scan_ids` JSON NULL AFTER `raw_scan_out_id`');
 
--- 8. Expand `attendance_notes` reason_code enum to support operational HR review reasons
+-- 8. Expand `attendance_notes` reason_code enum
 ALTER TABLE attendance_notes
   MODIFY COLUMN reason_code ENUM(
     'SICK_LEAVE',
@@ -88,7 +121,7 @@ ALTER TABLE attendance_notes
     'OTHER'
   ) NOT NULL;
 
--- 9. Create `hr_review_history` table (Table #7 in §7)
+-- 9. Create `hr_review_history` table (Separated from Derived Attendance & Raw Scans)
 CREATE TABLE IF NOT EXISTS hr_review_history (
   id VARCHAR(36) PRIMARY KEY,
   attendance_id VARCHAR(64) NOT NULL,
@@ -103,7 +136,7 @@ CREATE TABLE IF NOT EXISTS hr_review_history (
   INDEX idx_hr_history_att (attendance_id, created_at)
 );
 
--- 10. Create `personnel_type_rules`, `sync_schedules`, and `hosoffice_sync_logs` if not exists
+-- 10. Create `personnel_type_rules`, `sync_schedules`, and `hosoffice_sync_logs`
 CREATE TABLE IF NOT EXISTS personnel_type_rules (
   id VARCHAR(36) PRIMARY KEY,
   code VARCHAR(30) NOT NULL UNIQUE,
@@ -148,3 +181,6 @@ CREATE TABLE IF NOT EXISTS hosoffice_sync_logs (
   summary TEXT NULL,
   INDEX idx_hos_sync_started (started_at)
 );
+
+-- Cleanup helper procedure
+DROP PROCEDURE IF EXISTS sam_att_add_column_if_missing;

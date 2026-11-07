@@ -1,116 +1,446 @@
 /**
- * Sam_Att V2 — Authentication, Signed Session Token & Role-Based Authorization Service
- * Phase 2 — §10
+ * Sam_Att V2 — Hardened Authentication, Session Revocation, Rate Limiting & RBAC Service
+ * Phase 1+2 Hardening — §4
  *
- * SECURITY RULES (§10):
- * 1. Three strict roles: ADMIN, RESPONSIBLE_STAFF, GENERAL_USER.
- * 2. NEVER accept username-only login without password/credential verification.
- * 3. NEVER allow Mock Role Fallback in Production (`NODE_ENV === 'production'`).
- * 4. NEVER trust `role` or `personId` sent in request body/query by the Frontend;
- *    always resolve `role` and `personId` from the verified token + authoritative database user mapping.
- * 5. Strictly prevent `GENERAL_USER` from reading or modifying any other person's `PERSON_ID`.
- * 6. Record Audit Logs for authentication and security violations.
+ * SECURITY FIXES APPLIED (§4):
+ * 1. Uses `bcryptjs` with cryptographic salt (10 rounds) for all password hashing (`$2a$` / `$2b$`).
+ * 2. NEVER compares plaintext passwords against stored database values.
+ * 3. NEVER uses plain SHA-256 for storing new passwords.
+ * 4. Safe Legacy Hash Migration: Only accounts explicitly tagged `legacy_sha256$<64hex>` can be verified
+ *    via `crypto.timingSafeEqual` on login, and are immediately upgraded to `bcrypt` in the database.
+ * 5. Zero hardcoded default secret in source code:
+ *    - In `REAL` / `production` mode, strictly requires `process.env.SAM_ATT_JWT_SECRET` (>= 32 chars)
+ *      and throws an error if missing.
+ *    - In `MOCK` / `TEST` mode, generates an ephemeral random 256-bit secret per process if env var is unset.
+ * 6. Full Token Signature (`HMAC-SHA256`), Expiration (`exp`), and Session Revocation (`jti` denylist + user revocation).
+ * 7. Brute-Force Protection & Login Rate Limiting (max 5 failed attempts per 15-minute window -> HTTP 429).
+ * 8. Never logs passwords, password hashes, tokens, or secrets.
+ * 9. Disables Mock Persona Fallback in `REAL` mode and `NODE_ENV === 'production'`.
  */
 
 import crypto from 'node:crypto';
+import bcrypt from 'bcryptjs';
 import { Request, Response, NextFunction } from 'express';
 import { AuthenticatedUser, UserRole } from '../types';
-import { SamAttRepository, RepositoryUserAccount } from '../repositories/samAttRepository';
+import {
+  ISamAttRepository,
+  RepositoryMode,
+  RepositoryUserAccount,
+} from '../repositories/interfaces';
 
-const TOKEN_SECRET =
-  process.env.SAM_ATT_JWT_SECRET || 'sam_att_v2_dev_hmac_secret_do_not_use_in_prod';
+const BCRYPT_SALT_ROUNDS = 10;
+const LEGACY_SHA256_PREFIX = 'legacy_sha256$';
+
+// Ephemeral random secret used ONLY in non-production MOCK/TEST mode when SAM_ATT_JWT_SECRET is unset
+const EPHEMERAL_DEV_SECRET = crypto.randomBytes(32).toString('hex');
+
+interface RateLimitState {
+  failedAttempts: number;
+  firstFailedAtMs: number;
+  lockedUntilMs: number | null;
+}
+
+const RATE_LIMIT_MAX_ATTEMPTS = 5;
+const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+const RATE_LIMIT_LOCKOUT_MS = 15 * 60 * 1000; // 15 minutes
 
 export class AuthService {
+  private static revokedTokenJtis = new Set<string>();
+  private static userRevokedBeforeSec = new Map<string, number>();
+  private static loginRateLimitMap = new Map<string, RateLimitState>();
+
   /**
-   * Hash password with SHA-256 for deterministic verification in repository.
+   * Resolve the signing secret according to the active mode (§4.5 & §4.6).
+   * - In REAL mode or NODE_ENV === 'production', strictly requires `process.env.SAM_ATT_JWT_SECRET` (>= 32 chars).
+   * - Refuses to start or sign/verify if missing in REAL/production mode.
    */
-  public static hashPassword(plainPassword: string): string {
-    return crypto.createHash('sha256').update(plainPassword).digest('hex');
+  public static getSigningSecret(mode: RepositoryMode = 'MOCK'): string {
+    const envSecret = process.env.SAM_ATT_JWT_SECRET?.trim() || '';
+    const isRealOrProd =
+      mode === 'REAL' ||
+      process.env.SAM_ATT_REPO_MODE === 'REAL' ||
+      process.env.NODE_ENV === 'production';
+
+    if (isRealOrProd) {
+      if (!envSecret || envSecret.length < 32) {
+        throw new Error(
+          'CRITICAL SECURITY ERROR: SAM_ATT_JWT_SECRET environment variable (minimum 32 characters) is required in REAL/Production mode.'
+        );
+      }
+      return envSecret;
+    }
+
+    return envSecret.length >= 16 ? envSecret : EPHEMERAL_DEV_SECRET;
   }
 
   /**
-   * Issue an HMAC-SHA256 signed session token containing `userId`, `iat`, and `exp`.
-   * Note: Even when verifying the token, the backend re-queries the repository for authoritative `role` and `personId`.
+   * Validate that Real/Production mode has a valid secret before starting the backend router (§4.6).
    */
-  public static issueSignedToken(user: RepositoryUserAccount, expiresInSeconds = 28800): string {
+  public static assertRealModeSecretConfigured(mode: RepositoryMode): void {
+    if (mode === 'REAL' || process.env.NODE_ENV === 'production') {
+      this.getSigningSecret('REAL');
+    }
+  }
+
+  /**
+   * Hash a password using bcrypt with cryptographic salt (§4.1, §4.2, §4.4).
+   */
+  public static hashPassword(plainPassword: string): string {
+    if (!plainPassword || typeof plainPassword !== 'string' || plainPassword.length < 4) {
+      throw new Error('Password must be a non-empty string of at least 4 characters');
+    }
+    return bcrypt.hashSync(plainPassword, BCRYPT_SALT_ROUNDS);
+  }
+
+  /**
+   * Create a tagged legacy SHA-256 hash ONLY for testing legacy migration strategy (§4).
+   */
+  public static createLegacySha256TaggedHashForMigrationTest(plainPassword: string): string {
+    const hex = crypto.createHash('sha256').update(plainPassword).digest('hex');
+    return `${LEGACY_SHA256_PREFIX}${hex}`;
+  }
+
+  /**
+   * Synchronous password verification helper for bcrypt and legacy_sha256$ tagged hashes (§4).
+   */
+  public static verifyPassword(
+    plainPassword: string,
+    storedHash: string
+  ): { valid: boolean; isLegacySha256: boolean } {
+    if (!plainPassword || !storedHash || typeof storedHash !== 'string') {
+      return { valid: false, isLegacySha256: false };
+    }
+    if (
+      storedHash.startsWith('$2a$') ||
+      storedHash.startsWith('$2b$') ||
+      storedHash.startsWith('$2y$')
+    ) {
+      return { valid: bcrypt.compareSync(plainPassword, storedHash), isLegacySha256: false };
+    }
+    if (storedHash.startsWith(LEGACY_SHA256_PREFIX)) {
+      const legacyHex = storedHash.slice(LEGACY_SHA256_PREFIX.length);
+      if (legacyHex.length !== 64) return { valid: false, isLegacySha256: false };
+      const candidateHex = crypto.createHash('sha256').update(plainPassword).digest('hex');
+      const a = Buffer.from(legacyHex, 'hex');
+      const b = Buffer.from(candidateHex, 'hex');
+      const valid = a.length === b.length && crypto.timingSafeEqual(a, b);
+      return { valid, isLegacySha256: valid };
+    }
+    return { valid: false, isLegacySha256: false };
+  }
+
+  /**
+   * Verify password against stored hash (never compares plaintext!) and transparently upgrade
+   * explicitly tagged `legacy_sha256$` hashes to `bcrypt` upon successful verification (§4.3 & §4).
+   */
+  public static async verifyPasswordAndMigrateIfNeeded(
+    plainPassword: string,
+    storedHash: string,
+    userId: string,
+    repository: ISamAttRepository
+  ): Promise<{ valid: boolean; migrated: boolean }> {
+    const check = this.verifyPassword(plainPassword, storedHash);
+    if (!check.valid) {
+      return { valid: false, migrated: false };
+    }
+    if (check.isLegacySha256) {
+      const upgradedBcryptHash = this.hashPassword(plainPassword);
+      await repository.updateUserPasswordHash(userId, upgradedBcryptHash);
+      await repository.recordAuditLog({
+        actor: userId,
+        action: 'PASSWORD_HASH_MIGRATED_TO_BCRYPT',
+        entityType: 'User',
+        entityId: userId,
+        summary: `อัปเกรด Password Hash ของบัญชี ${userId} จาก Legacy Hash เป็น Bcrypt สำเร็จหลังยืนยันรหัสผ่าน`,
+      });
+      return { valid: true, migrated: true };
+    }
+    return { valid: true, migrated: false };
+  }
+
+  /**
+   * Issue an HMAC-SHA256 signed session token with unique `jti`, `sub`, `iat`, and `exp` (§4.7 & §4.8).
+   */
+  public static issueSignedToken(
+    user: RepositoryUserAccount,
+    expiresInSeconds = 28800,
+    mode: RepositoryMode = 'MOCK'
+  ): string {
+    const secret = this.getSigningSecret(mode);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const jti = `JTI_${crypto.randomUUID()}`;
+
     const payload = {
+      jti,
       sub: user.id,
       username: user.username,
-      iat: Math.floor(Date.now() / 1000),
-      exp: Math.floor(Date.now() / 1000) + expiresInSeconds,
+      iat: nowSec,
+      exp: nowSec + expiresInSeconds,
     };
+
     const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
     const signature = crypto
-      .createHmac('sha256', TOKEN_SECRET)
+      .createHmac('sha256', secret)
       .update(payloadB64)
       .digest('base64url');
+
     return `${payloadB64}.${signature}`;
   }
 
   /**
-   * Verify an HMAC-SHA256 signed session token and return the decoded `sub` (userId).
+   * Verify token signature, expiration (`exp`), and session revocation (`jti` & user revocation timestamp) (§4.7 & §4.8).
    */
-  public static verifySignedToken(token: string): { valid: boolean; userId?: string; reason?: string } {
+  public static verifySignedToken(
+    token: string,
+    mode: RepositoryMode = 'MOCK'
+  ): {
+    valid: boolean;
+    userId?: string;
+    jti?: string;
+    reason?: string;
+  } {
     if (!token || typeof token !== 'string' || !token.includes('.')) {
       return { valid: false, reason: 'Malformed token' };
     }
-    const [payloadB64, signature] = token.split('.');
+
+    const parts = token.split('.');
+    if (parts.length !== 2) {
+      return { valid: false, reason: 'Malformed token structure' };
+    }
+
+    const [payloadB64, signature] = parts;
+    const secret = this.getSigningSecret(mode);
     const expectedSig = crypto
-      .createHmac('sha256', TOKEN_SECRET)
+      .createHmac('sha256', secret)
       .update(payloadB64)
       .digest('base64url');
 
-    if (signature !== expectedSig) {
+    const sigBuf = Buffer.from(signature);
+    const expBuf = Buffer.from(expectedSig);
+    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
       return { valid: false, reason: 'Invalid token signature' };
     }
 
     try {
       const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
       const nowSec = Math.floor(Date.now() / 1000);
-      if (typeof payload.exp === 'number' && payload.exp < nowSec) {
+
+      if (typeof payload.exp !== 'number' || payload.exp < nowSec) {
         return { valid: false, reason: 'Token expired' };
       }
-      return { valid: true, userId: payload.sub };
+
+      if (payload.jti && this.revokedTokenJtis.has(payload.jti)) {
+        return { valid: false, reason: 'Session has been revoked' };
+      }
+
+      const revokedBefore = this.userRevokedBeforeSec.get(payload.sub);
+      if (revokedBefore !== undefined && typeof payload.iat === 'number' && payload.iat <= revokedBefore) {
+        return { valid: false, reason: 'All user sessions prior to revocation have been invalidated' };
+      }
+
+      return {
+        valid: true,
+        userId: payload.sub,
+        jti: payload.jti,
+      };
     } catch {
       return { valid: false, reason: 'Invalid token payload' };
     }
   }
 
   /**
-   * Authenticate user credentials (`username` + `password`).
-   * Rejects username-only requests that omit `password` (§10: "ห้ามใช้ Username อย่างเดียวเป็นการยืนยันตัวตนจริง").
+   * Revoke a specific token immediately (e.g., on logout) (§4.8).
    */
-  public static authenticateCredentials(
-    repository: SamAttRepository,
+  public static revokeToken(token: string, mode: RepositoryMode = 'MOCK'): boolean {
+    const verified = this.verifySignedToken(token, mode);
+    if (verified.jti) {
+      this.revokedTokenJtis.add(verified.jti);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Revoke all active sessions for a user ID (§4.8).
+   */
+  public static revokeAllUserSessions(userId: string): void {
+    this.userRevokedBeforeSec.set(userId, Math.floor(Date.now() / 1000));
+  }
+
+  /**
+   * Check and update login rate limiter for brute-force protection (§4.9 & §4.10).
+   */
+  public static checkRateLimit(rateLimitKey: string): {
+    allowed: boolean;
+    remainingAttempts: number;
+    retryAfterSeconds?: number;
+  } {
+    const nowMs = Date.now();
+    const state = this.loginRateLimitMap.get(rateLimitKey);
+
+    if (!state) {
+      return { allowed: true, remainingAttempts: RATE_LIMIT_MAX_ATTEMPTS };
+    }
+
+    if (state.lockedUntilMs && state.lockedUntilMs > nowMs) {
+      return {
+        allowed: false,
+        remainingAttempts: 0,
+        retryAfterSeconds: Math.ceil((state.lockedUntilMs - nowMs) / 1000),
+      };
+    }
+
+    if (nowMs - state.firstFailedAtMs > RATE_LIMIT_WINDOW_MS) {
+      this.loginRateLimitMap.delete(rateLimitKey);
+      return { allowed: true, remainingAttempts: RATE_LIMIT_MAX_ATTEMPTS };
+    }
+
+    return {
+      allowed: true,
+      remainingAttempts: Math.max(0, RATE_LIMIT_MAX_ATTEMPTS - state.failedAttempts),
+    };
+  }
+
+  private static recordFailedLoginAttempt(rateLimitKey: string): {
+    locked: boolean;
+    failedAttempts: number;
+  } {
+    const nowMs = Date.now();
+    const current = this.loginRateLimitMap.get(rateLimitKey);
+
+    if (!current || nowMs - current.firstFailedAtMs > RATE_LIMIT_WINDOW_MS) {
+      const nextState: RateLimitState = {
+        failedAttempts: 1,
+        firstFailedAtMs: nowMs,
+        lockedUntilMs: null,
+      };
+      this.loginRateLimitMap.set(rateLimitKey, nextState);
+      return { locked: false, failedAttempts: 1 };
+    }
+
+    current.failedAttempts += 1;
+    if (current.failedAttempts >= RATE_LIMIT_MAX_ATTEMPTS) {
+      current.lockedUntilMs = nowMs + RATE_LIMIT_LOCKOUT_MS;
+      return { locked: true, failedAttempts: current.failedAttempts };
+    }
+
+    return { locked: false, failedAttempts: current.failedAttempts };
+  }
+
+  public static clearRateLimitForTest(): void {
+    this.loginRateLimitMap.clear();
+    this.revokedTokenJtis.clear();
+    this.userRevokedBeforeSec.clear();
+  }
+
+  public static resetSecurityStateForTests(): void {
+    this.clearRateLimitForTest();
+  }
+
+  /**
+   * Authenticate user credentials (`username` + `password`) with rate limiting, bcrypt verification,
+   * legacy hash migration, and audit logging without leaking sensitive values (§4.1–§4.11).
+   */
+  public static async authenticateCredentials(
+    repository: ISamAttRepository,
     username?: string,
-    password?: string
-  ): {
+    password?: string,
+    clientIp = '127.0.0.1'
+  ): Promise<{
     success: boolean;
+    statusCode: number;
     token?: string;
     user?: AuthenticatedUser;
     error?: string;
-  } {
+    retryAfterSeconds?: number;
+    passwordUpgradedToBcrypt?: boolean;
+  }> {
     if (!username || typeof username !== 'string' || !username.trim()) {
-      return { success: false, error: 'กรุณาระบุชื่อผู้ใช้งาน (username)' };
+      return {
+        success: false,
+        statusCode: 400,
+        error: 'กรุณาระบุชื่อผู้ใช้งาน (username)',
+      };
     }
+
     if (!password || typeof password !== 'string' || !password.trim()) {
       return {
         success: false,
+        statusCode: 401,
         error: 'กรุณาระบุรหัสผ่าน (ห้ามใช้เฉพาะ Username ในการยืนยันตัวตน)',
       };
     }
 
-    const account = repository.findUserByUsername(username.trim());
+    const normalizedUsername = username.trim().toLowerCase();
+    const rateKey = `${normalizedUsername}@${clientIp}`;
+
+    const rateCheck = this.checkRateLimit(rateKey);
+    if (!rateCheck.allowed) {
+      await repository.recordAuditLog({
+        actor: normalizedUsername,
+        action: 'AUTH_LOGIN_LOCKED_BRUTE_FORCE',
+        entityType: 'User',
+        entityId: normalizedUsername,
+        summary: `ระงับการเข้าสู่ระบบชั่วคราวของ ${normalizedUsername} เนื่องจากใส่รหัสผ่านผิดเกินกำหนด (Rate Limit Lockout)`,
+      });
+      return {
+        success: false,
+        statusCode: 429,
+        retryAfterSeconds: rateCheck.retryAfterSeconds,
+        error: `บัญชีถูกระงับการเข้าสู่ระบบชั่วคราวเนื่องจากใส่รหัสผ่านผิดเกิน ${RATE_LIMIT_MAX_ATTEMPTS} ครั้ง กรุณารอ ${rateCheck.retryAfterSeconds} วินาที`,
+      };
+    }
+
+    const account = await repository.findUserByUsername(normalizedUsername);
     if (!account || !account.active) {
-      return { success: false, error: 'ไม่พบบัญชีผู้ใช้งาน หรือบัญชีถูกระงับการใช้งาน' };
+      this.recordFailedLoginAttempt(rateKey);
+      return {
+        success: false,
+        statusCode: 401,
+        error: 'ชื่อผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง',
+      };
     }
 
-    const inputHash = this.hashPassword(password);
-    if (account.passwordHash !== inputHash && account.passwordHash !== password) {
-      return { success: false, error: 'รหัสผ่านไม่ถูกต้อง' };
+    const verifyRes = await this.verifyPasswordAndMigrateIfNeeded(
+      password,
+      account.passwordHash,
+      account.id,
+      repository
+    );
+
+    if (!verifyRes.valid) {
+      const failState = this.recordFailedLoginAttempt(rateKey);
+      await repository.recordAuditLog({
+        actor: account.username,
+        actorName: account.fullName,
+        actorRole: account.role,
+        action: failState.locked ? 'AUTH_BRUTE_FORCE_LOCKOUT' : 'AUTH_LOGIN_FAILED',
+        entityType: 'User',
+        entityId: account.id,
+        summary: `เข้าสู่ระบบไม่สำเร็จสำหรับ ${account.username} (ครั้งที่ ${failState.failedAttempts}/${RATE_LIMIT_MAX_ATTEMPTS})`,
+      });
+
+      if (failState.locked) {
+        const retryCheck = this.checkRateLimit(rateKey);
+        return {
+          success: false,
+          statusCode: 429,
+          retryAfterSeconds: retryCheck.retryAfterSeconds || 900,
+          error: `บัญชีถูกระงับการเข้าสู่ระบบชั่วคราวเนื่องจากใส่รหัสผ่านผิดเกิน ${RATE_LIMIT_MAX_ATTEMPTS} ครั้ง`,
+        };
+      }
+
+      return {
+        success: false,
+        statusCode: 401,
+        error: 'ชื่อผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง',
+      };
     }
 
-    const token = this.issueSignedToken(account);
+    // Reset failed attempts upon successful login
+    this.loginRateLimitMap.delete(rateKey);
+
+    const token = this.issueSignedToken(account, 28800, repository.mode);
     const authUser: AuthenticatedUser = {
       userId: account.id,
       username: account.username,
@@ -121,7 +451,7 @@ export class AuthService {
       authMode: 'VERIFIED_TOKEN',
     };
 
-    repository.recordAuditLog({
+    await repository.recordAuditLog({
       actor: account.username,
       actorName: account.fullName,
       actorRole: account.role,
@@ -133,93 +463,103 @@ export class AuthService {
 
     return {
       success: true,
+      statusCode: 200,
       token,
       user: authUser,
+      passwordUpgradedToBcrypt: verifyRes.migrated,
     };
   }
 
   /**
-   * Express authentication middleware.
-   * - Checks `Authorization: Bearer <token>` first.
-   * - In non-production mode (`NODE_ENV !== 'production'`), supports `x-sam-att-dev-user-id` for the UI Persona Switcher,
-   *   still resolving authoritative `role` and `personId` from the repository (never trusting raw role/personId headers).
-   * - In production mode (`NODE_ENV === 'production'`), strictly requires a verified Bearer token (no mock fallback!).
+   * Express authentication middleware (§4 & §7).
+   * - Verifies Bearer token signature, expiration, and session revocation.
+   * - Re-queries the authoritative repository for `role` and `personId` (never trusts client claims).
+   * - Strictly disables Mock Role Fallback when `repository.mode === 'REAL'` or `NODE_ENV === 'production'`.
    */
-  public static createAuthMiddleware(repository: SamAttRepository) {
-    return (req: Request, res: Response, next: NextFunction) => {
-      const authHeader = req.headers.authorization;
-      const isProduction = process.env.NODE_ENV === 'production';
+  public static createAuthMiddleware(repository: ISamAttRepository) {
+    return async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const authHeader = req.headers.authorization;
+        const isRealOrProduction =
+          repository.mode === 'REAL' ||
+          process.env.SAM_ATT_REPO_MODE === 'REAL' ||
+          process.env.NODE_ENV === 'production';
 
-      if (authHeader && authHeader.startsWith('Bearer ')) {
-        const token = authHeader.slice(7).trim();
-        const verification = AuthService.verifySignedToken(token);
-        if (!verification.valid || !verification.userId) {
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+          const token = authHeader.slice(7).trim();
+          const verification = AuthService.verifySignedToken(token, repository.mode);
+          if (!verification.valid || !verification.userId) {
+            return res.status(401).json({
+              success: false,
+              error: `การยืนยันตัวตนไม่ผ่าน (${verification.reason || 'Invalid token'})`,
+            });
+          }
+
+          const dbUser = await repository.findUserById(verification.userId);
+          if (!dbUser || !dbUser.active) {
+            return res.status(401).json({
+              success: false,
+              error: 'บัญชีผู้ใช้งานไม่มีอยู่ในระบบหรือถูกระงับการใช้งาน',
+            });
+          }
+
+          (req as any).user = {
+            userId: dbUser.id,
+            username: dbUser.username,
+            fullName: dbUser.fullName,
+            role: dbUser.role,
+            personId: dbUser.personId,
+            department: dbUser.department,
+            authMode: 'VERIFIED_TOKEN',
+          } satisfies AuthenticatedUser;
+          (req as any).rawToken = token;
+
+          return next();
+        }
+
+        // §4.12: NEVER allow Mock Role Fallback in REAL mode or Production!
+        if (isRealOrProduction) {
           return res.status(401).json({
             success: false,
-            error: `การยืนยันตัวตนไม่ผ่าน (${verification.reason || 'Invalid token'})`,
+            error:
+              'Unauthorized: Real/Production mode requires a valid signed Bearer token (Mock Persona Fallback is disabled).',
           });
         }
 
-        const dbUser = repository.findUserById(verification.userId);
-        if (!dbUser || !dbUser.active) {
+        // MOCK / TEST mode only: resolve persona by `x-sam-att-dev-user-id` from repository
+        const devUserId =
+          (req.headers['x-sam-att-dev-user-id'] as string | undefined) || 'USR002';
+        const devAccount = await repository.findUserById(devUserId);
+
+        if (!devAccount || !devAccount.active) {
           return res.status(401).json({
             success: false,
-            error: 'บัญชีผู้ใช้งานไม่มีอยู่ในระบบหรือถูกปิดใช้งาน',
+            error: `Development persona user "${devUserId}" not found in repository`,
           });
         }
 
         (req as any).user = {
-          userId: dbUser.id,
-          username: dbUser.username,
-          fullName: dbUser.fullName,
-          role: dbUser.role,
-          personId: dbUser.personId,
-          department: dbUser.department,
-          authMode: 'VERIFIED_TOKEN',
+          userId: devAccount.id,
+          username: devAccount.username,
+          fullName: devAccount.fullName,
+          role: devAccount.role,
+          personId: devAccount.personId,
+          department: devAccount.department,
+          authMode: 'DEV_PERSONA',
         } satisfies AuthenticatedUser;
 
         return next();
+      } catch (err) {
+        return next(err);
       }
-
-      // If in production mode, reject any unauthenticated request immediately (§10: No Mock Role Fallback in Production!)
-      if (isProduction) {
-        return res.status(401).json({
-          success: false,
-          error: 'Unauthorized: Production mode requires a valid signed Bearer token',
-        });
-      }
-
-      // Development / UI Prototype mode only: resolve persona by `x-sam-att-dev-user-id` from repository
-      const devUserId =
-        (req.headers['x-sam-att-dev-user-id'] as string | undefined) || 'USR002';
-      const devAccount = repository.findUserById(devUserId);
-
-      if (!devAccount || !devAccount.active) {
-        return res.status(401).json({
-          success: false,
-          error: `Development persona user "${devUserId}" not found in repository`,
-        });
-      }
-
-      (req as any).user = {
-        userId: devAccount.id,
-        username: devAccount.username,
-        fullName: devAccount.fullName,
-        role: devAccount.role,
-        personId: devAccount.personId,
-        department: devAccount.department,
-        authMode: 'DEV_PERSONA',
-      } satisfies AuthenticatedUser;
-
-      return next();
     };
   }
 
   /**
-   * Role-based access control guard (§10).
+   * Role-based access control guard (§4 & §7).
    */
-  public static requireRoles(allowedRoles: ReadonlyArray<UserRole>, repository?: SamAttRepository) {
-    return (req: Request, res: Response, next: NextFunction) => {
+  public static requireRoles(allowedRoles: ReadonlyArray<UserRole>, repository?: ISamAttRepository) {
+    return async (req: Request, res: Response, next: NextFunction) => {
       const user = (req as any).user as AuthenticatedUser | undefined;
       if (!user) {
         return res.status(401).json({
@@ -230,7 +570,7 @@ export class AuthService {
 
       if (!allowedRoles.includes(user.role)) {
         if (repository) {
-          repository.recordAuditLog({
+          await repository.recordAuditLog({
             actor: user.username,
             actorName: user.fullName,
             actorRole: user.role,
@@ -251,15 +591,13 @@ export class AuthService {
   }
 
   /**
-   * Verify that a `GENERAL_USER` is only accessing their own `personId` (§10).
-   * If the request includes a `personId` in query/params/body that differs from `user.personId`,
-   * immediately blocks with 403 Forbidden and logs a security violation.
+   * Verify that a `GENERAL_USER` is only accessing their own `personId` (§4 & §7.12).
    */
-  public static verifyGeneralUserOwnAccess(
+  public static async verifyGeneralUserOwnAccess(
     req: Request,
     res: Response,
-    repository?: SamAttRepository
-  ): { allowed: true; personId: string } | { allowed: false } {
+    repository?: ISamAttRepository
+  ): Promise<{ allowed: true; personId: string } | { allowed: false }> {
     const user = (req as any).user as AuthenticatedUser | undefined;
     if (!user) {
       res.status(401).json({ success: false, error: 'Unauthorized' });
@@ -274,7 +612,6 @@ export class AuthService {
       return { allowed: false };
     }
 
-    // Check if client attempted to pass another personId in query, params, or body
     const requestedPersonId =
       (req.query?.personId as string | undefined) ||
       (req.params?.personId as string | undefined) ||
@@ -282,7 +619,7 @@ export class AuthService {
 
     if (requestedPersonId && requestedPersonId !== user.personId && user.role === 'GENERAL_USER') {
       if (repository) {
-        repository.recordAuditLog({
+        await repository.recordAuditLog({
           actor: user.username,
           actorName: user.fullName,
           actorRole: user.role,
@@ -294,7 +631,8 @@ export class AuthService {
       }
       res.status(403).json({
         success: false,
-        error: 'Forbidden: บทบาทผู้ใช้งานทั่วไป (GENERAL_USER) สามารถเข้าถึงเฉพาะข้อมูลเวลาปฏิบัติงานของตนเองเท่านั้น ห้ามเปลี่ยน PERSON_ID เพื่อดูข้อมูลผู้อื่น',
+        error:
+          'Forbidden: บทบาทผู้ใช้งานทั่วไป (GENERAL_USER) สามารถเข้าถึงเฉพาะข้อมูลเวลาปฏิบัติงานของตนเองเท่านั้น ห้ามเปลี่ยน PERSON_ID เพื่อดูข้อมูลผู้อื่น',
       });
       return { allowed: false };
     }

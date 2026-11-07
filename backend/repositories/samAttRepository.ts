@@ -1,18 +1,14 @@
 /**
- * Sam_Att V2 — Transactional Repository Layer (`samchuk_attendance` Database)
- * Phase 2 — §6, §7, §9 & §13
+ * Sam_Att V2 — In-Memory & Disk-Persisted Test Repository + Repository Mode Factory
+ * Phase 1+2 Hardening — §2
  *
- * Responsibilities:
- * 1. Isolates all persistence to `samchuk_attendance` (never touches Procurement or Cash_Cheque).
- * 2. Enforces Immutable Raw Scans (`raw_scans` with unique `dedupe_key`).
- * 3. Enforces Business Key Uniqueness (`uq_attendance_entry`: person_id + work_date + shift_id).
- * 4. Separates `attendance_notes` and `hr_review_history` from `raw_scans` so Reprocess never loses HR reviews.
- * 5. Preserves shift cancellation history (`shift_cancellation_logs`) instead of hard-deleting audit trails.
- * 6. Provides atomic Transactions (`withTransaction`) with automatic rollback on failure.
- * 7. Uses parameterized SQL queries for MySQL connection adapters and provides an deterministic
- *    Transactional Test/Staging Database Engine for Phase 2 Integration Tests.
+ * Strictly separates Repository Modes:
+ * - `MOCK`: In-Memory Repository (for UI Prototype & Unit Tests)
+ * - `TEST`: Disk-Persisted Test Repository (survives Backend/Repository restart for Integration Tests)
+ * - `REAL`: `MySqlSamAttRepository` (executes real SQL against MySQL `samchuk_attendance` pool; NEVER falls back to Mock!)
  */
 
+import fs from 'node:fs';
 import {
   EngineAttendanceRecord,
   EngineFingerprintMapping,
@@ -28,70 +24,34 @@ import {
   UserRole,
   ValidatedRawScanEvent,
 } from '../types';
+import {
+  ISamAttRepository,
+  ParameterizedSqlRecord,
+  RepositoryAuditLog,
+  RepositoryMode,
+  RepositoryPushHistory,
+  RepositoryShiftCancellationLog,
+  RepositoryUserAccount,
+} from './interfaces';
+import {
+  MySqlSamAttRepository,
+  DatabaseUnavailableError,
+  MySqlConnectionConfig,
+  SqlConnectionPool,
+} from './mysqlSamAttRepository';
 import { ScannerAdapter, RawScanIngestionSummary } from '../services/scannerAdapter';
 import { AttendanceCalculator } from '../services/attendanceCalculator';
 
-export interface ParameterizedSqlRecord {
-  sql: string;
-  params: ReadonlyArray<unknown>;
-  timestamp: string;
-}
-
-export interface RepositoryAuditLog {
-  id: string;
-  actor: string;
-  actorName: string;
-  actorRole: UserRole;
-  action: string;
-  entityType: string;
-  entityId: string;
-  summary: string;
-  timestamp: string;
-  metadata?: Record<string, unknown>;
-}
-
-export interface RepositoryShiftCancellationLog {
-  id: string;
-  assignmentId: string;
-  personId: string;
-  personName: string;
-  workDate: string;
-  shiftId: string;
-  shiftName: string;
-  cancelledAt: string;
-  cancelledBy: string;
-  reason: string;
-}
-
-export interface RepositoryPushHistory {
-  id: string;
-  attendanceId: string;
-  personId: string;
-  fullName: string;
-  workDate: string;
-  shiftId: string;
-  status: string;
-  target: string;
-  idempotencyKey: string;
-  pushedBy: string;
-  pushedByName: string;
-  pushedAt: string;
-  responseStatus: 'SUCCESS' | 'FAILED' | 'DRY_RUN_PREVIEW';
-  responseSummary: string;
-  payloadJson?: string;
-}
-
-export interface RepositoryUserAccount {
-  id: string;
-  username: string;
-  passwordHash: string;
-  fullName: string;
-  role: UserRole;
-  personId: string | null;
-  department: string;
-  position: string;
-  active: boolean;
-}
+export type {
+  ISamAttRepository,
+  ParameterizedSqlRecord,
+  RepositoryAuditLog,
+  RepositoryMode,
+  RepositoryPushHistory,
+  RepositoryShiftCancellationLog,
+  RepositoryUserAccount,
+};
+export { MySqlSamAttRepository, DatabaseUnavailableError };
 
 interface DatabaseSnapshot {
   users: RepositoryUserAccount[];
@@ -108,7 +68,11 @@ interface DatabaseSnapshot {
   auditLogs: RepositoryAuditLog[];
 }
 
-export class SamAttRepository {
+export class SamAttRepository implements ISamAttRepository {
+  public readonly mode: RepositoryMode;
+  private persistenceFilePath: string | null = null;
+  private txMutexChain: Promise<unknown> = Promise.resolve();
+
   private users: RepositoryUserAccount[] = [];
   private personnel: EnginePersonnel[] = [];
   private fingerprintMappings: EngineFingerprintMapping[] = [];
@@ -117,21 +81,39 @@ export class SamAttRepository {
   private cancellationLogs: RepositoryShiftCancellationLog[] = [];
   private rawScans: ValidatedRawScanEvent[] = [];
   private attendance: EngineAttendanceRecord[] = [];
-  private notes = new Map<string, EngineHRNote>(); // keyed by attendanceId
-  private reviewHistory = new Map<string, EngineHRReviewHistoryItem[]>(); // keyed by attendanceId
+  private notes = new Map<string, EngineHRNote>();
+  private reviewHistory = new Map<string, EngineHRReviewHistoryItem[]>();
   private pushHistory: RepositoryPushHistory[] = [];
   private auditLogs: RepositoryAuditLog[] = [];
   private parameterizedQueryLog: ParameterizedSqlRecord[] = [];
 
-  constructor(seed?: Partial<{
-    users: RepositoryUserAccount[];
-    personnel: EnginePersonnel[];
-    fingerprintMappings: EngineFingerprintMapping[];
-    shifts: EngineShiftConfig[];
-    assignments: EngineShiftAssignment[];
-    rawScans: RawScanDto[];
-    attendance: EngineAttendanceRecord[];
-  }>) {
+  constructor(
+    seed?: Partial<{
+      mode: RepositoryMode;
+      persistenceFilePath: string;
+      users: RepositoryUserAccount[];
+      personnel: EnginePersonnel[];
+      fingerprintMappings: EngineFingerprintMapping[];
+      shifts: EngineShiftConfig[];
+      assignments: EngineShiftAssignment[];
+      rawScans: RawScanDto[];
+      attendance: EngineAttendanceRecord[];
+    }>,
+    options?: {
+      mode?: RepositoryMode;
+      persistenceFilePath?: string;
+    }
+  ) {
+    const resolvedPath = options?.persistenceFilePath || seed?.persistenceFilePath || null;
+    this.mode = options?.mode || seed?.mode || (resolvedPath ? 'TEST' : 'MOCK');
+    this.persistenceFilePath = resolvedPath;
+
+    // If a persistence file exists on disk (e.g., after Backend Restart in TEST mode), load state from disk!
+    if (this.persistenceFilePath && fs.existsSync(this.persistenceFilePath)) {
+      this.loadFromDiskFile(this.persistenceFilePath);
+      return;
+    }
+
     if (seed?.users) this.users = structuredClone(seed.users);
     if (seed?.personnel) this.personnel = structuredClone(seed.personnel);
     if (seed?.fingerprintMappings) {
@@ -153,6 +135,63 @@ export class SamAttRepository {
     if (seed?.rawScans && seed.rawScans.length > 0) {
       this.ingestRawScans(seed.rawScans, 'SYSTEM_SEED');
     }
+
+    this.flushToDiskIfConfigured();
+  }
+
+  private flushToDiskIfConfigured(): void {
+    if (!this.persistenceFilePath) return;
+    const serialized = {
+      users: this.users,
+      personnel: this.personnel,
+      fingerprintMappings: this.fingerprintMappings,
+      shifts: this.shifts,
+      assignments: this.assignments,
+      cancellationLogs: this.cancellationLogs,
+      rawScans: this.rawScans,
+      attendance: this.attendance,
+      notesEntries: Array.from(this.notes.entries()),
+      reviewHistoryEntries: Array.from(this.reviewHistory.entries()),
+      pushHistory: this.pushHistory,
+      auditLogs: this.auditLogs,
+    };
+    fs.writeFileSync(this.persistenceFilePath, JSON.stringify(serialized, null, 2), 'utf8');
+  }
+
+  private loadFromDiskFile(filePath: string): void {
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const parsed = JSON.parse(raw);
+    this.users = parsed.users || [];
+    this.personnel = parsed.personnel || [];
+    this.fingerprintMappings = parsed.fingerprintMappings || [];
+    this.shifts = parsed.shifts || [];
+    this.assignments = parsed.assignments || [];
+    this.cancellationLogs = parsed.cancellationLogs || [];
+    this.rawScans = (parsed.rawScans || []).map((ev: ValidatedRawScanEvent) =>
+      Object.freeze({ ...ev })
+    );
+    this.attendance = parsed.attendance || [];
+    this.notes = new Map(parsed.notesEntries || []);
+    this.reviewHistory = new Map(parsed.reviewHistoryEntries || []);
+    this.pushHistory = parsed.pushHistory || [];
+    this.auditLogs = parsed.auditLogs || [];
+  }
+
+  public async checkHealth(): Promise<{
+    healthy: boolean;
+    mode: RepositoryMode;
+    database: string;
+    message: string;
+  }> {
+    return {
+      healthy: true,
+      mode: this.mode,
+      database:
+        this.mode === 'TEST'
+          ? `samchuk_attendance_test (${this.persistenceFilePath || 'memory'})`
+          : 'samchuk_attendance_mock',
+      message: `Repository active in ${this.mode} mode`,
+    };
   }
 
   private recordSql(sql: string, params: ReadonlyArray<unknown>): void {
@@ -168,45 +207,57 @@ export class SamAttRepository {
   }
 
   /**
-   * Execute an atomic database transaction (`BEGIN` -> operations -> `COMMIT`, or `ROLLBACK` on error) (§7 & §13).
+   * Execute an atomic database transaction with serialized mutex locking (preventing concurrent update races)
+   * and full rollback on failure (§2.7, §2.8, §2.9).
    */
   public async withTransaction<T>(fn: (repo: this) => Promise<T> | T): Promise<T> {
-    const snapshot: DatabaseSnapshot = {
-      users: structuredClone(this.users),
-      personnel: structuredClone(this.personnel),
-      fingerprintMappings: structuredClone(this.fingerprintMappings),
-      shifts: structuredClone(this.shifts),
-      assignments: structuredClone(this.assignments),
-      cancellationLogs: structuredClone(this.cancellationLogs),
-      rawScans: [...this.rawScans], // ValidatedRawScanEvent objects are already frozen
-      attendance: structuredClone(this.attendance),
-      notes: structuredClone(this.notes),
-      reviewHistory: structuredClone(this.reviewHistory),
-      pushHistory: structuredClone(this.pushHistory),
-      auditLogs: structuredClone(this.auditLogs),
+    const runTx = async (): Promise<T> => {
+      const snapshot: DatabaseSnapshot = {
+        users: structuredClone(this.users),
+        personnel: structuredClone(this.personnel),
+        fingerprintMappings: structuredClone(this.fingerprintMappings),
+        shifts: structuredClone(this.shifts),
+        assignments: structuredClone(this.assignments),
+        cancellationLogs: structuredClone(this.cancellationLogs),
+        rawScans: [...this.rawScans],
+        attendance: structuredClone(this.attendance),
+        notes: structuredClone(this.notes),
+        reviewHistory: structuredClone(this.reviewHistory),
+        pushHistory: structuredClone(this.pushHistory),
+        auditLogs: structuredClone(this.auditLogs),
+      };
+
+      this.recordSql('START TRANSACTION', []);
+      try {
+        const result = await fn(this);
+        this.recordSql('COMMIT', []);
+        this.flushToDiskIfConfigured();
+        return result;
+      } catch (err) {
+        this.recordSql('ROLLBACK', []);
+        this.users = snapshot.users;
+        this.personnel = snapshot.personnel;
+        this.fingerprintMappings = snapshot.fingerprintMappings;
+        this.shifts = snapshot.shifts;
+        this.assignments = snapshot.assignments;
+        this.cancellationLogs = snapshot.cancellationLogs;
+        this.rawScans = snapshot.rawScans;
+        this.attendance = snapshot.attendance;
+        this.notes = snapshot.notes;
+        this.reviewHistory = snapshot.reviewHistory;
+        this.pushHistory = snapshot.pushHistory;
+        this.auditLogs = snapshot.auditLogs;
+        this.flushToDiskIfConfigured();
+        throw err;
+      }
     };
 
-    this.recordSql('START TRANSACTION', []);
-    try {
-      const result = await fn(this);
-      this.recordSql('COMMIT', []);
-      return result;
-    } catch (err) {
-      this.recordSql('ROLLBACK', []);
-      this.users = snapshot.users;
-      this.personnel = snapshot.personnel;
-      this.fingerprintMappings = snapshot.fingerprintMappings;
-      this.shifts = snapshot.shifts;
-      this.assignments = snapshot.assignments;
-      this.cancellationLogs = snapshot.cancellationLogs;
-      this.rawScans = snapshot.rawScans;
-      this.attendance = snapshot.attendance;
-      this.notes = snapshot.notes;
-      this.reviewHistory = snapshot.reviewHistory;
-      this.pushHistory = snapshot.pushHistory;
-      this.auditLogs = snapshot.auditLogs;
-      throw err;
-    }
+    const nextInQueue = this.txMutexChain.then(runTx, runTx);
+    this.txMutexChain = nextInQueue.then(
+      () => undefined,
+      () => undefined
+    );
+    return nextInQueue;
   }
 
   // ==========================================
@@ -253,6 +304,7 @@ export class SamAttRepository {
     );
 
     this.auditLogs.unshift(entry);
+    this.flushToDiskIfConfigured();
     return entry;
   }
 
@@ -265,26 +317,44 @@ export class SamAttRepository {
   // 2. Users & Role Lookup
   // ==========================================
   public findUserByUsername(username: string): RepositoryUserAccount | undefined {
-    this.recordSql('SELECT * FROM users WHERE LOWER(username) = LOWER(?) AND active = TRUE LIMIT 1', [
-      username,
-    ]);
+    this.recordSql(
+      'SELECT * FROM users WHERE LOWER(username) = LOWER(?) AND active = TRUE LIMIT 1',
+      [username]
+    );
     return this.users.find(
       (u) => u.active && u.username.toLowerCase() === username.toLowerCase()
     );
   }
 
   public findUserById(userId: string): RepositoryUserAccount | undefined {
-    this.recordSql('SELECT * FROM users WHERE id = ? AND active = TRUE LIMIT 1', [userId]);
+    this.recordSql('SELECT * FROM users WHERE id = ? AND active = TRUE LIMIT 1', [
+      userId,
+    ]);
     return this.users.find((u) => u.active && u.id === userId);
   }
 
+  public updateUserPasswordHash(userId: string, newPasswordHash: string): void {
+    this.recordSql('UPDATE users SET password_hash = ? WHERE id = ?', [
+      newPasswordHash,
+      userId,
+    ]);
+    const user = this.users.find((u) => u.id === userId);
+    if (user) {
+      user.passwordHash = newPasswordHash;
+      this.flushToDiskIfConfigured();
+    }
+  }
+
   public getUsers(): RepositoryUserAccount[] {
-    this.recordSql('SELECT id, username, full_name, role, person_id, department, position, active FROM users', []);
+    this.recordSql(
+      'SELECT id, username, full_name, role, person_id, department, position, active FROM users',
+      []
+    );
     return structuredClone(this.users);
   }
 
   // ==========================================
-  // 3. Personnel & Effective-Date FINGLE_ID Mappings (§8)
+  // 3. Personnel & Effective-Date FINGLE_ID Mappings
   // ==========================================
   public getPersonnel(filters?: {
     search?: string;
@@ -292,14 +362,18 @@ export class SamAttRepository {
     personnelType?: string;
     activeOnly?: boolean;
   }): EnginePersonnel[] {
-    this.recordSql('SELECT * FROM personnel WHERE active = ?', [filters?.activeOnly ?? true]);
+    this.recordSql('SELECT * FROM personnel WHERE active = ?', [
+      filters?.activeOnly ?? true,
+    ]);
     let list = [...this.personnel];
     if (filters?.activeOnly !== false) {
       list = list.filter((p) => p.active);
     }
     if (filters?.department && filters.department !== 'ALL') {
       list = list.filter(
-        (p) => p.department === filters.department || p.groupName === filters.department
+        (p) =>
+          p.department === filters.department ||
+          p.groupName === filters.department
       );
     }
     if (filters?.personnelType && filters.personnelType !== 'ALL') {
@@ -320,20 +394,21 @@ export class SamAttRepository {
 
   public getFingerprintMappings(personId?: string): EngineFingerprintMapping[] {
     if (personId) {
-      this.recordSql('SELECT * FROM fingerprint_mappings WHERE person_id = ? ORDER BY effective_from DESC', [
-        personId,
-      ]);
+      this.recordSql(
+        'SELECT * FROM fingerprint_mappings WHERE person_id = ? ORDER BY effective_from DESC',
+        [personId]
+      );
       return structuredClone(
         this.fingerprintMappings.filter((m) => m.personId === personId)
       );
     }
-    this.recordSql('SELECT * FROM fingerprint_mappings ORDER BY effective_from DESC', []);
+    this.recordSql(
+      'SELECT * FROM fingerprint_mappings ORDER BY effective_from DESC',
+      []
+    );
     return structuredClone(this.fingerprintMappings);
   }
 
-  /**
-   * Upsert personnel from HOSOffice authoritative sync while preserving historical FINGLE_ID mappings (§8.5–§8.10).
-   */
   public upsertPersonnelFromHosOffice(
     incomingPersonnel: ReadonlyArray<EnginePersonnel>,
     syncDateStr = '2026-11-06',
@@ -348,7 +423,6 @@ export class SamAttRepository {
     let updatedCount = 0;
     let fingleIdChangedCount = 0;
 
-    // Detect duplicate FINGLE_IDs across active incoming personnel (§8.10)
     const fingleToPersons = new Map<number, string[]>();
     for (const p of incomingPersonnel) {
       if (p.active && p.fingleId > 0) {
@@ -359,7 +433,11 @@ export class SamAttRepository {
       }
     }
 
-    const disputedMappings: Array<{ fingleId: number; personIds: string[]; reason: string }> = [];
+    const disputedMappings: Array<{
+      fingleId: number;
+      personIds: string[];
+      reason: string;
+    }> = [];
     for (const [fingleId, pids] of fingleToPersons.entries()) {
       if (pids.length > 1) {
         disputedMappings.push({
@@ -374,7 +452,7 @@ export class SamAttRepository {
 
     for (const incoming of incomingPersonnel) {
       if (!incoming.personId || incoming.personId.trim() === '') {
-        continue; // §8.6 & §8.9: Never match by name alone without PERSON_ID
+        continue;
       }
 
       const existingIdx = this.personnel.findIndex(
@@ -423,7 +501,6 @@ export class SamAttRepository {
 
         if (prev.fingleId !== incoming.fingleId && incoming.fingleId > 0) {
           fingleIdChangedCount++;
-          // Close previous active mapping so historical raw scans before syncDateStr still resolve! (§8.8)
           const prevDayMs =
             AttendanceCalculator.parseWorkDateToEpochMs(syncDateStr) - 86400000;
           const prevDayStr = AttendanceCalculator.formatEpochMs(prevDayMs).dateStr;
@@ -482,9 +559,15 @@ export class SamAttRepository {
       entityType: 'Personnel',
       entityId: 'BATCH',
       summary: `ซิงค์ข้อมูลบุคลากรจาก HOSOffice: เพิ่มใหม่ ${insertedCount}, อัปเดต ${updatedCount}, เปลี่ยน FINGLE_ID ${fingleIdChangedCount}, พบปัญหา Mapping ซ้ำ ${disputedMappings.length}`,
-      metadata: { insertedCount, updatedCount, fingleIdChangedCount, disputedMappings },
+      metadata: {
+        insertedCount,
+        updatedCount,
+        fingleIdChangedCount,
+        disputedMappings,
+      },
     });
 
+    this.flushToDiskIfConfigured();
     return {
       insertedCount,
       updatedCount,
@@ -494,7 +577,7 @@ export class SamAttRepository {
   }
 
   // ==========================================
-  // 4. Shifts & Shift Assignments (§7)
+  // 4. Shifts & Shift Assignments
   // ==========================================
   public getShifts(): EngineShiftConfig[] {
     this.recordSql('SELECT * FROM shifts ORDER BY start_time ASC', []);
@@ -547,6 +630,7 @@ export class SamAttRepository {
       summary: `บันทึกข้อมูลกะ "${shift.name}" (${shift.startTime}-${shift.endTime})`,
     });
 
+    this.flushToDiskIfConfigured();
     return structuredClone(shift);
   }
 
@@ -579,11 +663,6 @@ export class SamAttRepository {
     return structuredClone(list);
   }
 
-  /**
-   * Assign shift(s) to a person while enforcing:
-   * - Unique constraint `(person_id, work_date, shift_id)`
-   * - Real interval non-overlap validation (touching boundaries allowed, overlapping intervals rejected)
-   */
   public assignShift(
     assignment: Omit<EngineShiftAssignment, 'id' | 'status'> & { id?: string },
     actor = 'STAFF'
@@ -594,10 +673,12 @@ export class SamAttRepository {
   } {
     const shift = this.shifts.find((s) => s.id === assignment.shiftId);
     if (!shift || !shift.active) {
-      return { success: false, error: `ไม่พบกะที่เปิดใช้งาน (${assignment.shiftId})` };
+      return {
+        success: false,
+        error: `ไม่พบกะที่เปิดใช้งาน (${assignment.shiftId})`,
+      };
     }
 
-    // Check unique key `(person_id, work_date, shift_id)` among ACTIVE assignments
     const duplicate = this.assignments.find(
       (a) =>
         a.status !== 'CANCELLED' &&
@@ -612,9 +693,10 @@ export class SamAttRepository {
       };
     }
 
-    // Check real interval overlap against existing active shifts of this person (within +-1 day for cross-midnight)
     const candidateAssignment: EngineShiftAssignment = {
-      id: assignment.id || `SA_${assignment.personId}_${assignment.workDate.replace(/-/g, '')}_${assignment.shiftId}`,
+      id:
+        assignment.id ||
+        `SA_${assignment.personId}_${assignment.workDate.replace(/-/g, '')}_${assignment.shiftId}`,
       personId: assignment.personId,
       workDate: assignment.workDate,
       shiftId: assignment.shiftId,
@@ -629,7 +711,9 @@ export class SamAttRepository {
     };
 
     const existingForPerson = this.assignments
-      .filter((a) => a.status !== 'CANCELLED' && a.personId === assignment.personId)
+      .filter(
+        (a) => a.status !== 'CANCELLED' && a.personId === assignment.personId
+      )
       .map((a) => ({
         assignment: a,
         shift:
@@ -687,15 +771,13 @@ export class SamAttRepository {
       summary: `กำหนดกะ "${shift.name}" ให้ ${assignment.personId} วันที่ ${assignment.workDate}`,
     });
 
+    this.flushToDiskIfConfigured();
     return {
       success: true,
       assignment: structuredClone(candidateAssignment),
     };
   }
 
-  /**
-   * Cancel a shift assignment while preserving historical audit trail (§7).
-   */
   public cancelShiftAssignment(params: {
     assignmentId: string;
     reason: string;
@@ -763,10 +845,13 @@ export class SamAttRepository {
       summary: `ยกเลิกกะ "${log.shiftName}" ของ ${personName} วันที่ ${target.workDate} (เหตุผล: ${params.reason})`,
     });
 
+    this.flushToDiskIfConfigured();
     return { success: true, log };
   }
 
-  public getShiftCancellationLogs(personId?: string): RepositoryShiftCancellationLog[] {
+  public getShiftCancellationLogs(
+    personId?: string
+  ): RepositoryShiftCancellationLog[] {
     if (personId) {
       return structuredClone(
         this.cancellationLogs.filter((c) => c.personId === personId)
@@ -776,7 +861,7 @@ export class SamAttRepository {
   }
 
   // ==========================================
-  // 5. Immutable Raw Scans (§2 & §7)
+  // 5. Immutable Raw Scans
   // ==========================================
   public ingestRawScans(
     incomingScans: ReadonlyArray<unknown>,
@@ -791,7 +876,7 @@ export class SamAttRepository {
     });
 
     for (const ev of summary.newEvents) {
-      this.rawScans.push(ev); // Already frozen by Object.freeze in ScannerAdapter
+      this.rawScans.push(ev);
       this.recordSql(
         'INSERT IGNORE INTO raw_scans (id, machine_no, enroll_number, scan_datetime_raw, verify_mode, in_out_mode, work_code, mapped_person_id, mapping_status, imported_at, dedupe_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         [
@@ -820,6 +905,7 @@ export class SamAttRepository {
       });
     }
 
+    this.flushToDiskIfConfigured();
     return summary;
   }
 
@@ -876,7 +962,7 @@ export class SamAttRepository {
   }
 
   // ==========================================
-  // 6. Attendance Calculation, Reprocess & HR Review Persistence (§3, §4, §7)
+  // 6. Attendance Calculation, Reprocess & HR Review Persistence
   // ==========================================
   public previewReprocess(params: {
     fromDate: string;
@@ -924,7 +1010,6 @@ export class SamAttRepository {
       filterPersonId: params.filterPersonId,
     });
 
-    // Upsert by businessKey `(person_id, work_date, shift_id)` without creating duplicates (§4 & §7)
     for (const computed of result.records) {
       const idx = this.attendance.findIndex(
         (a) =>
@@ -934,7 +1019,6 @@ export class SamAttRepository {
             a.shiftId === computed.shiftId)
       );
 
-      // Re-attach separated notes & reviewHistory from dedicated tables so they are NEVER lost
       const savedNote = this.notes.get(computed.id);
       const savedHistory = this.reviewHistory.get(computed.id);
       if (savedNote) {
@@ -1002,13 +1086,10 @@ export class SamAttRepository {
       summary: `Reprocess ช่วง ${params.fromDate} ถึง ${params.toDate}: ประมวลผล ${result.reprocessedCount}, เปลี่ยนแปลง ${result.updatedCount}, คงเดิม ${result.unchangedCount}, ข้าม ${result.skippedCount}`,
     });
 
+    this.flushToDiskIfConfigured();
     return result;
   }
 
-  /**
-   * Save HR Note and HR Review Status in dedicated tables (`attendance_notes` + `hr_review_history`)
-   * without mutating Raw Scans or turning abnormal AttendanceStatus into NORMAL (§3 Rule 11 & §7).
-   */
   public saveHRReviewAndNote(params: {
     attendanceId: string;
     reasonCode: string;
@@ -1027,7 +1108,9 @@ export class SamAttRepository {
     const existingNote = this.notes.get(att.id);
 
     const updatedNote: EngineHRNote = {
-      id: existingNote?.id || `NOTE_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      id:
+        existingNote?.id ||
+        `NOTE_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       attendanceId: att.id,
       reasonCode: params.reasonCode,
       reasonLabel: params.reasonLabel,
@@ -1055,7 +1138,6 @@ export class SamAttRepository {
     historyList.unshift(historyItem);
     this.reviewHistory.set(att.id, historyList);
 
-    // Update HR Review status on Attendance without altering `att.status`!
     att.hrReviewStatus = params.hrReviewStatus;
     att.notes = structuredClone(updatedNote);
     att.noteHistory = structuredClone(historyList);
@@ -1107,6 +1189,7 @@ export class SamAttRepository {
       summary: `บันทึกผลตรวจสอบ HR (${params.hrReviewStatus} · ${params.reasonLabel}) ของ ${att.fullName} วันที่ ${att.workDate} (คงสถานะ Attendance: ${att.status})`,
     });
 
+    this.flushToDiskIfConfigured();
     return structuredClone(att);
   }
 
@@ -1156,7 +1239,9 @@ export class SamAttRepository {
     }
     if (filters?.department && filters.department !== 'ALL') {
       list = list.filter(
-        (a) => a.department === filters.department || a.groupName === filters.department
+        (a) =>
+          a.department === filters.department ||
+          a.groupName === filters.department
       );
     }
     if (filters?.status && filters.status !== 'ALL') {
@@ -1217,9 +1302,37 @@ export class SamAttRepository {
       ]
     );
     this.pushHistory.unshift(entry);
+    this.flushToDiskIfConfigured();
   }
 
   public getPushHistory(): RepositoryPushHistory[] {
     return structuredClone(this.pushHistory);
   }
+}
+
+/**
+ * Factory to create the appropriate Repository instance based on `RepositoryMode` (`MOCK` | `TEST` | `REAL`) (§2).
+ * - `REAL` creates `MySqlSamAttRepository` with zero seed data and throws `DatabaseUnavailableError` if unconfigured.
+ */
+export function createRepositoryForMode(options?: {
+  mode?: RepositoryMode;
+  mysqlPoolOrConfig?: SqlConnectionPool | MySqlConnectionConfig;
+  persistenceFilePath?: string;
+}): ISamAttRepository {
+  const mode: RepositoryMode =
+    options?.mode ||
+    ((process.env.SAM_ATT_REPO_MODE as RepositoryMode) || 'MOCK');
+
+  if (mode === 'REAL') {
+    return new MySqlSamAttRepository(options?.mysqlPoolOrConfig);
+  }
+
+  if (mode === 'TEST') {
+    return new SamAttRepository({
+      mode: 'TEST',
+      persistenceFilePath: options?.persistenceFilePath,
+    });
+  }
+
+  return new SamAttRepository({ mode: 'MOCK' });
 }

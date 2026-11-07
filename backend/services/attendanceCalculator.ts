@@ -54,8 +54,11 @@ export interface AbsoluteShiftWindow {
 }
 
 export class AttendanceCalculator {
+  public static readonly TIMEZONE = 'Asia/Bangkok';
+  public static readonly TIMEZONE_OFFSET = '+07:00';
+
   /**
-   * Parse "HH:mm" or "HH:mm:ss" into minutes from 00:00.
+   * Parse "HH:mm" or "HH:mm:ss" into minutes from 00:00 (supports "24:00").
    */
   public static parseTimeToMinutes(timeStr: string): number {
     if (timeStr === '24:00' || timeStr === '24:00:00') return 1440;
@@ -66,7 +69,7 @@ export class AttendanceCalculator {
   }
 
   /**
-   * Parse "yyyy-MM-dd" into UTC midnight epoch ms.
+   * Parse "yyyy-MM-dd" into UTC-neutral epoch ms representing Asia/Bangkok wall-clock date.
    */
   public static parseWorkDateToEpochMs(workDate: string): number {
     const [y, m, d] = workDate.trim().split('-').map(Number);
@@ -74,7 +77,7 @@ export class AttendanceCalculator {
   }
 
   /**
-   * Format UTC-neutral epoch ms back to "yyyy-MM-dd HH:mm:ss" and "HH:mm:ss".
+   * Format UTC-neutral epoch ms back to Asia/Bangkok wall-clock "yyyy-MM-dd HH:mm:ss" and "HH:mm:ss".
    */
   public static formatEpochMs(epochMs: number): {
     dateTimeStr: string;
@@ -105,11 +108,8 @@ export class AttendanceCalculator {
     checkInTimeStr: string,
     shift: ShiftDefinition
   ): { isLate: boolean; lateMinutes: number } {
-    const [cHour, cMin] = checkInTimeStr.split(':').map(Number);
-    const [sHour, sMin] = shift.startTime.split(':').map(Number);
-
-    let checkInMins = cHour * 60 + cMin;
-    const shiftStartMins = sHour * 60 + sMin;
+    let checkInMins = this.parseTimeToMinutes(checkInTimeStr);
+    const shiftStartMins = this.parseTimeToMinutes(shift.startTime);
 
     // Handle cross-midnight check-in slightly after midnight when shift starts late night (e.g. 23:30)
     if (shift.crossMidnight && shiftStartMins >= 1200 && checkInMins < 360) {
@@ -399,10 +399,18 @@ export class AttendanceCalculator {
       existingByBusinessKey.set(bKey, rec);
     });
 
-    // Filter active assignments in [fromDate, toDate] matching optional group/person filter
+    const prevDateStr = this.formatEpochMs(fromDatePrevDayMs).dateStr;
+
+    // Filter active assignments in [fromDate, toDate] AND cross-midnight assignments on prevDateStr
+    // matching optional group/person filter
     const targetAssignments = params.assignments.filter((asgn) => {
       if (asgn.status === 'CANCELLED') return false;
-      if (asgn.workDate < params.fromDate || asgn.workDate > params.toDate) return false;
+      const isTargetRange = asgn.workDate >= params.fromDate && asgn.workDate <= params.toDate;
+      const template = shiftMap.get(asgn.shiftId);
+      const isPrevCrossMidnight =
+        asgn.workDate === prevDateStr &&
+        Boolean(asgn.crossMidnight ?? template?.crossMidnight ?? false);
+      if (!isTargetRange && !isPrevCrossMidnight) return false;
       const person = personnelMap.get(asgn.personId);
       if (!person) return false;
       if (
@@ -496,20 +504,25 @@ export class AttendanceCalculator {
         const current = resolvedShifts[idx];
         const prev = idx > 0 ? resolvedShifts[idx - 1] : null;
         const next = idx < resolvedShifts.length - 1 ? resolvedShifts[idx + 1] : null;
+        const isContextOnlyShift = current.assignment.workDate < params.fromDate;
 
         const businessKey = `${personId}_${current.assignment.workDate}_${current.shift.id}`;
         const existingRec = existingByBusinessKey.get(businessKey);
 
         // Check if shift is in the FUTURE (referenceEpochMs < shiftStartMs) (§3 Rule 9, §5 Test 14)
         if (referenceEpochMs < current.window.shiftStartMs) {
-          skippedReasons.push({
-            label: `${person.prefix}${person.firstName} ${person.lastName} (${current.assignment.workDate} · ${current.shift.name})`,
-            reason: 'กะในอนาคตยังไม่ถึงเวลาเริ่มกะ (ไม่สรุปเป็น NO_SCAN)',
-          });
+          if (!isContextOnlyShift) {
+            skippedReasons.push({
+              label: `${person.prefix}${person.firstName} ${person.lastName} (${current.assignment.workDate} · ${current.shift.name})`,
+              reason: 'กะในอนาคตยังไม่ถึงเวลาเริ่มกะ (ไม่สรุปเป็น NO_SCAN)',
+            });
+          }
           continue;
         }
 
-        reprocessedCount++;
+        if (!isContextOnlyShift) {
+          reprocessedCount++;
+        }
 
         // Calculate bounded window considering adjacent shifts on the same/adjacent day
         let effectiveWindowStartMs = current.window.earlyCheckInStartMs;
@@ -627,6 +640,10 @@ export class AttendanceCalculator {
           usedScanIds.add(s.id);
           shiftRelatedScanIds.push(s.id);
         });
+
+        if (isContextOnlyShift) {
+          continue;
+        }
 
         // Compute lateMinutes, status, evaluationState, hasMissingCheckout
         let lateMinutes = 0;

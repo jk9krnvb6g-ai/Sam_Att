@@ -19,7 +19,8 @@ import {
   EngineAttendanceRecord,
   EnginePersonnel,
 } from '../types';
-import { SamAttRepository, RepositoryPushHistory } from '../repositories/samAttRepository';
+import { ISamAttRepository } from '../repositories/interfaces';
+import { RepositoryPushHistory } from '../repositories/samAttRepository';
 
 export interface RawHosOfficePersonRow {
   PERSON_ID?: string | number | null;
@@ -48,8 +49,14 @@ export interface HosOfficeMappingIssue {
 
 export interface HosOfficeSyncResult {
   connected: boolean;
-  mode: 'LIVE_MYSQL' | 'AWAITING_REAL_CREDENTIALS' | 'TEST_FIXTURE';
-  status: 'SUCCESS' | 'PARTIAL_WITH_ISSUES' | 'AWAITING_REAL_CREDENTIALS' | 'FAILED';
+  mode: 'LIVE_MYSQL' | 'AWAITING_CONFIGURATION' | 'AWAITING_REAL_CREDENTIALS' | 'TEST_FIXTURE';
+  status:
+    | 'SUCCESS'
+    | 'PARTIAL_WITH_ISSUES'
+    | 'AWAITING_CONFIGURATION'
+    | 'AWAITING_REAL_CREDENTIALS'
+    | 'FAILED';
+  configurationStatus: 'CONFIGURED' | 'AWAITING_CONFIGURATION';
   message: string;
   totalRead: number;
   insertedCount: number;
@@ -77,7 +84,8 @@ export interface HosOfficePushPayloadItem {
 
 export interface HosOfficePushPreviewResult {
   canExecuteLivePush: boolean;
-  phaseStatus: 'PHASE2_PREVIEW_ONLY_AWAITING_CONTRACT';
+  phaseStatus: 'PHASE2_PREVIEW_ONLY_AWAITING_CONTRACT' | 'AWAITING_CONFIGURATION';
+  configurationStatus: 'AWAITING_CONFIGURATION';
   message: string;
   validCount: number;
   invalidCount: number;
@@ -89,10 +97,11 @@ export interface HosOfficePushPreviewResult {
 export class HosOfficeAdapter {
   /**
    * Check whether real HOSOffice DB credentials are configured in environment variables.
-   * Never exposes passwords or secrets (§15).
+   * Never exposes passwords or secrets (§4 & §6).
    */
   public static getConnectionConfigStatus(): {
     configured: boolean;
+    configurationStatus: 'CONFIGURED' | 'AWAITING_CONFIGURATION';
     host: string;
     port: number;
     database: string;
@@ -110,19 +119,20 @@ export class HosOfficeAdapter {
 
     return {
       configured,
-      host: host || 'ยังไม่ได้ตั้งค่า (Awaiting HOSOFFICE_DB_HOST)',
+      configurationStatus: configured ? 'CONFIGURED' : 'AWAITING_CONFIGURATION',
+      host: host || 'ยังไม่ได้ตั้งค่า (AWAITING_CONFIGURATION)',
       port,
       database,
-      user: user || 'ยังไม่ได้ตั้งค่า (Awaiting HOSOFFICE_DB_USER)',
+      user: user || 'ยังไม่ได้ตั้งค่า (AWAITING_CONFIGURATION)',
       passwordMasked: password ? '••••••••••••' : 'ยังไม่ได้ตั้งค่า',
       statusMessage: configured
         ? 'พบค่าตั้งต้นการเชื่อมต่อ HOSOffice ใน Environment Variables'
-        : 'รอข้อมูลการเชื่อมต่อและ Schema จริงของฐานข้อมูล HOSOffice จากเซิร์ฟเวอร์โรงพยาบาลสามชุก',
+        : 'AWAITING_CONFIGURATION: รอข้อมูลการเชื่อมต่อและ Schema จริงของฐานข้อมูล HOSOffice จากเซิร์ฟเวอร์โรงพยาบาลสามชุก',
     };
   }
 
   /**
-   * Normalize and validate raw rows from `hosoffice.hr_person` (§8.1–§8.10).
+   * Normalize and validate raw rows from `hosoffice.hr_person` (§6 & §8.1–§8.10).
    * - Requires PERSON_ID (never matches by name alone!).
    * - Flags missing or duplicate FINGLE_IDs as mappingIssues.
    */
@@ -222,12 +232,12 @@ export class HosOfficeAdapter {
   }
 
   /**
-   * Synchronize personnel from HOSOffice into `SamAttRepository` (§8).
+   * Synchronize personnel from HOSOffice into `ISamAttRepository` (§6 & §8).
    * - If called without `testFixtureRows` and live HOSOffice DB credentials are not configured,
-   *   honestly reports `AWAITING_REAL_CREDENTIALS` instead of faking a live sync success!
+   *   honestly reports `AWAITING_CONFIGURATION` / `AWAITING_REAL_CREDENTIALS` instead of faking a live sync success!
    */
   public static async syncPersonnelToRepository(params: {
-    repository: SamAttRepository;
+    repository: ISamAttRepository;
     testFixtureRows?: ReadonlyArray<RawHosOfficePersonRow>;
     syncDateStr?: string;
     actor?: string;
@@ -248,6 +258,7 @@ export class HosOfficeAdapter {
         connected: true,
         mode: 'TEST_FIXTURE',
         status: mappingIssues.length > 0 ? 'PARTIAL_WITH_ISSUES' : 'SUCCESS',
+        configurationStatus: 'CONFIGURED',
         message: `ซิงค์ข้อมูลบุคลากรจากชุดทดสอบ (TEST_FIXTURE) สำเร็จ: เพิ่มใหม่ ${upsertRes.insertedCount}, อัปเดต ${upsertRes.updatedCount}, เปลี่ยน FINGLE_ID ${upsertRes.fingleIdChangedCount}, รายการต้องตรวจสอบ ${mappingIssues.length}`,
         totalRead: params.testFixtureRows.length,
         insertedCount: upsertRes.insertedCount,
@@ -263,8 +274,9 @@ export class HosOfficeAdapter {
         connected: false,
         mode: 'AWAITING_REAL_CREDENTIALS',
         status: 'AWAITING_REAL_CREDENTIALS',
+        configurationStatus: 'AWAITING_CONFIGURATION',
         message:
-          'ยังไม่ได้เชื่อมต่อฐานข้อมูล HOSOffice จริง (รอข้อมูล Host/Credentials และ Schema ตาราง hr_person จริงจากโรงพยาบาลสามชุก) — ระบบไม่สร้างผลการ Sync สำเร็จปลอมตามข้อกำหนด §8',
+          'AWAITING_CONFIGURATION: ยังไม่ได้เชื่อมต่อฐานข้อมูล HOSOffice จริง (รอข้อมูล Host/Credentials และ Schema ตาราง hr_person จริงจากโรงพยาบาลสามชุก) — ระบบไม่สร้างผลการ Sync สำเร็จปลอมตามข้อกำหนด §6',
         totalRead: 0,
         insertedCount: 0,
         updatedCount: 0,
@@ -277,8 +289,9 @@ export class HosOfficeAdapter {
       connected: false,
       mode: 'AWAITING_REAL_CREDENTIALS',
       status: 'AWAITING_REAL_CREDENTIALS',
+      configurationStatus: 'AWAITING_CONFIGURATION',
       message:
-        'พบการตั้งค่าเบื้องต้น แต่ยังรอการเปิดสิทธิ์เชื่อมต่อเครือข่ายภายในโรงพยาบาลสามชุก (10.2.0.201:3306) เพื่ออ่านตาราง hr_person จริง',
+        'AWAITING_CONFIGURATION: พบการตั้งค่าเบื้องต้น แต่ยังรอการเปิดสิทธิ์เชื่อมต่อเครือข่ายภายในโรงพยาบาลสามชุก (10.2.0.201:3306) เพื่ออ่านตาราง hr_person จริง',
       totalRead: 0,
       insertedCount: 0,
       updatedCount: 0,
@@ -288,23 +301,24 @@ export class HosOfficeAdapter {
   }
 
   /**
-   * Phase 2 HOSOffice Push Interface, Validation & Dry-Run Preview (§11 & §15).
+   * Phase 2 HOSOffice Push Interface, Validation & Dry-Run Preview (§6, §11 & §15).
    * - Validates each Attendance record before building the HOSOffice payload.
    * - Records `DRY_RUN_PREVIEW` in `push_history`.
    * - Never claims live production push succeeded in Phase 2!
    */
-  public static validateAndPreviewPush(params: {
-    repository: SamAttRepository;
+  public static async validateAndPreviewPush(params: {
+    repository: ISamAttRepository;
     attendanceIds: ReadonlyArray<string>;
     actorUserId: string;
     actorName: string;
-  }): HosOfficePushPreviewResult {
+  }): Promise<HosOfficePushPreviewResult> {
     const validationErrors: Array<{ attendanceId: string; reason: string }> = [];
     const previewPayloads: HosOfficePushPayloadItem[] = [];
     const recordedPreviewHistory: RepositoryPushHistory[] = [];
     const nowIso = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
-    const allAttendance = params.repository.getAttendance({ pageSize: 10000 }).items;
+    const attResult = await params.repository.getAttendance({ pageSize: 10000 });
+    const allAttendance = attResult.items;
 
     for (const attId of params.attendanceIds) {
       const rec: EngineAttendanceRecord | undefined = allAttendance.find(
@@ -380,19 +394,20 @@ export class HosOfficeAdapter {
         pushedAt: nowIso,
         responseStatus: 'DRY_RUN_PREVIEW',
         responseSummary:
-          'ตรวจสอบความถูกต้องและสร้าง Preview Payload สำเร็จ (Phase 2: รอยืนยัน Contract และสิทธิ์เขียนข้อมูลจริงจาก HOSOffice — ยังไม่มีการส่งข้อมูลเข้า Production จริง)',
+          'ตรวจสอบความถูกต้องและสร้าง Preview Payload สำเร็จ (AWAITING_CONFIGURATION / Phase 2: รอยืนยัน Contract และสิทธิ์เขียนข้อมูลจริงจาก HOSOffice — ยังไม่มีการส่งข้อมูลเข้า Production จริง)',
         payloadJson: JSON.stringify(payloadItem),
       };
 
-      params.repository.recordPushPreviewHistory(historyEntry);
+      await params.repository.recordPushPreviewHistory(historyEntry);
       recordedPreviewHistory.push(historyEntry);
     }
 
     return {
       canExecuteLivePush: false,
       phaseStatus: 'PHASE2_PREVIEW_ONLY_AWAITING_CONTRACT',
+      configurationStatus: 'AWAITING_CONFIGURATION',
       message:
-        'Phase 2 จัดเตรียม Data Mapping, Validation และ Preview Payload เรียบร้อยแล้ว (ยังไม่ได้เขียนข้อมูลจริงลง HOSOffice จนกว่าจะตรวจสอบ Contract และสิทธิ์กับโรงพยาบาลสามชุกตามข้อกำหนด §11)',
+        'AWAITING_CONFIGURATION: Phase 2 จัดเตรียม Data Mapping, Validation และ Preview Payload เรียบร้อยแล้ว (ยังไม่ได้เขียนข้อมูลจริงลง HOSOffice จนกว่าจะตรวจสอบ Contract และสิทธิ์กับโรงพยาบาลสามชุกตามข้อกำหนด §6)',
       validCount: previewPayloads.length,
       invalidCount: validationErrors.length,
       validationErrors,

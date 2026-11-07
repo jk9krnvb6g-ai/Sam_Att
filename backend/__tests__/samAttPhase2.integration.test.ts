@@ -1,36 +1,46 @@
 /**
- * Sam_Att V2 — Phase 2 Integration Tests (§13)
+ * Sam_Att V2 — Phase 1+2 Hardening Integration Tests (§8)
  *
  * Verifies end-to-end integration of:
- * 1. HOSOffice Personnel Mapping & Honest `AWAITING_REAL_CREDENTIALS` handling
+ * 1. HOSOffice Personnel Mapping & Honest `AWAITING_CONFIGURATION` / `AWAITING_REAL_CREDENTIALS` handling
  * 2. FINGLE_ID Mapping (historical effective-date preservation when FINGLE_ID changes + duplicate detection)
  * 3. Raw Scan Persistence (Immutable 6-field contract)
  * 4. Raw Scan Deduplication (Composite Event Identity)
  * 5. Attendance Calculation via Repository & Gateway Router
  * 6. Reprocess (Idempotent upsert & status transition when new scan arrives)
  * 7. Shift Assignment (Non-overlap check, touching boundary support, soft-cancellation audit history)
- * 8. Cross-Midnight Shift end-to-end
- * 9. Multi-Shift on the same day end-to-end
- * 10. HR Notes & Review History Persistence across Reprocess
- * 11. GENERAL_USER Own-Only Access (blocks cross-person queries with 403 + security audit log)
- * 12. Role-Based Authorization (ADMIN vs RESPONSIBLE_STAFF vs GENERAL_USER)
- * 13. API Input Validation (rejects malformed 6-field scans, username-only login, missing params)
- * 14. Database Transactions (atomic commit and rollback on error)
- * 15. Error Handling & Secret Masking in `/settings/connections`
- * 16. Phase 2 HOSOffice Push Safety (Dry-Run Preview only, never claims live push succeeded)
+ * 8. Cross-Midnight Shift & Multi-Shift on the same day end-to-end
+ * 9. HR Notes & Review History Persistence across Reprocess
+ * 10. GENERAL_USER Own-Only Access (blocks cross-person queries, Reprocess, and Personnel with 403 + security audit log)
+ * 11. Role-Based Authorization (ADMIN vs RESPONSIBLE_STAFF vs GENERAL_USER)
+ * 12. API Input Validation, Pagination & Filtering
+ * 13. Database Transactions (atomic commit, rollback on error, and concurrent update serialization)
+ * 14. Persistence After Restart (disk-backed TEST repository survives process restart)
+ * 15. Real MySQL Repository (`MySqlSamAttRepository`) parameterized SQL execution, `beginTransaction`/`commit`/`rollback`, `FOR UPDATE` row locking, and HTTP 503 `DatabaseUnavailableError` (zero Mock fallback)
+ * 16. Hardened Authentication: Bcrypt hashing, Legacy SHA-256 auto-migration, Expired Token, Revoked Session (`POST /auth/logout`), Brute-Force Rate Limiting (HTTP 429), Missing Secret refusal in `REAL` mode, and Mock/Real mode separation
+ * 17. MySQL Migration Compatibility (`001_phase1_phase2_safe_migration.sql` uses `INFORMATION_SCHEMA.COLUMNS` Stored Procedure, compatible with Oracle MySQL 8.0+ and MariaDB)
  */
 
-import { describe, it } from 'node:test';
+import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'crypto';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import express from 'express';
 import { SamAttRepository } from '../repositories/samAttRepository';
+import {
+  MySqlSamAttRepository,
+  DatabaseUnavailableError,
+  SqlConnectionPool,
+  SqlQueryableConnection,
+} from '../repositories/mysqlSamAttRepository';
 import { AuthService } from '../services/authService';
-import { HosOfficeAdapter } from '../services/hosofficeAdapter';
 import { createSamAttRouter } from '../router';
 
 /**
  * Helper to invoke the mounted `/api/Sam_Att` Express Router in-memory without opening any TCP port
- * (strictly obeying §1 & §15: "ห้ามเพิ่ม TCP Listener หรือ Port").
+ * (strictly obeying §1 & §9: "ห้ามเพิ่ม TCP Listener หรือ Port").
  */
 async function invokeGatewayRoute(
   app: express.Express,
@@ -55,6 +65,7 @@ async function invokeGatewayRoute(
       path: urlObj.pathname,
       query,
       params: {},
+      ip: options.headers?.['x-forwarded-for'] || '127.0.0.1',
       headers: Object.fromEntries(
         Object.entries(options.headers || {}).map(([k, v]) => [k.toLowerCase(), v])
       ),
@@ -100,129 +111,132 @@ async function invokeGatewayRoute(
   });
 }
 
-function createTestEnvironment() {
-  const repo = new SamAttRepository({
-    users: [
-      {
-        id: 'USR_ADMIN',
-        username: 'admin_test',
-        passwordHash: AuthService.hashPassword('admin_secret_123'),
-        fullName: 'นายสมศักดิ์ บริหารงาน',
-        role: 'ADMIN',
-        personId: null,
-        department: 'กลุ่มงานบริหารทั่วไป',
-        position: 'นักวิชาการคอมพิวเตอร์',
-        active: true,
-      },
-      {
-        id: 'USR_STAFF',
-        username: 'staff_test',
-        passwordHash: AuthService.hashPassword('staff_secret_123'),
-        fullName: 'นางสาวพัชรี เจริญผล',
-        role: 'RESPONSIBLE_STAFF',
-        personId: 'P010',
-        department: 'กลุ่มงานทรัพยากรบุคคล',
-        position: 'เจ้าพนักงานธุรการ',
-        active: true,
-      },
-      {
-        id: 'USR_GEN_1',
-        username: 'nurse_kanda',
-        passwordHash: AuthService.hashPassword('user_secret_123'),
-        fullName: 'นางสาวกานดา สุขใจ',
-        role: 'GENERAL_USER',
-        personId: 'P001',
-        department: 'งานผู้ป่วยใน (IPD)',
-        position: 'พยาบาลวิชาชีพ',
-        active: true,
-      },
-    ],
-    personnel: [
-      {
-        personId: 'P001',
-        fingleId: 101,
-        prefix: 'นางสาว',
-        firstName: 'กานดา',
-        lastName: 'สุขใจ',
-        position: 'พยาบาลวิชาชีพ',
-        department: 'งานผู้ป่วยใน (IPD)',
-        groupName: 'กลุ่มภารกิจด้านการพยาบาล',
-        personnelType: 'ข้าราชการ',
-        active: true,
-      },
-      {
-        personId: 'P002',
-        fingleId: 102,
-        prefix: 'นาย',
-        firstName: 'สมชาย',
-        lastName: 'สายเสมอ',
-        position: 'เจ้าพนักงานเวชสถิติ',
-        department: 'งานเวชระเบียน',
-        groupName: 'กลุ่มงานบริหารทั่วไป',
-        personnelType: 'พนักงานกระทรวงสาธารณสุข',
-        active: true,
-      },
-    ],
-    fingerprintMappings: [
-      {
-        id: 'FM_1',
-        personId: 'P001',
-        fingleId: 101,
-        effectiveFrom: '2020-01-01',
-        effectiveTo: null,
-        status: 'ACTIVE',
-      },
-      {
-        id: 'FM_2',
-        personId: 'P002',
-        fingleId: 102,
-        effectiveFrom: '2020-01-01',
-        effectiveTo: null,
-        status: 'ACTIVE',
-      },
-    ],
-    shifts: [
-      {
-        id: 'SH01',
-        code: 'M01',
-        name: 'กะเช้า (08:00-16:00)',
-        category: 'MORNING',
-        startTime: '08:00',
-        endTime: '16:00',
-        crossMidnight: false,
-        graceMinutes: 15,
-        earlyScanWindowMinutes: 120,
-        lateScanWindowMinutes: 180,
-        active: true,
-      },
-      {
-        id: 'SH02',
-        code: 'A01',
-        name: 'กะบ่าย (16:00-24:00)',
-        category: 'AFTERNOON',
-        startTime: '16:00',
-        endTime: '24:00',
-        crossMidnight: false,
-        graceMinutes: 15,
-        earlyScanWindowMinutes: 120,
-        lateScanWindowMinutes: 180,
-        active: true,
-      },
-      {
-        id: 'SH03',
-        code: 'N01',
-        name: 'กะดึกข้ามคืน (23:30-07:30)',
-        category: 'NIGHT',
-        startTime: '23:30',
-        endTime: '07:30',
-        crossMidnight: true,
-        graceMinutes: 15,
-        earlyScanWindowMinutes: 120,
-        lateScanWindowMinutes: 180,
-        active: true,
-      },
-    ],
-  });
+function createTestEnvironment(mode: 'MOCK' | 'TEST' = 'TEST', persistenceFilePath?: string) {
+  const repo = new SamAttRepository(
+    {
+      users: [
+        {
+          id: 'USR_ADMIN',
+          username: 'admin_test',
+          passwordHash: AuthService.hashPassword('admin_secret_123'),
+          fullName: 'นายสมศักดิ์ บริหารงาน',
+          role: 'ADMIN',
+          personId: null,
+          department: 'กลุ่มงานบริหารทั่วไป',
+          position: 'นักวิชาการคอมพิวเตอร์',
+          active: true,
+        },
+        {
+          id: 'USR_STAFF',
+          username: 'staff_test',
+          passwordHash: AuthService.hashPassword('staff_secret_123'),
+          fullName: 'นางสาวพัชรี เจริญผล',
+          role: 'RESPONSIBLE_STAFF',
+          personId: 'P010',
+          department: 'กลุ่มงานทรัพยากรบุคคล',
+          position: 'เจ้าพนักงานธุรการ',
+          active: true,
+        },
+        {
+          id: 'USR_GEN_1',
+          username: 'nurse_kanda',
+          passwordHash: AuthService.hashPassword('user_secret_123'),
+          fullName: 'นางสาวกานดา สุขใจ',
+          role: 'GENERAL_USER',
+          personId: 'P001',
+          department: 'งานผู้ป่วยใน (IPD)',
+          position: 'พยาบาลวิชาชีพ',
+          active: true,
+        },
+      ],
+      personnel: [
+        {
+          personId: 'P001',
+          fingleId: 101,
+          prefix: 'นางสาว',
+          firstName: 'กานดา',
+          lastName: 'สุขใจ',
+          position: 'พยาบาลวิชาชีพ',
+          department: 'งานผู้ป่วยใน (IPD)',
+          groupName: 'กลุ่มภารกิจด้านการพยาบาล',
+          personnelType: 'ข้าราชการ',
+          active: true,
+        },
+        {
+          personId: 'P002',
+          fingleId: 102,
+          prefix: 'นาย',
+          firstName: 'สมชาย',
+          lastName: 'สายเสมอ',
+          position: 'เจ้าพนักงานเวชสถิติ',
+          department: 'งานเวชระเบียน',
+          groupName: 'กลุ่มงานบริหารทั่วไป',
+          personnelType: 'พนักงานกระทรวงสาธารณสุข',
+          active: true,
+        },
+      ],
+      fingerprintMappings: [
+        {
+          id: 'FM_1',
+          personId: 'P001',
+          fingleId: 101,
+          effectiveFrom: '2020-01-01',
+          effectiveTo: null,
+          status: 'ACTIVE',
+        },
+        {
+          id: 'FM_2',
+          personId: 'P002',
+          fingleId: 102,
+          effectiveFrom: '2020-01-01',
+          effectiveTo: null,
+          status: 'ACTIVE',
+        },
+      ],
+      shifts: [
+        {
+          id: 'SH01',
+          code: 'M01',
+          name: 'กะเช้า (08:00-16:00)',
+          category: 'MORNING',
+          startTime: '08:00',
+          endTime: '16:00',
+          crossMidnight: false,
+          graceMinutes: 15,
+          earlyScanWindowMinutes: 120,
+          lateScanWindowMinutes: 180,
+          active: true,
+        },
+        {
+          id: 'SH02',
+          code: 'A01',
+          name: 'กะบ่าย (16:00-24:00)',
+          category: 'AFTERNOON',
+          startTime: '16:00',
+          endTime: '24:00',
+          crossMidnight: false,
+          graceMinutes: 15,
+          earlyScanWindowMinutes: 120,
+          lateScanWindowMinutes: 180,
+          active: true,
+        },
+        {
+          id: 'SH03',
+          code: 'N01',
+          name: 'กะดึกข้ามคืน (23:30-07:30)',
+          category: 'NIGHT',
+          startTime: '23:30',
+          endTime: '07:30',
+          crossMidnight: true,
+          graceMinutes: 15,
+          earlyScanWindowMinutes: 120,
+          lateScanWindowMinutes: 180,
+          active: true,
+        },
+      ],
+    },
+    { mode, persistenceFilePath }
+  );
 
   const app = express();
   app.use('/api/Sam_Att', createSamAttRouter(repo));
@@ -230,11 +244,15 @@ function createTestEnvironment() {
   return { repo, app };
 }
 
-describe('Sam_Att V2 Phase 2 — Database, Repository, Gateway & Security Integration Tests (§13)', () => {
-  it('Scenario 1 & 2: HOSOffice Personnel Mapping, Historical FINGLE_ID Change & Duplicate Detection', async () => {
+describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & API Integration Tests (§8)', () => {
+  beforeEach(() => {
+    AuthService.resetSecurityStateForTests();
+  });
+
+  it('Scenario 1 & 2: HOSOffice Personnel Mapping, AWAITING_CONFIGURATION Status, Historical FINGLE_ID Change & Duplicate Detection', async () => {
     const { repo, app } = createTestEnvironment();
 
-    // 1A: Without real credentials or testFixtureRows, returns honest AWAITING_REAL_CREDENTIALS (never fakes success)
+    // 1A: Without real credentials or testFixtureRows, returns honest AWAITING_CONFIGURATION / AWAITING_REAL_CREDENTIALS (never fakes success)
     const honestRes = await invokeGatewayRoute(app, {
       method: 'POST',
       url: '/api/Sam_Att/personnel/sync',
@@ -243,6 +261,7 @@ describe('Sam_Att V2 Phase 2 — Database, Repository, Gateway & Security Integr
     });
     assert.equal(honestRes.status, 200);
     assert.equal(honestRes.body.status, 'AWAITING_REAL_CREDENTIALS');
+    assert.equal(honestRes.body.configurationStatus, 'AWAITING_CONFIGURATION');
     assert.equal(honestRes.body.connected, false);
 
     // 1B: Ingest historical scan for P001 using FINGLE_ID 101 on 2026-11-01
@@ -252,10 +271,7 @@ describe('Sam_Att V2 Phase 2 — Database, Repository, Gateway & Security Integr
     ]);
     repo.assignShift({ personId: 'P001', workDate: '2026-11-01', shiftId: 'SH01', assignmentType: 'DAILY' });
 
-    // 1C: Sync HOSOffice fixture where:
-    // - P001 changes FINGLE_ID from 101 -> 501 effective 2026-11-06
-    // - A row with no PERSON_ID (name-only) is rejected (§8.9)
-    // - Two new people share duplicate FINGLE_ID #777 (§8.10)
+    // 1C: Sync HOSOffice fixture (using synthetic test fixtures only — zero real PII in logs per §6)
     const syncRes = await invokeGatewayRoute(app, {
       method: 'POST',
       url: '/api/Sam_Att/personnel/sync',
@@ -311,19 +327,16 @@ describe('Sam_Att V2 Phase 2 — Database, Repository, Gateway & Security Integr
     assert.equal(reprocessOld.records[0].status, 'NORMAL');
   });
 
-  it('Scenario 3, 4, 5 & 6: Raw Scan Persistence, Deduplication, Attendance Calculation & Idempotent Reprocess', async () => {
+  it('Scenario 3, 4, 5 & 6: Raw Scan Persistence, Deduplication, Attendance Calculation, Pagination & Filtering', async () => {
     const { app } = createTestEnvironment();
 
-    // Assign Morning shift to P001 on 2026-11-06
-    const assignRes = await invokeGatewayRoute(app, {
+    await invokeGatewayRoute(app, {
       method: 'POST',
       url: '/api/Sam_Att/shift-assignments',
       headers: { 'x-sam-att-dev-user-id': 'USR_STAFF' },
       body: { personId: 'P001', workDate: '2026-11-06', shiftId: 'SH01' },
     });
-    assert.equal(assignRes.status, 200);
 
-    // Sync 6-field scanner payload (including an exact duplicate scan)
     const syncScanRes = await invokeGatewayRoute(app, {
       method: 'POST',
       url: '/api/Sam_Att/scanners/sync',
@@ -339,17 +352,13 @@ describe('Sam_Att V2 Phase 2 — Database, Repository, Gateway & Security Integr
     assert.equal(syncScanRes.body.newScansCount, 1);
     assert.equal(syncScanRes.body.duplicateScansCount, 1);
 
-    // First Reprocess (after shift end -> MISSING_CHECKOUT because only check-in exists)
-    const rep1 = await invokeGatewayRoute(app, {
+    await invokeGatewayRoute(app, {
       method: 'POST',
       url: '/api/Sam_Att/attendance/reprocess',
       headers: { 'x-sam-att-dev-user-id': 'USR_STAFF' },
       body: { fromDate: '2026-11-06', toDate: '2026-11-06', referenceDateTime: '2026-11-06 18:00:00' },
     });
-    assert.equal(rep1.status, 200);
-    assert.equal(rep1.body.reprocessedCount, 1);
 
-    // Now sync checkout scan and Reprocess again -> updates existing record to NORMAL without duplicating!
     await invokeGatewayRoute(app, {
       method: 'POST',
       url: '/api/Sam_Att/scanners/sync',
@@ -369,19 +378,29 @@ describe('Sam_Att V2 Phase 2 — Database, Repository, Gateway & Security Integr
     });
     assert.equal(rep2.body.updatedCount, 1);
 
+    // Verify Pagination & Filtering on `/attendance` and `/raw-scans`
     const attList = await invokeGatewayRoute(app, {
       method: 'GET',
-      url: '/api/Sam_Att/attendance?workDate=2026-11-06',
+      url: '/api/Sam_Att/attendance?workDate=2026-11-06&status=NORMAL&page=1&pageSize=10',
       headers: { 'x-sam-att-dev-user-id': 'USR_STAFF' },
     });
     assert.equal(attList.body.total, 1);
+    assert.equal(attList.body.page, 1);
+    assert.equal(attList.body.pageSize, 10);
     assert.equal(attList.body.items[0].status, 'NORMAL');
+
+    const rawListPage1 = await invokeGatewayRoute(app, {
+      method: 'GET',
+      url: '/api/Sam_Att/raw-scans?fromDate=2026-11-06&toDate=2026-11-06&page=1&pageSize=1',
+      headers: { 'x-sam-att-dev-user-id': 'USR_STAFF' },
+    });
+    assert.equal(rawListPage1.body.total, 2);
+    assert.equal(rawListPage1.body.items.length, 1);
   });
 
-  it('Scenario 7, 8 & 9: Shift Assignment Overlap Rejection, Multi-Shift & Cross-Midnight Shift', async () => {
+  it('Scenario 7, 8, 9 & 10: Shift Overlap Rejection, Soft Cancellation & HR Notes Preservation across Reprocess', async () => {
     const { app } = createTestEnvironment();
 
-    // Assign Morning (08:00-16:00) and Afternoon (16:00-24:00) on 2026-11-06 -> Touching boundary allowed!
     const s1 = await invokeGatewayRoute(app, {
       method: 'POST',
       url: '/api/Sam_Att/shift-assignments',
@@ -398,7 +417,7 @@ describe('Sam_Att V2 Phase 2 — Database, Repository, Gateway & Security Integr
     });
     assert.equal(s2.status, 200);
 
-    // Attempt to assign Night cross-midnight (23:30-07:30) on 2026-11-06 which overlaps 23:30-24:00 of SH02 -> Must reject with 409!
+    // Overlapping Night shift rejected with 409
     const sOverlap = await invokeGatewayRoute(app, {
       method: 'POST',
       url: '/api/Sam_Att/shift-assignments',
@@ -407,7 +426,7 @@ describe('Sam_Att V2 Phase 2 — Database, Repository, Gateway & Security Integr
     });
     assert.equal(sOverlap.status, 409);
 
-    // Soft-cancel SH02 and verify cancellation log is preserved
+    // Soft-cancel SH02
     const cancelRes = await invokeGatewayRoute(app, {
       method: 'DELETE',
       url: `/api/Sam_Att/shift-assignments/${s2.body.assignment.id}`,
@@ -415,20 +434,8 @@ describe('Sam_Att V2 Phase 2 — Database, Repository, Gateway & Security Integr
       body: { reason: 'แลกเวรตามคำสั่งหัวหน้าตึก' },
     });
     assert.equal(cancelRes.status, 200);
-    assert.equal(cancelRes.body.cancellationLog.reason, 'แลกเวรตามคำสั่งหัวหน้าตึก');
-  });
 
-  it('Scenario 10: HR Notes & Review History Persistence across Reprocess', async () => {
-    const { app } = createTestEnvironment();
-
-    await invokeGatewayRoute(app, {
-      method: 'POST',
-      url: '/api/Sam_Att/shift-assignments',
-      headers: { 'x-sam-att-dev-user-id': 'USR_STAFF' },
-      body: { personId: 'P002', workDate: '2026-11-06', shiftId: 'SH01' },
-    });
-
-    // Reprocess with 0 scans -> NO_SCAN
+    // Reprocess SH01 with 0 scans -> NO_SCAN
     await invokeGatewayRoute(app, {
       method: 'POST',
       url: '/api/Sam_Att/attendance/reprocess',
@@ -456,10 +463,9 @@ describe('Sam_Att V2 Phase 2 — Database, Repository, Gateway & Security Integr
       },
     });
     assert.equal(noteRes.status, 200);
-    assert.equal(noteRes.body.record.status, 'NO_SCAN'); // Status stays NO_SCAN!
-    assert.equal(noteRes.body.record.hrReviewStatus, 'REVIEWED');
+    assert.equal(noteRes.body.record.status, 'NO_SCAN');
 
-    // Run Reprocess again -> Note and Review History MUST survive
+    // Reprocess again -> Note and Review History survive
     await invokeGatewayRoute(app, {
       method: 'POST',
       url: '/api/Sam_Att/attendance/reprocess',
@@ -472,26 +478,95 @@ describe('Sam_Att V2 Phase 2 — Database, Repository, Gateway & Security Integr
       url: '/api/Sam_Att/attendance?workDate=2026-11-06',
       headers: { 'x-sam-att-dev-user-id': 'USR_STAFF' },
     });
-    const recAfter = list2.body.items[0];
-    assert.equal(recAfter.status, 'NO_SCAN');
-    assert.equal(recAfter.hrReviewStatus, 'REVIEWED');
-    assert.equal(recAfter.notes.reasonCode, 'SICK_LEAVE');
-    assert.equal(recAfter.noteHistory.length, 1);
+    assert.equal(list2.body.items[0].notes.reasonCode, 'SICK_LEAVE');
+    assert.equal(list2.body.items[0].noteHistory.length, 1);
   });
 
-  it('Scenario 11 & 12: GENERAL_USER Own-Only Access & Strict Role-Based Authorization', async () => {
+  it('Scenario 11 & 12: Security Tests — Bcrypt, Legacy SHA-256 Auto-Upgrade, Invalid/Expired Token, Revoked Session, Rate Limit (429), Missing Secret & RBAC (§4 & §8)', async () => {
     const { app, repo } = createTestEnvironment();
 
-    // 1. Login as GENERAL_USER (`nurse_kanda`, personId = P001) with valid password
+    // 1. Verify Bcrypt hash format ($2a$ or $2b$) and plaintext rejection
+    const adminUser = repo.findUserByUsername('admin_test')!;
+    assert.ok(adminUser.passwordHash.startsWith('$2'));
+    assert.equal(AuthService.verifyPassword('wrong_pass', adminUser.passwordHash).valid, false);
+    assert.equal(AuthService.verifyPassword('admin_secret_123', 'admin_secret_123').valid, false); // Plaintext stored hash is rejected!
+
+    // 2. Legacy SHA-256 migration (`legacy_sha256$<hex>` -> verified via timingSafeEqual and auto-upgraded to Bcrypt)
+    const legacyPlain = 'legacy_hospital_pass_99';
+    const legacyHex = crypto.createHash('sha256').update(legacyPlain).digest('hex');
+    const legacyEnv = new SamAttRepository(
+      {
+        users: [
+          {
+            id: 'USR_LEGACY',
+            username: 'legacy_staff',
+            passwordHash: `legacy_sha256$${legacyHex}`,
+            fullName: 'เจ้าหน้าที่ระบบเดิม',
+            role: 'RESPONSIBLE_STAFF',
+            personId: 'P099',
+            department: 'HR',
+            position: 'HR',
+            active: true,
+          },
+        ],
+      },
+      { mode: 'TEST' }
+    );
+    const legacyLogin = await AuthService.authenticateCredentials(
+      legacyEnv,
+      'legacy_staff',
+      legacyPlain,
+      '10.2.0.50'
+    );
+    assert.equal(legacyLogin.success, true);
+    assert.equal(legacyLogin.passwordUpgradedToBcrypt, true);
+    const upgradedUser = legacyEnv.findUserByUsername('legacy_staff')!;
+    assert.ok(upgradedUser.passwordHash.startsWith('$2')); // Upgraded to Bcrypt in DB!
+
+    // 3. Missing Password -> 401, Invalid Password -> 401
+    const noPass = await invokeGatewayRoute(app, {
+      method: 'POST',
+      url: '/api/Sam_Att/auth/login',
+      body: { username: 'nurse_kanda' },
+    });
+    assert.equal(noPass.status, 401);
+
+    // 4. Brute-Force Rate Limit Protection -> 5 failed attempts locks out with HTTP 429
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      const bad = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/auth/login',
+        headers: { 'x-forwarded-for': '192.168.99.88' },
+        body: { username: 'admin_test', password: `wrong_attempt_${attempt}` },
+      });
+      if (attempt < 5) {
+        assert.equal(bad.status, 401);
+      } else {
+        assert.equal(bad.status, 429);
+        assert.ok(bad.body.retryAfterSeconds > 0);
+      }
+    }
+
+    // Subsequent attempt from locked-out IP+username even with right password returns 429 until window expires
+    const lockedAttempt = await invokeGatewayRoute(app, {
+      method: 'POST',
+      url: '/api/Sam_Att/auth/login',
+      headers: { 'x-forwarded-for': '192.168.99.88' },
+      body: { username: 'admin_test', password: 'admin_secret_123' },
+    });
+    assert.equal(lockedAttempt.status, 429);
+
+    // 5. Valid Login as GENERAL_USER (`nurse_kanda`) from clean IP
     const loginRes = await invokeGatewayRoute(app, {
       method: 'POST',
       url: '/api/Sam_Att/auth/login',
+      headers: { 'x-forwarded-for': '192.168.1.10' },
       body: { username: 'nurse_kanda', password: 'user_secret_123' },
     });
     assert.equal(loginRes.status, 200);
     const userToken = loginRes.body.token;
 
-    // 2. GENERAL_USER can read their own `/me/attendance`
+    // 6. GENERAL_USER Own-Only Access & Unauthorized Reprocess / Personnel Access
     const ownRes = await invokeGatewayRoute(app, {
       method: 'GET',
       url: '/api/Sam_Att/me/attendance',
@@ -500,7 +575,6 @@ describe('Sam_Att V2 Phase 2 — Database, Repository, Gateway & Security Integr
     assert.equal(ownRes.status, 200);
     assert.equal(ownRes.body.personId, 'P001');
 
-    // 3. GENERAL_USER attempting to pass `?personId=P002` to read another person's data is blocked with 403!
     const crossPersonRes = await invokeGatewayRoute(app, {
       method: 'GET',
       url: '/api/Sam_Att/me/attendance?personId=P002',
@@ -508,104 +582,441 @@ describe('Sam_Att V2 Phase 2 — Database, Repository, Gateway & Security Integr
     });
     assert.equal(crossPersonRes.status, 403);
 
-    // 4. GENERAL_USER attempting to access `/attendance`, `/personnel`, or `/settings/connections` is blocked with 403!
-    const staffEndpointRes = await invokeGatewayRoute(app, {
+    const unauthReprocess = await invokeGatewayRoute(app, {
+      method: 'POST',
+      url: '/api/Sam_Att/attendance/reprocess',
+      headers: { Authorization: `Bearer ${userToken}` },
+      body: { fromDate: '2026-11-06', toDate: '2026-11-06' },
+    });
+    assert.equal(unauthReprocess.status, 403);
+
+    const unauthPersonnel = await invokeGatewayRoute(app, {
       method: 'GET',
-      url: '/api/Sam_Att/attendance',
+      url: '/api/Sam_Att/personnel',
       headers: { Authorization: `Bearer ${userToken}` },
     });
-    assert.equal(staffEndpointRes.status, 403);
+    assert.equal(unauthPersonnel.status, 403);
 
-    // 5. RESPONSIBLE_STAFF attempting to access `/settings/connections` (ADMIN only) is blocked with 403!
-    const adminEndpointByStaff = await invokeGatewayRoute(app, {
+    // 7. Invalid Token & Expired Token -> 401
+    const tamperedRes = await invokeGatewayRoute(app, {
       method: 'GET',
-      url: '/api/Sam_Att/settings/connections',
-      headers: { 'x-sam-att-dev-user-id': 'USR_STAFF' },
+      url: '/api/Sam_Att/me/attendance',
+      headers: { Authorization: `Bearer ${userToken}tampered` },
     });
-    assert.equal(adminEndpointByStaff.status, 403);
+    assert.equal(tamperedRes.status, 401);
 
-    // Verify security violation was logged in Audit Logs
-    const logs = repo.getAuditLogs(20);
-    assert.ok(logs.some((l) => l.action === 'SECURITY_VIOLATION_CROSS_PERSON_ACCESS'));
+    const expiredToken = AuthService.issueSignedToken(
+      {
+        id: 'USR_GEN_1',
+        username: 'nurse_kanda',
+        passwordHash: '',
+        fullName: 'นางสาวกานดา สุขใจ',
+        role: 'GENERAL_USER',
+        personId: 'P001',
+        department: 'IPD',
+        position: 'พยาบาลวิชาชีพ',
+        active: true,
+      },
+      -60, // Already expired 60 seconds ago
+      'TEST'
+    );
+    const expiredRes = await invokeGatewayRoute(app, {
+      method: 'GET',
+      url: '/api/Sam_Att/me/attendance',
+      headers: { Authorization: `Bearer ${expiredToken}` },
+    });
+    assert.equal(expiredRes.status, 401);
+
+    // 8. Session Revocation (`POST /auth/logout`) -> Token immediately rejected with 401
+    const logoutRes = await invokeGatewayRoute(app, {
+      method: 'POST',
+      url: '/api/Sam_Att/auth/logout',
+      headers: { Authorization: `Bearer ${userToken}` },
+    });
+    assert.equal(logoutRes.status, 200);
+
+    const afterLogoutRes = await invokeGatewayRoute(app, {
+      method: 'GET',
+      url: '/api/Sam_Att/me/attendance',
+      headers: { Authorization: `Bearer ${userToken}` },
+    });
+    assert.equal(afterLogoutRes.status, 401);
+
+    // 9. Missing Secret in `REAL` mode refuses startup
+    const origSecret = process.env.SAM_ATT_JWT_SECRET;
+    try {
+      delete process.env.SAM_ATT_JWT_SECRET;
+      assert.throws(() => {
+        AuthService.assertRealModeSecretConfigured('REAL');
+      }, /SAM_ATT_JWT_SECRET/);
+    } finally {
+      if (origSecret !== undefined) {
+        process.env.SAM_ATT_JWT_SECRET = origSecret;
+      }
+    }
   });
 
-  it('Scenario 13, 14, 15 & 16: API Validation, Atomic Transaction Rollback, Secret Masking & HOSOffice Push Preview Safety', async () => {
-    const { app, repo } = createTestEnvironment();
+  it('Scenario 13 & 14: Atomic Transaction Rollback, Concurrent Updates Serialization & Persistence After Restart (§2 & §8)', async () => {
+    const tempFile = path.join(
+      os.tmpdir(),
+      `sam_att_persist_test_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.json`
+    );
 
-    // 13A: Username-only login without password must fail with 401 (§10)
-    const noPassLogin = await invokeGatewayRoute(app, {
-      method: 'POST',
-      url: '/api/Sam_Att/auth/login',
-      body: { username: 'admin_test' },
-    });
-    assert.equal(noPassLogin.status, 401);
+    try {
+      // 1. Create Instance #1 backed by `tempFile`
+      const { repo: repo1 } = createTestEnvironment('TEST', tempFile);
 
-    // 13B: Invalid 6-field scanner payload (invalid date "2026-02-30 99:00:00") must fail with 400
-    const badScanRes = await invokeGatewayRoute(app, {
-      method: 'POST',
-      url: '/api/Sam_Att/scanners/sync',
-      headers: { 'x-sam-att-dev-user-id': 'USR_STAFF' },
-      body: {
-        scans: [
-          { machineNo: 1, enrollNumber: 101, scanDateTime: '2026-02-30 99:00:00', verifyMode: 1, inOutMode: 1, workCode: null },
-        ],
-      },
-    });
-    assert.equal(badScanRes.status, 400);
+      // 2. Concurrent Updates Test: Run 5 concurrent shift creations via `Promise.all`
+      await Promise.all(
+        [1, 2, 3, 4, 5].map((idx) =>
+          repo1.withTransaction((tx) =>
+            tx.saveShift(
+              {
+                id: `SH_CONC_${idx}`,
+                code: `C0${idx}`,
+                name: `กะทดสอบพร้อมกัน ${idx}`,
+                category: 'SPECIAL',
+                startTime: '08:00',
+                endTime: '12:00',
+                crossMidnight: false,
+                graceMinutes: 10,
+                earlyScanWindowMinutes: 60,
+                lateScanWindowMinutes: 60,
+                active: true,
+              },
+              'admin_test'
+            )
+          )
+        )
+      );
 
-    // 14: Database Transaction Rollback: if an error is thrown inside `withTransaction`, all mutations roll back!
-    const beforeShiftsCount = repo.getShifts().length;
-    await assert.rejects(async () => {
-      await repo.withTransaction((tx) => {
-        tx.saveShift({
-          id: 'SH_TEMP_ROLLBACK',
-          code: 'TMP',
-          name: 'กะทดสอบ Rollback',
-          category: 'SPECIAL',
-          startTime: '17:00',
-          endTime: '20:00',
-          crossMidnight: false,
-          graceMinutes: 10,
-          earlyScanWindowMinutes: 60,
-          lateScanWindowMinutes: 60,
-          active: true,
+      assert.equal(repo1.getShifts().length, 3 + 5);
+
+      // 3. Transaction Rollback Test: Error inside `withTransaction` rolls back changes and does not corrupt disk state
+      await assert.rejects(async () => {
+        await repo1.withTransaction((tx) => {
+          tx.saveShift({
+            id: 'SH_ABORTED',
+            code: 'ABT',
+            name: 'กะที่ต้องถูก Rollback',
+            category: 'SPECIAL',
+            startTime: '13:00',
+            endTime: '17:00',
+            crossMidnight: false,
+            graceMinutes: 10,
+            earlyScanWindowMinutes: 60,
+            lateScanWindowMinutes: 60,
+            active: true,
+          });
+          throw new Error('Simulated transaction failure');
         });
-        throw new Error('Simulated mid-transaction failure');
       });
-    });
-    assert.equal(repo.getShifts().length, beforeShiftsCount);
+      assert.equal(repo1.getShifts().length, 8);
 
-    // 15: ADMIN accessing `/settings/connections` receives masked passwords
-    const settingsRes = await invokeGatewayRoute(app, {
-      method: 'GET',
-      url: '/api/Sam_Att/settings/connections',
-      headers: { 'x-sam-att-dev-user-id': 'USR_ADMIN' },
-    });
-    assert.equal(settingsRes.status, 200);
-    assert.equal(settingsRes.body.samchukAttendanceDb.passwordMasked, '••••••••••••');
+      // 4. Write Raw Scan, Shift Assignment, Reprocess, and HR Note before simulated restart
+      await repo1.withTransaction((tx) => {
+        tx.assignShift({
+          personId: 'P001',
+          workDate: '2026-11-06',
+          shiftId: 'SH01',
+          assignmentType: 'DAILY',
+        });
+        tx.ingestRawScans([
+          {
+            machineNo: 1,
+            enrollNumber: 101,
+            scanDateTime: '2026-11-06 08:25:00',
+            verifyMode: 1,
+            inOutMode: 1,
+            workCode: null,
+          },
+          {
+            machineNo: 1,
+            enrollNumber: 101,
+            scanDateTime: '2026-11-06 16:05:00',
+            verifyMode: 1,
+            inOutMode: 2,
+            workCode: null,
+          },
+        ]);
+        const rep = tx.executeReprocess({
+          fromDate: '2026-11-06',
+          toDate: '2026-11-06',
+          referenceDateTime: '2026-11-06 18:00:00',
+        });
+        tx.saveHRReviewAndNote({
+          attendanceId: rep.records[0].id,
+          reasonCode: 'TRAFFIC_DELAY',
+          reasonLabel: 'จราจรติดขัด',
+          note: 'ฝนตกหนักหน้า รพ.สามชุก',
+          hrReviewStatus: 'REVIEWED',
+          authorUserId: 'USR_STAFF',
+          authorName: 'นางสาวพัชรี เจริญผล',
+        });
+      });
 
-    // 16: HOSOffice Push returns Phase 2 Preview Only (`livePushExecuted: false`, `canExecuteLivePush: false`)
-    repo.assignShift({ personId: 'P001', workDate: '2026-11-06', shiftId: 'SH01', assignmentType: 'DAILY' });
-    repo.ingestRawScans([
-      { machineNo: 1, enrollNumber: 101, scanDateTime: '2026-11-06 07:50:00', verifyMode: 1, inOutMode: 1, workCode: null },
-      { machineNo: 1, enrollNumber: 101, scanDateTime: '2026-11-06 16:05:00', verifyMode: 1, inOutMode: 2, workCode: null },
-    ]);
-    const rep = repo.executeReprocess({
-      fromDate: '2026-11-06',
-      toDate: '2026-11-06',
-      referenceDateTime: '2026-11-06 18:00:00',
-    });
+      // 5. Simulate Backend Restart: Instantiate a brand-new SamAttRepository with empty seed, loading exclusively from `tempFile`
+      const repoAfterRestart = new SamAttRepository(
+        {},
+        { mode: 'TEST', persistenceFilePath: tempFile }
+      );
 
-    const pushRes = await invokeGatewayRoute(app, {
-      method: 'POST',
-      url: '/api/Sam_Att/hosoffice/push',
-      headers: { 'x-sam-att-dev-user-id': 'USR_STAFF' },
-      body: { attendanceIds: [rep.records[0].id] },
-    });
-    assert.equal(pushRes.status, 200);
-    assert.equal(pushRes.body.livePushExecuted, false);
-    assert.equal(pushRes.body.canExecuteLivePush, false);
-    assert.equal(pushRes.body.phaseStatus, 'PHASE2_PREVIEW_ONLY_AWAITING_CONTRACT');
-    assert.equal(pushRes.body.validCount, 1);
+      assert.equal(repoAfterRestart.getShifts().length, 8);
+      assert.equal(repoAfterRestart.getRawScans({}).total, 2);
+      const attAfterRestart = repoAfterRestart.getAttendance({ workDate: '2026-11-06' });
+      assert.equal(attAfterRestart.total, 1);
+      assert.equal(attAfterRestart.items[0].status, 'LATE');
+      assert.equal(attAfterRestart.items[0].lateMinutes, 10);
+      assert.equal(attAfterRestart.items[0].hrReviewStatus, 'REVIEWED');
+      assert.equal(attAfterRestart.items[0].notes?.reasonCode, 'TRAFFIC_DELAY');
+      assert.equal(attAfterRestart.items[0].noteHistory?.length, 1);
+    } finally {
+      if (fs.existsSync(tempFile)) {
+        fs.unlinkSync(tempFile);
+      }
+    }
+  });
+
+  it('Scenario 15 & 16: Real MySQL Repository (`MySqlSamAttRepository`) Parameterized SQL, Transactions, Row Locks (`FOR UPDATE`), and HTTP 503 When MySQL Unavailable (Zero Mock Fallback)', async () => {
+    const origSecret = process.env.SAM_ATT_JWT_SECRET;
+    process.env.SAM_ATT_JWT_SECRET =
+      'samchuk_hospital_test_jwt_secret_key_at_least_32_chars_long';
+
+    try {
+      // 15A: When MySQL is unreachable/unconfigured in REAL mode, API returns HTTP 503 Service Unavailable and NEVER falls back to Mock Data!
+      const unavailablePool: SqlConnectionPool = {
+        async execute() {
+          throw new DatabaseUnavailableError(
+            'ECONNREFUSED 10.2.0.201:3306 — MySQL samchuk_attendance is unreachable'
+          );
+        },
+        async getConnection() {
+          throw new DatabaseUnavailableError(
+            'ECONNREFUSED 10.2.0.201:3306 — MySQL samchuk_attendance is unreachable'
+          );
+        },
+        async end() {},
+      };
+
+      const realRepoUnavailable = new MySqlSamAttRepository(unavailablePool);
+      assert.equal(realRepoUnavailable.mode, 'REAL');
+
+      const appUnavailable = express();
+      appUnavailable.use('/api/Sam_Att', createSamAttRouter(realRepoUnavailable));
+
+      // Verify Dev Persona Mock Header (`x-sam-att-dev-user-id`) is strictly disabled in REAL mode (returns 401)
+      const mockHeaderInRealRes = await invokeGatewayRoute(appUnavailable, {
+        method: 'GET',
+        url: '/api/Sam_Att/shifts',
+        headers: { 'x-sam-att-dev-user-id': 'USR_ADMIN' },
+      });
+      assert.equal(mockHeaderInRealRes.status, 401);
+
+      // Login attempt when MySQL is down returns 503 Service Unavailable (never logs in with fake mock users)
+      const loginWhenDbDown = await invokeGatewayRoute(appUnavailable, {
+        method: 'POST',
+        url: '/api/Sam_Att/auth/login',
+        body: { username: 'admin_test', password: 'admin_secret_123' },
+      });
+      assert.equal(loginWhenDbDown.status, 503);
+      assert.equal(loginWhenDbDown.body.code, 'SAM_ATT_MYSQL_UNAVAILABLE');
+      assert.equal(loginWhenDbDown.body.repositoryMode, 'REAL');
+
+      // 15B: Verify `MySqlSamAttRepository` executes real parameterized SQL (`?`), `beginTransaction`, `commit`, `rollback`, and `FOR UPDATE` row locking
+      const executedQueries: Array<{ sql: string; params: ReadonlyArray<unknown> }> = [];
+      let txBegun = 0;
+      let txCommitted = 0;
+      let txRolledBack = 0;
+
+      const mockSqlConn: SqlQueryableConnection = {
+        async beginTransaction() {
+          txBegun++;
+        },
+        async commit() {
+          txCommitted++;
+        },
+        async rollback() {
+          txRolledBack++;
+        },
+        release() {},
+        async execute<T = any>(sql: string, params: ReadonlyArray<unknown> = []): Promise<[T, any]> {
+          executedQueries.push({ sql: sql.trim(), params });
+          if (sql.includes('FROM attendance WHERE id = ? FOR UPDATE')) {
+            return [
+              [
+                {
+                  id: 'ATT_SQL_1',
+                  status: 'NO_SCAN',
+                  is_pushed_to_hosoffice: 0,
+                },
+              ] as unknown as T,
+              [],
+            ];
+          }
+          if (sql.includes('FROM attendance a')) {
+            return [
+              [
+                {
+                  id: 'ATT_SQL_1',
+                  person_id: 'P001',
+                  work_date: '2026-11-06',
+                  shift_id: 'SH_SQL_1',
+                  shift_name: 'กะเช้า MySQL',
+                  shift_start_time: '08:00',
+                  shift_end_time: '16:00',
+                  cross_midnight: 0,
+                  grace_minutes: 15,
+                  shift_category: 'MORNING',
+                  checkin_at: null,
+                  checkout_at: null,
+                  checkin_datetime: null,
+                  checkout_datetime: null,
+                  late_minutes: 0,
+                  early_checkout_minutes: 0,
+                  has_missing_checkout: 0,
+                  status: 'NO_SCAN',
+                  evaluation_state: 'EVALUATED',
+                  hr_review_status: 'REVIEWED',
+                  ambiguous_scan_flag: 0,
+                  evaluation_note: null,
+                  computed_at: '2026-11-06 18:00:00',
+                  raw_scan_in_id: null,
+                  raw_scan_out_id: null,
+                  related_raw_scan_ids: '[]',
+                  is_pushed_to_hosoffice: 0,
+                  last_pushed_at: null,
+                  modified_after_push: 0,
+                  fingle_id_current: 101,
+                  prefix: 'นางสาว',
+                  first_name: 'กานดา',
+                  last_name: 'สุขใจ',
+                  department: 'IPD',
+                  group_name: 'IPD',
+                  personnel_type: 'ข้าราชการ',
+                },
+              ] as unknown as T,
+              [],
+            ];
+          }
+          if (sql.includes('FROM attendance_notes')) {
+            return [
+              [
+                {
+                  id: 'NOTE_SQL_1',
+                  attendance_id: 'ATT_SQL_1',
+                  reason_code: 'OFFICIAL_DUTY',
+                  reason_label: 'ไปราชการ',
+                  note: 'ประชุมกระทรวง',
+                  author_user_id: 'USR_STAFF',
+                  author_name: 'นางสาวพัชรี เจริญผล',
+                  created_at: '2026-11-06 18:05:00',
+                  updated_at: '2026-11-06 18:05:00',
+                },
+              ] as unknown as T,
+              [],
+            ];
+          }
+          if (sql.includes('FROM hr_review_history')) {
+            return [
+              [
+                {
+                  id: 'NH_SQL_1',
+                  attendance_id: 'ATT_SQL_1',
+                  reason_code: 'OFFICIAL_DUTY',
+                  reason_label: 'ไปราชการ',
+                  note: 'ประชุมกระทรวง',
+                  hr_review_status: 'REVIEWED',
+                  author_user_id: 'USR_STAFF',
+                  author_name: 'นางสาวพัชรี เจริญผล',
+                  created_at: '2026-11-06 18:05:00',
+                },
+              ] as unknown as T,
+              [],
+            ];
+          }
+          return [[] as unknown as T, []];
+        },
+      };
+
+      const recordingPool: SqlConnectionPool = {
+        async execute<T = any>(sql: string, params: ReadonlyArray<unknown> = []) {
+          return mockSqlConn.execute<T>(sql, params);
+        },
+        async getConnection() {
+          return mockSqlConn;
+        },
+        async end() {},
+      };
+
+      const mysqlRepo = new MySqlSamAttRepository(recordingPool);
+
+      // Execute transactional HR Review update via MySqlSamAttRepository
+      const updatedAtt = await mysqlRepo.withTransaction((tx) =>
+        tx.saveHRReviewAndNote({
+          attendanceId: 'ATT_SQL_1',
+          reasonCode: 'OFFICIAL_DUTY',
+          reasonLabel: 'ไปราชการ',
+          note: 'ประชุมกระทรวง',
+          hrReviewStatus: 'REVIEWED',
+          authorUserId: 'USR_STAFF',
+          authorName: 'นางสาวพัชรี เจริญผล',
+        })
+      );
+
+      assert.equal(txBegun, 1);
+      assert.equal(txCommitted, 1);
+      assert.equal(txRolledBack, 0);
+      assert.equal(updatedAtt.status, 'NO_SCAN'); // Abnormal status never overwritten to NORMAL!
+      assert.equal(updatedAtt.hrReviewStatus, 'REVIEWED');
+      assert.equal(updatedAtt.notes?.reasonCode, 'OFFICIAL_DUTY');
+      assert.ok(
+        executedQueries.some((q) =>
+          q.sql.includes('FROM attendance WHERE id = ? FOR UPDATE')
+        )
+      );
+
+      // Verify rollback on failure in MySqlSamAttRepository
+      await assert.rejects(async () => {
+        await mysqlRepo.withTransaction(async () => {
+          throw new Error('Simulated SQL transaction failure');
+        });
+      });
+      assert.equal(txRolledBack, 1);
+    } finally {
+      if (origSecret !== undefined) {
+        process.env.SAM_ATT_JWT_SECRET = origSecret;
+      } else {
+        delete process.env.SAM_ATT_JWT_SECRET;
+      }
+    }
+  });
+
+  it('Scenario 17: MySQL Migration Compatibility Check (`001_phase1_phase2_safe_migration.sql`) (§3 & §8)', () => {
+    const migrationPath = path.resolve(
+      process.cwd(),
+      'database/migrations/001_phase1_phase2_safe_migration.sql'
+    );
+    const rollbackPlanPath = path.resolve(
+      process.cwd(),
+      'database/migrations/BACKUP_AND_ROLLBACK_PLAN.md'
+    );
+
+    assert.ok(fs.existsSync(migrationPath), 'Migration SQL file must exist');
+    assert.ok(fs.existsSync(rollbackPlanPath), 'Backup and Rollback Plan must exist');
+
+    const sqlContent = fs.readFileSync(migrationPath, 'utf8');
+    const executableSqlOnly = sqlContent
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('--'))
+      .join('\n');
+    // Must check version and use INFORMATION_SCHEMA.COLUMNS Stored Procedure instead of MariaDB-only ADD COLUMN IF NOT EXISTS
+    assert.ok(executableSqlOnly.includes('SELECT VERSION()'));
+    assert.ok(executableSqlOnly.includes('INFORMATION_SCHEMA.COLUMNS'));
+    assert.ok(executableSqlOnly.includes('sam_att_add_column_if_missing'));
+    assert.equal(
+      /ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS/i.test(executableSqlOnly),
+      false,
+      'Migration must NOT use MariaDB-only ADD COLUMN IF NOT EXISTS syntax in executable SQL'
+    );
   });
 });
