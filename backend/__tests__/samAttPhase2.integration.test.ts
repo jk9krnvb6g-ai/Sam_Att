@@ -43,6 +43,13 @@ import { createDefaultSeededRepository } from '../repositories/defaultRepository
 import { AuthService } from '../services/authService';
 import { DeploymentCenterService } from '../services/deploymentCenterService';
 import { createSamAttRouter } from '../router';
+import {
+  apiAttendanceAdapter,
+  ApiRequestError,
+  extractSafeErrorMessage,
+  parseApiErrorPayload,
+} from '../../src/services/apiAttendanceAdapter';
+import { mockAttendanceService } from '../../src/services/mockAttendanceService';
 
 /**
  * Helper to invoke the mounted `/api/Sam_Att` Express Router in-memory without opening any TCP port
@@ -2766,7 +2773,296 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  // ===========================================================================
+  // SCENARIO 23: BUG-001 / A95 — Fix Infinite /scanners Request Storm,
+  // [object Object] Error Rendering, and HTTP 429 Rate Limit Handling
+  // ===========================================================================
+  it('Scenario 23: BUG-001 / A95 — Scanner Fetch Deduplication, Hydrated Event Loop Prevention, [object Object] Prevention on Structured Error Objects, and HTTP 429 Rate Limit Handling with retryAfterSeconds', async () => {
+    // 1. Verify parseApiErrorPayload & extractSafeErrorMessage convert Gateway structured error objects
+    //    into human-readable Thai strings and NEVER produce "[object Object]"
+    const gateway429ObjectPayload = {
+      success: false,
+      error: {
+        code: 'RATE_LIMIT_EXCEEDED',
+        message: 'Too many requests from this IP',
+        retryAfterSeconds: 60,
+      },
+    };
+    const parsed429 = parseApiErrorPayload(
+      gateway429ObjectPayload,
+      429,
+      'ไม่สามารถโหลดรายการเครื่องสแกนได้',
+      null
+    );
+    assert.equal(parsed429.status, 429);
+    assert.equal(parsed429.code, 'RATE_LIMIT_EXCEEDED');
+    assert.equal(parsed429.retryAfterSeconds, 60);
+    assert.equal(parsed429.message.includes('[object Object]'), false);
+    assert.equal(parsed429.message.includes('60 วินาที'), true);
+    assert.equal(
+      parsed429.message,
+      'ระบบถูกเรียกใช้งานถี่เกินกำหนด กรุณารอ 60 วินาทีแล้วลองใหม่'
+    );
+
+    // Also verify Retry-After HTTP header fallback when retryAfterSeconds is not in JSON body
+    const parsed429Header = parseApiErrorPayload(
+      { error: { code: 'RATE_LIMIT_EXCEEDED' } },
+      429,
+      'Fallback',
+      '45'
+    );
+    assert.equal(parsed429Header.retryAfterSeconds, 45);
+    assert.equal(
+      parsed429Header.message,
+      'ระบบถูกเรียกใช้งานถี่เกินกำหนด กรุณารอ 45 วินาทีแล้วลองใหม่'
+    );
+
+    // Verify 401, 403, 500, and arbitrary nested error objects never return [object Object]
+    const parsed401 = parseApiErrorPayload(
+      { error: { code: 'UNAUTHORIZED', details: { reason: 'expired' } } },
+      401,
+      'Fallback'
+    );
+    assert.equal(parsed401.message.includes('[object Object]'), false);
+    assert.equal(parsed401.message.includes('กรุณาเข้าสู่ระบบใหม่'), true);
+
+    const parsed403 = parseApiErrorPayload(
+      { error: { code: 'FORBIDDEN' } },
+      403,
+      'Fallback'
+    );
+    assert.equal(parsed403.message, 'ไม่มีสิทธิ์เข้าถึงข้อมูลส่วนนี้');
+
+    const parsed500 = parseApiErrorPayload(
+      { error: { internalCode: 5001 } },
+      500,
+      'Fallback'
+    );
+    assert.equal(parsed500.message, 'เกิดข้อผิดพลาดจากระบบเซิร์ฟเวอร์');
+
+    assert.equal(
+      extractSafeErrorMessage({ error: { code: 'RATE_LIMIT_EXCEEDED', retryAfterSeconds: 30 } }),
+      'ระบบถูกเรียกใช้งานถี่เกินกำหนด กรุณารอ 30 วินาทีแล้วลองใหม่'
+    );
+    assert.equal(
+      extractSafeErrorMessage(new Error('[object Object]'), 'เกิดข้อผิดพลาดที่ทราบสาเหตุ'),
+      'เกิดข้อผิดพลาดที่ทราบสาเหตุ'
+    );
+    // Secret redaction check
+    const redactedMsg = extractSafeErrorMessage(
+      new Error('Failed with Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.secret')
+    );
+    assert.equal(redactedMsg.includes('eyJhbGci'), false);
+
+    // 2. Verify mockAttendanceService.setScannersFromApi() does NOT dispatch 'sam-att-data-hydrated'
+    //    (which previously triggered App.tsx to increment dataVersion and remount ScannerManagementView in an infinite loop)
+    let hydratedEventCount = 0;
+    const origWindow = (globalThis as any).window;
+    const listeners = new Set<() => void>();
+    (globalThis as any).window = {
+      addEventListener: (evt: string, fn: () => void) => {
+        if (evt === 'sam-att-data-hydrated') listeners.add(fn);
+      },
+      removeEventListener: (evt: string, fn: () => void) => {
+        if (evt === 'sam-att-data-hydrated') listeners.delete(fn);
+      },
+      dispatchEvent: (evt: { type?: string }) => {
+        if (evt?.type === 'sam-att-data-hydrated') {
+          hydratedEventCount += 1;
+          listeners.forEach((fn) => fn());
+        }
+        return true;
+      },
+    };
+
+    const origFetch = globalThis.fetch;
+    try {
+      mockAttendanceService.setScannersFromApi([]);
+      assert.equal(
+        hydratedEventCount,
+        0,
+        'setScannersFromApi([]) must NOT dispatch sam-att-data-hydrated or cause view remount loops'
+      );
+      assert.deepEqual(mockAttendanceService.getScanners(), []);
+
+      // 3. Verify apiAttendanceAdapter.fetchScanners() in-flight deduplication and empty state (scanners: []) handling
+      let scannersFetchCalls = 0;
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/scanners')) {
+          scannersFetchCalls += 1;
+          await new Promise((r) => setTimeout(r, 20));
+          return new Response(
+            JSON.stringify({ success: true, total: 0, scanners: [] }),
+            {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            }
+          );
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      }) as typeof fetch;
+
+      // Fire 5 concurrent fetchScanners() calls (simulating StrictMode / rapid re-renders)
+      const [r1, r2, r3, r4, r5] = await Promise.all([
+        apiAttendanceAdapter.fetchScanners(),
+        apiAttendanceAdapter.fetchScanners(),
+        apiAttendanceAdapter.fetchScanners(),
+        apiAttendanceAdapter.fetchScanners(),
+        apiAttendanceAdapter.fetchScanners(),
+      ]);
+      assert.equal(
+        scannersFetchCalls,
+        1,
+        'Concurrent fetchScanners() calls must be deduplicated into a single HTTP request'
+      );
+      assert.deepEqual(r1, []);
+      assert.deepEqual(r2, []);
+      assert.deepEqual(r3, []);
+      assert.deepEqual(r4, []);
+      assert.deepEqual(r5, []);
+
+      // 4. Verify HTTP 429 on /scanners throws ApiRequestError with Thai message + retryAfterSeconds and does NOT retry automatically
+      let scanners429Calls = 0;
+      globalThis.fetch = (async () => {
+        scanners429Calls += 1;
+        return new Response(
+          JSON.stringify({
+            success: false,
+            error: {
+              code: 'RATE_LIMIT_EXCEEDED',
+              message: 'Too many requests',
+              retryAfterSeconds: 45,
+            },
+          }),
+          {
+            status: 429,
+            headers: {
+              'Content-Type': 'application/json',
+              'Retry-After': '45',
+            },
+          }
+        );
+      }) as typeof fetch;
+
+      await assert.rejects(
+        async () => {
+          await apiAttendanceAdapter.fetchScanners();
+        },
+        (err: unknown) => {
+          assert.equal(err instanceof ApiRequestError, true);
+          const apiErr = err as ApiRequestError;
+          assert.equal(apiErr.status, 429);
+          assert.equal(apiErr.isRateLimit, true);
+          assert.equal(apiErr.retryAfterSeconds, 45);
+          assert.equal(apiErr.message.includes('[object Object]'), false);
+          assert.equal(
+            apiErr.message,
+            'ระบบถูกเรียกใช้งานถี่เกินกำหนด กรุณารอ 45 วินาทีแล้วลองใหม่'
+          );
+          return true;
+        }
+      );
+      assert.equal(
+        scanners429Calls,
+        1,
+        'fetchScanners() must stop immediately on HTTP 429 without automatic retry'
+      );
+
+      // 5. Verify Login 401 (invalid credentials), Login 429 (rate limit), and Login 200 (success)
+      let loginHttpCalls = 0;
+      let meHttpCalls = 0;
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith('/auth/me')) {
+          meHttpCalls += 1;
+          return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 });
+        }
+        if (url.endsWith('/auth/login')) {
+          loginHttpCalls += 1;
+          const body = JSON.parse(String(init?.body || '{}'));
+          if (body.username === 'rate_limited_user') {
+            return new Response(
+              JSON.stringify({
+                success: false,
+                error: {
+                  code: 'RATE_LIMIT_EXCEEDED',
+                  message: 'Too many login attempts',
+                  retryAfterSeconds: 120,
+                },
+              }),
+              { status: 429, headers: { 'Content-Type': 'application/json' } }
+            );
+          }
+          if (body.password !== 'correct_password') {
+            return new Response(
+              JSON.stringify({
+                success: false,
+                error: {
+                  code: 'INVALID_CREDENTIALS',
+                  message: 'ชื่อผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง',
+                },
+              }),
+              { status: 401, headers: { 'Content-Type': 'application/json' } }
+            );
+          }
+          return new Response(
+            JSON.stringify({
+              success: true,
+              token: 'valid_jwt_token_for_test',
+              expiresInSeconds: 28800,
+              user: {
+                userId: 'USR_ADMIN',
+                username: body.username,
+                fullName: 'ผู้ดูแลระบบ',
+                role: 'ADMIN',
+                personId: null,
+                department: 'IT',
+                position: 'Admin',
+              },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      }) as typeof fetch;
+
+      // 5A: Wrong password returns 401 with clean Thai message, never [object Object], and never calls /auth/me
+      const badLoginRes = await apiAttendanceAdapter.login('admin', 'wrong_password');
+      assert.equal(badLoginRes.success, false);
+      assert.equal(badLoginRes.status, 401);
+      assert.equal(badLoginRes.error?.includes('[object Object]'), false);
+      assert.equal(badLoginRes.error, 'ชื่อผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง');
+      assert.equal(loginHttpCalls, 1);
+      assert.equal(meHttpCalls, 0, 'Failed login must never trigger /auth/me');
+
+      // 5B: Rate-limited login returns 429 with retryAfterSeconds in Thai, never [object Object], and does not retry
+      const rateLimitLoginRes = await apiAttendanceAdapter.login('rate_limited_user', 'any');
+      assert.equal(rateLimitLoginRes.success, false);
+      assert.equal(rateLimitLoginRes.status, 429);
+      assert.equal(rateLimitLoginRes.retryAfterSeconds, 120);
+      assert.equal(rateLimitLoginRes.error?.includes('[object Object]'), false);
+      assert.equal(
+        rateLimitLoginRes.error,
+        'ระบบถูกเรียกใช้งานถี่เกินกำหนด กรุณารอ 120 วินาทีแล้วลองใหม่'
+      );
+      assert.equal(loginHttpCalls, 2);
+      assert.equal(meHttpCalls, 0);
+
+      // 5C: Valid login succeeds and stores token
+      const okLoginRes = await apiAttendanceAdapter.login('admin', 'correct_password');
+      assert.equal(okLoginRes.success, true);
+      assert.equal(okLoginRes.user?.username, 'admin');
+      assert.equal(apiAttendanceAdapter.getAuthToken(), 'valid_jwt_token_for_test');
+      apiAttendanceAdapter.setAuthToken(null);
+    } finally {
+      globalThis.fetch = origFetch;
+      (globalThis as any).window = origWindow;
+    }
+  });
 });
+
 
 
 

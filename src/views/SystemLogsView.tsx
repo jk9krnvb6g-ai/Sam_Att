@@ -1,6 +1,10 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { mockAttendanceService } from '../services/mockAttendanceService';
-import { apiAttendanceAdapter, ConnectionSettingsResponse } from '../services/apiAttendanceAdapter';
+import {
+  apiAttendanceAdapter,
+  ConnectionSettingsResponse,
+  extractSafeErrorMessage,
+} from '../services/apiAttendanceAdapter';
 import { SyncRunLog, AuditLogEntry } from '../types/attendance';
 import { SharedModal } from '../components/common/SharedModal';
 import {
@@ -100,7 +104,7 @@ export const SystemLogsView: React.FC = () => {
       setRefreshKey((k) => k + 1);
     } catch (err) {
       setSamchukDbStatus(
-        `ไม่สามารถตรวจสอบฐานข้อมูลได้: ${err instanceof Error ? err.message : 'Unknown error'}`
+        `ไม่สามารถตรวจสอบฐานข้อมูลได้: ${extractSafeErrorMessage(err, 'ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้')}`
       );
     } finally {
       setTestingDb('NONE');
@@ -132,7 +136,7 @@ export const SystemLogsView: React.FC = () => {
       setRefreshKey((k) => k + 1);
     } catch (err) {
       setHosofficeDbStatus(
-        `ไม่สามารถตรวจสอบการตั้งค่า HOSOffice ได้: ${err instanceof Error ? err.message : 'Unknown error'}`
+        `ไม่สามารถตรวจสอบการตั้งค่า HOSOffice ได้: ${extractSafeErrorMessage(err, 'ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้')}`
       );
     } finally {
       setTestingDb('NONE');
@@ -164,7 +168,7 @@ export const SystemLogsView: React.FC = () => {
       setRefreshKey((k) => k + 1);
     } catch (err) {
       setStatusFeedback(
-        `เกิดข้อผิดพลาดในการตรวจสอบฐานข้อมูล: ${err instanceof Error ? err.message : 'Unknown error'}`
+        `เกิดข้อผิดพลาดในการตรวจสอบฐานข้อมูล: ${extractSafeErrorMessage(err, 'ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้')}`
       );
     } finally {
       setTestingDb('NONE');

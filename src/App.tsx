@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { Navbar } from './components/layout/Navbar';
 import { Sidebar, NavItemKey } from './components/layout/Sidebar';
@@ -24,10 +24,15 @@ const MainShell: React.FC = () => {
   const [activeNav, setActiveNav] = useState<NavItemKey>('dashboard');
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [dataVersion, setDataVersion] = useState(0);
+  const lastHydratedSessionRef = useRef<string | null>(null);
 
-  // Enforce role-based default view and hydrate real API data when user changes
+  const userId = currentUser?.id ?? null;
+  const userRole = currentUser?.role ?? null;
+
+  // Enforce role-based default view and hydrate real API data once when user session changes
   useEffect(() => {
-    if (!currentUser) {
+    if (!currentUser || !userId || !userRole) {
+      lastHydratedSessionRef.current = null;
       mockAttendanceService.clearState();
       return;
     }
@@ -35,21 +40,27 @@ const MainShell: React.FC = () => {
     // Rule 8.7: When in Development Preview Demo Admin Mode, open Deployment Center
     // and NEVER call Production Backend APIs.
     if (isDemoMode && import.meta.env.DEV && !import.meta.env.PROD) {
+      lastHydratedSessionRef.current = `DEMO:${userId}`;
       mockAttendanceService.clearState();
       setActiveNav('deployment-center');
       return;
     }
 
-    if (currentUser.role === 'GENERAL_USER') {
+    if (userRole === 'GENERAL_USER') {
       setActiveNav('my-attendance');
     } else if (
       (activeNav === 'settings' || activeNav === 'deployment-center') &&
-      currentUser.role !== 'ADMIN'
+      userRole !== 'ADMIN'
     ) {
       setActiveNav('dashboard');
     }
-    void mockAttendanceService.hydrateFromRealApi(currentUser.role);
-  }, [currentUser, isDemoMode]);
+
+    const sessionKey = `${userId}:${userRole}`;
+    if (lastHydratedSessionRef.current !== sessionKey) {
+      lastHydratedSessionRef.current = sessionKey;
+      void mockAttendanceService.hydrateFromRealApi(userRole);
+    }
+  }, [currentUser, userId, userRole, isDemoMode, activeNav]);
 
   useEffect(() => {
     const handleHydrated = () => {
@@ -78,6 +89,7 @@ const MainShell: React.FC = () => {
   }
 
   const lastApiError = isDemoMode ? null : mockAttendanceService.getLastApiError();
+  const isRateLimitError = isDemoMode ? false : mockAttendanceService.isLastErrorRateLimit();
 
   const renderActiveView = () => {
     // Strict guard: GENERAL_USER can ONLY see MyAttendanceView
@@ -87,7 +99,7 @@ const MainShell: React.FC = () => {
 
     switch (activeNav) {
       case 'dashboard':
-        return <DashboardView key={`dash-${dataVersion}`} onNavigate={setActiveNav} />;
+        return <DashboardView key="dashboard" onNavigate={setActiveNav} />;
       case 'my-attendance':
         return <MyAttendanceView key={`my-att-${dataVersion}`} />;
       case 'hr-attendance':
@@ -104,25 +116,25 @@ const MainShell: React.FC = () => {
       case 'hosoffice-push':
         return <HOSOfficePushView key={`push-${dataVersion}`} />;
       case 'scanners':
-        return <ScannerManagementView key={`scan-${dataVersion}`} />;
+        return <ScannerManagementView key="scanners" />;
       case 'reports':
         return <ReportsView key={`rep-${dataVersion}`} />;
       case 'system-logs':
-        return <SystemLogsView key={`logs-${dataVersion}`} />;
+        return <SystemLogsView key="system-logs" />;
       case 'settings':
         return currentUser.role === 'ADMIN' ? (
-          <SettingsView key={`set-${dataVersion}`} />
+          <SettingsView key="settings" />
         ) : (
-          <DashboardView key={`dash-${dataVersion}`} onNavigate={setActiveNav} />
+          <DashboardView key="dashboard" onNavigate={setActiveNav} />
         );
       case 'deployment-center':
         return currentUser.role === 'ADMIN' ? (
-          <DeploymentCenterView key={`deploy-${dataVersion}`} />
+          <DeploymentCenterView key="deployment-center" />
         ) : (
-          <DashboardView key={`dash-${dataVersion}`} onNavigate={setActiveNav} />
+          <DashboardView key="dashboard" onNavigate={setActiveNav} />
         );
       default:
-        return <DashboardView key={`dash-${dataVersion}`} onNavigate={setActiveNav} />;
+        return <DashboardView key="dashboard" onNavigate={setActiveNav} />;
     }
   };
 
@@ -178,29 +190,36 @@ const MainShell: React.FC = () => {
           onCloseMobile={() => setMobileSidebarOpen(false)}
         />
         <main className="flex-1 min-w-0 p-4 sm:p-6 lg:p-7 max-w-[1600px] mx-auto w-full space-y-4">
-          {lastApiError && activeNav !== 'dashboard' && activeNav !== 'deployment-center' && (
-            <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-xs text-amber-950 flex flex-wrap items-center justify-between gap-3 shadow-2xs">
-              <div className="flex items-start gap-2.5">
-                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                <div>
-                  <div className="font-bold text-amber-900">
-                    ไม่สามารถดึงข้อมูลจริงจาก Central API Gateway (`/api/Sam_Att/*`) ได้ (No Mock Data Fallback)
-                  </div>
-                  <div className="text-amber-800 mt-0.5 font-mono-data">
-                    สาเหตุ: {lastApiError}
+          {lastApiError &&
+            activeNav !== 'dashboard' &&
+            activeNav !== 'deployment-center' &&
+            activeNav !== 'scanners' && (
+              <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-xs text-amber-950 flex flex-wrap items-center justify-between gap-3 shadow-2xs">
+                <div className="flex items-start gap-2.5">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <div>
+                    <div className="font-bold text-amber-900">
+                      {isRateLimitError
+                        ? 'ระบบจำกัดจำนวนคำขอชั่วคราว (HTTP 429: RATE_LIMIT_EXCEEDED)'
+                        : 'ไม่สามารถดึงข้อมูลจริงจาก Central API Gateway (`/api/Sam_Att/*`) ได้ (No Mock Data Fallback)'}
+                    </div>
+                    <div className="text-amber-800 mt-0.5 font-mono-data">
+                      สาเหตุ: {lastApiError}
+                    </div>
                   </div>
                 </div>
+                {!isRateLimitError && (
+                  <button
+                    type="button"
+                    onClick={() => void mockAttendanceService.hydrateFromRealApi(currentUser.role)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold transition-colors cursor-pointer"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>ลองเชื่อมต่อใหม่</span>
+                  </button>
+                )}
               </div>
-              <button
-                type="button"
-                onClick={() => void mockAttendanceService.hydrateFromRealApi(currentUser.role)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold transition-colors cursor-pointer"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                <span>ลองเชื่อมต่อใหม่</span>
-              </button>
-            </div>
-          )}
+            )}
           {renderActiveView()}
         </main>
       </div>

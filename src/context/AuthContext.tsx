@@ -1,12 +1,19 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
 import { UserAccount } from '../types/attendance';
-import { apiAttendanceAdapter, BackendAuthenticatedUser } from '../services/apiAttendanceAdapter';
+import {
+  apiAttendanceAdapter,
+  ApiRequestError,
+  BackendAuthenticatedUser,
+  extractSafeErrorMessage,
+} from '../services/apiAttendanceAdapter';
 import { getDemoAdminUser } from '../config/demoModeConfig';
 
 interface AuthContextType {
   currentUser: UserAccount | null;
   isLoadingAuth: boolean;
   isDemoMode: boolean;
+  authError: string | null;
+  clearAuthError: () => void;
   enterDemoMode: () => void;
   exitDemoMode: () => void;
   login: (username: string, password: string) => Promise<{ success: boolean; error?: string }>;
@@ -34,6 +41,12 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
   const [isLoadingAuth, setIsLoadingAuth] = useState<boolean>(true);
   const [isDemoMode, setIsDemoMode] = useState<boolean>(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const hasValidatedStartupRef = useRef<boolean>(false);
+
+  const clearAuthError = useCallback(() => {
+    setAuthError(null);
+  }, []);
 
   const clearAuthSession = useCallback(() => {
     apiAttendanceAdapter.setAuthToken(null);
@@ -51,6 +64,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       const demoUser = getDemoAdminUser();
       if (demoUser) {
         apiAttendanceAdapter.setAuthToken(null);
+        setAuthError(null);
         setIsDemoMode(true);
         setCurrentUser(demoUser);
       }
@@ -64,11 +78,17 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
   }, []);
 
-  // Validate stored Bearer token on startup via GET /api/Sam_Att/auth/me
+  // Validate stored Bearer token on startup via GET /api/Sam_Att/auth/me (at most once)
   useEffect(() => {
     let isMounted = true;
 
     const validateStoredSession = async () => {
+      if (hasValidatedStartupRef.current) {
+        if (isMounted) setIsLoadingAuth(false);
+        return;
+      }
+      hasValidatedStartupRef.current = true;
+
       const token = apiAttendanceAdapter.getAuthToken();
       if (!token) {
         clearAuthSession();
@@ -87,6 +107,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         const backendUser = await apiAttendanceAdapter.fetchCurrentUser();
         if (isMounted) {
           const mappedUser = mapBackendUserToFrontendUser(backendUser);
+          setAuthError(null);
           setIsDemoMode(false);
           setCurrentUser(mappedUser);
           try {
@@ -95,8 +116,16 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
             // Ignore storage error
           }
         }
-      } catch {
+      } catch (err) {
         if (isMounted) {
+          if (err instanceof ApiRequestError && err.isRateLimit) {
+            setAuthError(
+              extractSafeErrorMessage(
+                err,
+                'ระบบถูกเรียกใช้งานถี่เกินกำหนด กรุณารอสักครู่แล้วลองใหม่'
+              )
+            );
+          }
           clearAuthSession();
           if (import.meta.env.DEV && !import.meta.env.PROD) {
             const demoUser = getDemoAdminUser();
@@ -132,6 +161,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     username: string,
     password: string
   ): Promise<{ success: boolean; error?: string }> => {
+    setAuthError(null);
     const trimmedUsername = username.trim();
     if (!trimmedUsername || !password) {
       return {
@@ -142,9 +172,13 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
     const res = await apiAttendanceAdapter.login(trimmedUsername, password);
     if (!res.success || !res.user || !res.token) {
+      const normalizedError = extractSafeErrorMessage(
+        res.error,
+        'ชื่อผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง'
+      );
       return {
         success: false,
-        error: res.error || 'ชื่อผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง',
+        error: normalizedError,
       };
     }
 
@@ -160,6 +194,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   const logout = async (): Promise<void> => {
+    setAuthError(null);
     if (isDemoMode) {
       exitDemoMode();
       return;
@@ -174,6 +209,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         currentUser,
         isLoadingAuth,
         isDemoMode,
+        authError,
+        clearAuthError,
         enterDemoMode,
         exitDemoMode,
         login,
@@ -190,3 +227,4 @@ export const useAuth = (): AuthContextType => {
   if (!ctx) throw new Error('useAuth must be used within AuthProvider');
   return ctx;
 };
+

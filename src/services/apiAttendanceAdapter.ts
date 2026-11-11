@@ -92,8 +92,246 @@ export interface ConnectionSettingsResponse {
   };
 }
 
+export interface ParsedApiErrorInfo {
+  message: string;
+  status?: number;
+  code?: string;
+  retryAfterSeconds?: number;
+  isRateLimit: boolean;
+  isNetworkError: boolean;
+}
+
+export class ApiRequestError extends Error {
+  public readonly status?: number;
+  public readonly code?: string;
+  public readonly retryAfterSeconds?: number;
+  public readonly isRateLimit: boolean;
+  public readonly isNetworkError: boolean;
+
+  constructor(info: ParsedApiErrorInfo) {
+    super(info.message);
+    this.name = 'ApiRequestError';
+    this.status = info.status;
+    this.code = info.code;
+    this.retryAfterSeconds = info.retryAfterSeconds;
+    this.isRateLimit = info.isRateLimit;
+    this.isNetworkError = info.isNetworkError;
+  }
+}
+
+function sanitizeSensitiveText(input: string): string {
+  return input
+    .replace(/Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, 'Bearer [REDACTED]')
+    .replace(/"password"\s*:\s*"[^"]*"/gi, '"password":"[REDACTED]"')
+    .replace(/"token"\s*:\s*"[^"]*"/gi, '"token":"[REDACTED]"');
+}
+
+function parsePositiveRetryAfterSeconds(val: unknown): number | undefined {
+  if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
+    return Math.ceil(val);
+  }
+  if (typeof val === 'string' && val.trim() !== '') {
+    const parsed = Number(val.trim());
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.ceil(parsed);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Safely extract a human-readable Thai error message and metadata from any backend/Gateway error payload.
+ * Strictly prevents `[object Object]` from ever being returned or thrown.
+ */
+export function parseApiErrorPayload(
+  payload: unknown,
+  status?: number,
+  fallbackMessage = 'คำร้องขอ API ล้มเหลว กรุณาลองใหม่อีกครั้ง',
+  retryAfterHeader?: string | null
+): ParsedApiErrorInfo {
+  let rawMessage = '';
+  let code: string | undefined;
+  let retryAfterSeconds = parsePositiveRetryAfterSeconds(retryAfterHeader);
+
+  if (typeof payload === 'string') {
+    rawMessage = payload.trim();
+  } else if (payload && typeof payload === 'object') {
+    const obj = payload as Record<string, unknown>;
+
+    if (typeof obj.code === 'string' && obj.code.trim()) {
+      code = obj.code.trim();
+    }
+    const topRetry =
+      parsePositiveRetryAfterSeconds(obj.retryAfterSeconds) ??
+      parsePositiveRetryAfterSeconds(obj.retryAfter);
+    if (topRetry !== undefined) {
+      retryAfterSeconds = topRetry;
+    }
+
+    const errField = obj.error;
+    if (typeof errField === 'string' && errField.trim()) {
+      rawMessage = errField.trim();
+    } else if (errField && typeof errField === 'object') {
+      const errObj = errField as Record<string, unknown>;
+      if (!code && typeof errObj.code === 'string' && errObj.code.trim()) {
+        code = errObj.code.trim();
+      }
+      const nestedRetry =
+        parsePositiveRetryAfterSeconds(errObj.retryAfterSeconds) ??
+        parsePositiveRetryAfterSeconds(errObj.retryAfter);
+      if (nestedRetry !== undefined) {
+        retryAfterSeconds = nestedRetry;
+      }
+      const candidate =
+        (typeof errObj.message === 'string' && errObj.message.trim()) ||
+        (typeof errObj.error === 'string' && errObj.error.trim()) ||
+        (typeof errObj.detail === 'string' && errObj.detail.trim()) ||
+        (typeof errObj.reason === 'string' && errObj.reason.trim()) ||
+        '';
+      if (candidate) {
+        rawMessage = candidate;
+      }
+    }
+
+    if (!rawMessage && typeof obj.message === 'string' && obj.message.trim()) {
+      rawMessage = obj.message.trim();
+    }
+  }
+
+  // Strip any accidental '[object Object]' string
+  if (rawMessage.includes('[object Object]')) {
+    rawMessage = '';
+  }
+
+  rawMessage = sanitizeSensitiveText(rawMessage);
+
+  const isRateLimit =
+    status === 429 ||
+    code === 'RATE_LIMIT_EXCEEDED' ||
+    /RATE_LIMIT_EXCEEDED|Too Many Requests/i.test(rawMessage);
+
+  if (isRateLimit) {
+    const hasThaiRateMsg =
+      rawMessage.includes('ระงับ') ||
+      rawMessage.includes('คำขอมากเกินไป') ||
+      rawMessage.includes('ถี่เกินกำหนด') ||
+      rawMessage.includes('เกินจำนวน') ||
+      rawMessage.includes('กรุณารอ');
+
+    let message: string;
+    if (hasThaiRateMsg) {
+      if (
+        retryAfterSeconds &&
+        !rawMessage.includes('วินาที') &&
+        !rawMessage.includes('นาที')
+      ) {
+        message = `${rawMessage} (กรุณารอ ${retryAfterSeconds} วินาที)`;
+      } else {
+        message = rawMessage;
+      }
+    } else if (retryAfterSeconds) {
+      message = `ระบบถูกเรียกใช้งานถี่เกินกำหนด กรุณารอ ${retryAfterSeconds} วินาทีแล้วลองใหม่`;
+    } else {
+      message = 'ระบบถูกเรียกใช้งานถี่เกินกำหนด กรุณารอสักครู่แล้วลองใหม่';
+    }
+
+    return {
+      message,
+      status: status ?? 429,
+      code: code || 'RATE_LIMIT_EXCEEDED',
+      retryAfterSeconds,
+      isRateLimit: true,
+      isNetworkError: false,
+    };
+  }
+
+  if (status === 401) {
+    return {
+      message:
+        rawMessage ||
+        'เซสชันหมดอายุหรือข้อมูลยืนยันตัวตนไม่ถูกต้อง กรุณาเข้าสู่ระบบใหม่',
+      status: 401,
+      code,
+      retryAfterSeconds,
+      isRateLimit: false,
+      isNetworkError: false,
+    };
+  }
+
+  if (status === 403) {
+    return {
+      message: rawMessage || 'ไม่มีสิทธิ์เข้าถึงข้อมูลส่วนนี้',
+      status: 403,
+      code,
+      retryAfterSeconds,
+      isRateLimit: false,
+      isNetworkError: false,
+    };
+  }
+
+  if (status !== undefined && status >= 500) {
+    return {
+      message: rawMessage || 'เกิดข้อผิดพลาดจากระบบเซิร์ฟเวอร์',
+      status,
+      code,
+      retryAfterSeconds,
+      isRateLimit: false,
+      isNetworkError: false,
+    };
+  }
+
+  return {
+    message: rawMessage || fallbackMessage,
+    status,
+    code,
+    retryAfterSeconds,
+    isRateLimit: false,
+    isNetworkError: false,
+  };
+}
+
+export function extractSafeErrorMessage(
+  err: unknown,
+  fallbackMessage = 'เกิดข้อผิดพลาดในการเชื่อมต่อระบบ กรุณาลองใหม่อีกครั้ง'
+): string {
+  if (err instanceof ApiRequestError) {
+    return err.message;
+  }
+  if (err instanceof Error) {
+    const msg = sanitizeSensitiveText(err.message || '').trim();
+    if (!msg || msg.includes('[object Object]')) {
+      return fallbackMessage;
+    }
+    if (/Failed to fetch|NetworkError|Load failed/i.test(msg)) {
+      return 'ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้';
+    }
+    return msg;
+  }
+  if (typeof err === 'string') {
+    const cleaned = sanitizeSensitiveText(err).trim();
+    if (cleaned && !cleaned.includes('[object Object]')) {
+      return cleaned;
+    }
+  }
+  if (err && typeof err === 'object') {
+    return parseApiErrorPayload(err, undefined, fallbackMessage).message;
+  }
+  return fallbackMessage;
+}
+
 class ApiAttendanceAdapter {
   private baseUrl = '/api/Sam_Att';
+  private inMemoryAuthToken: string | null = null;
+  private fetchScannersInFlight: Promise<ScannerDevice[]> | null = null;
+  private fetchCurrentUserInFlight: Promise<BackendAuthenticatedUser> | null = null;
+  private loginInFlight: Promise<{
+    success: boolean;
+    status?: number;
+    retryAfterSeconds?: number;
+    token?: string;
+    user?: BackendAuthenticatedUser;
+    error?: string;
+  }> | null = null;
 
   public getDataSourceMode(): DataSourceMode {
     return 'API';
@@ -101,18 +339,28 @@ class ApiAttendanceAdapter {
 
   public getAuthToken(): string | null {
     try {
-      return localStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
+      if (typeof localStorage !== 'undefined') {
+        const stored = localStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
+        if (stored) {
+          this.inMemoryAuthToken = stored;
+          return stored;
+        }
+      }
     } catch {
-      return null;
+      // Fallback to in-memory token
     }
+    return this.inMemoryAuthToken;
   }
 
   public setAuthToken(token: string | null): void {
+    this.inMemoryAuthToken = token;
     try {
-      if (token) {
-        localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
-      } else {
-        localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+      if (typeof localStorage !== 'undefined') {
+        if (token) {
+          localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+        } else {
+          localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+        }
       }
     } catch {
       // Ignore storage error
@@ -136,13 +384,25 @@ class ApiAttendanceAdapter {
     init?: RequestInit,
     suppressUnauthorizedEvent = false
   ): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${endpoint}`, {
-      ...init,
-      headers: {
-        ...this.buildHeaders(init?.body !== undefined),
-        ...(init?.headers || {}),
-      },
-    });
+    let res: Response;
+    try {
+      res = await fetch(`${this.baseUrl}${endpoint}`, {
+        ...init,
+        headers: {
+          ...this.buildHeaders(init?.body !== undefined),
+          ...(init?.headers || {}),
+        },
+      });
+    } catch (networkErr: unknown) {
+      throw new ApiRequestError({
+        message: extractSafeErrorMessage(
+          networkErr,
+          'ไม่สามารถเชื่อมต่อเครือข่ายไปยัง Central API Gateway (/api/Sam_Att) ได้'
+        ),
+        isRateLimit: false,
+        isNetworkError: true,
+      });
+    }
 
     const data = await res.json().catch(() => ({}));
 
@@ -153,8 +413,14 @@ class ApiAttendanceAdapter {
       }
     }
 
-    if (!res.ok || data.success === false) {
-      throw new Error(data.error || `HTTP ${res.status}: คำร้องขอ API ล้มเหลว`);
+    if (!res.ok || (data && typeof data === 'object' && (data as any).success === false)) {
+      const parsed = parseApiErrorPayload(
+        data,
+        res.status,
+        `HTTP ${res.status}: คำร้องขอ API ล้มเหลว`,
+        res.headers?.get?.('retry-after')
+      );
+      throw new ApiRequestError(parsed);
     }
 
     return data as T;
@@ -168,48 +434,83 @@ class ApiAttendanceAdapter {
     password: string
   ): Promise<{
     success: boolean;
+    status?: number;
+    retryAfterSeconds?: number;
     token?: string;
     user?: BackendAuthenticatedUser;
     error?: string;
   }> {
-    try {
-      const res = await fetch(`${this.baseUrl}/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.success) {
+    if (this.loginInFlight) {
+      return this.loginInFlight;
+    }
+
+    const task = (async () => {
+      try {
+        const res = await fetch(`${this.baseUrl}/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data || data.success === false) {
+          this.setAuthToken(null);
+          const parsed = parseApiErrorPayload(
+            data,
+            res.status,
+            res.status === 401
+              ? 'ชื่อผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง'
+              : `เข้าสู่ระบบไม่สำเร็จ (HTTP ${res.status})`,
+            res.headers?.get?.('retry-after')
+          );
+          return {
+            success: false,
+            status: res.status,
+            retryAfterSeconds: parsed.retryAfterSeconds,
+            error: parsed.message,
+          };
+        }
+        if (data.token) {
+          this.setAuthToken(data.token);
+        }
+        return {
+          success: true,
+          status: res.status,
+          token: data.token,
+          user: data.user,
+        };
+      } catch (err) {
         return {
           success: false,
-          error: data.error || `เข้าสู่ระบบไม่สำเร็จ (HTTP ${res.status})`,
+          error: extractSafeErrorMessage(
+            err,
+            'ไม่สามารถเชื่อมต่อกับเซิร์ฟเวอร์ Authentication ได้'
+          ),
         };
+      } finally {
+        this.loginInFlight = null;
       }
-      if (data.token) {
-        this.setAuthToken(data.token);
-      }
-      return {
-        success: true,
-        token: data.token,
-        user: data.user,
-      };
-    } catch (err) {
-      return {
-        success: false,
-        error:
-          err instanceof Error
-            ? err.message
-            : 'ไม่สามารถเชื่อมต่อกับเซิร์ฟเวอร์ Authentication ได้',
-      };
-    }
+    })();
+
+    this.loginInFlight = task;
+    return task;
   }
 
   public async fetchCurrentUser(): Promise<BackendAuthenticatedUser> {
-    const data = await this.requestJson<{
+    if (this.fetchCurrentUserInFlight) {
+      return this.fetchCurrentUserInFlight;
+    }
+
+    const task = this.requestJson<{
       success: boolean;
       user: BackendAuthenticatedUser;
-    }>('/auth/me', { method: 'GET' });
-    return data.user;
+    }>('/auth/me', { method: 'GET' }, true)
+      .then((data) => data.user)
+      .finally(() => {
+        this.fetchCurrentUserInFlight = null;
+      });
+
+    this.fetchCurrentUserInFlight = task;
+    return task;
   }
 
   public async logout(): Promise<void> {
@@ -805,12 +1106,22 @@ class ApiAttendanceAdapter {
   // 7. Scanners & Raw Scans (`/scanners*`, `/raw-scans`)
   // ==========================================
   public async fetchScanners(): Promise<ScannerDevice[]> {
-    const data = await this.requestJson<{
+    if (this.fetchScannersInFlight) {
+      return this.fetchScannersInFlight;
+    }
+
+    const task = this.requestJson<{
       success: boolean;
       total?: number;
       scanners: ScannerDevice[];
-    }>('/scanners', { method: 'GET' });
-    return data.scanners || [];
+    }>('/scanners', { method: 'GET' })
+      .then((data) => (Array.isArray(data.scanners) ? data.scanners : []))
+      .finally(() => {
+        this.fetchScannersInFlight = null;
+      });
+
+    this.fetchScannersInFlight = task;
+    return task;
   }
 
   public async createScanner(payload: {

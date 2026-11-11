@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { apiAttendanceAdapter } from '../services/apiAttendanceAdapter';
+import { apiAttendanceAdapter, extractSafeErrorMessage } from '../services/apiAttendanceAdapter';
 import { getDemoDeploymentCenterPayload } from '../config/demoModeConfig';
 import {
   ChecklistItemStatus,
@@ -56,9 +56,10 @@ export const DeploymentCenterView: React.FC = () => {
       setPayload(res);
     } catch (err) {
       setErrorMessage(
-        err instanceof Error
-          ? err.message
-          : 'ไม่สามารถดึงข้อมูลสถานะ Deployment Center จาก Central API Gateway ได้'
+        extractSafeErrorMessage(
+          err,
+          'ไม่สามารถดึงข้อมูลสถานะ Deployment Center จาก Central API Gateway ได้'
+        )
       );
     } finally {
       setLoading(false);
@@ -96,7 +97,7 @@ export const DeploymentCenterView: React.FC = () => {
       );
     } catch (err) {
       setErrorMessage(
-        err instanceof Error ? err.message : 'การตรวจสอบอัปเดตจาก GitHub ล้มเหลว'
+        extractSafeErrorMessage(err, 'การตรวจสอบอัปเดตจาก GitHub ล้มเหลว')
       );
     } finally {
       setActionLoading(null);
@@ -136,7 +137,7 @@ export const DeploymentCenterView: React.FC = () => {
       );
     } catch (err) {
       setErrorMessage(
-        err instanceof Error ? err.message : 'การตรวจสอบความพร้อม (Preflight Check) ล้มเหลว'
+        extractSafeErrorMessage(err, 'การตรวจสอบความพร้อม (Preflight Check) ล้มเหลว')
       );
     } finally {
       setActionLoading(null);

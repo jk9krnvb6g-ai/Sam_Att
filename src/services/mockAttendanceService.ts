@@ -30,7 +30,11 @@ import {
 } from '../types/attendance';
 import { ScannerAdapter } from '../../backend/services/scannerAdapter';
 import { AttendanceCalculator } from '../../backend/services/attendanceCalculator';
-import { apiAttendanceAdapter } from './apiAttendanceAdapter';
+import {
+  apiAttendanceAdapter,
+  ApiRequestError,
+  extractSafeErrorMessage,
+} from './apiAttendanceAdapter';
 
 export function getCurrentSystemDate(): string {
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -72,10 +76,16 @@ class MockAttendanceService {
   private cancellationLogs: ShiftCancellationLog[] = [];
 
   private lastApiError: string | null = null;
+  private lastErrorIsRateLimit = false;
   private isHydrating = false;
+  private hydrationPromise: Promise<void> | null = null;
 
   public getLastApiError(): string | null {
     return this.lastApiError;
+  }
+
+  public isLastErrorRateLimit(): boolean {
+    return this.lastErrorIsRateLimit;
   }
 
   public getIsHydrating(): boolean {
@@ -102,18 +112,32 @@ class MockAttendanceService {
     this.assignments = [];
     this.cancellationLogs = [];
     this.lastApiError = null;
-    this.notifyHydrated();
+    this.lastErrorIsRateLimit = false;
   }
 
   /**
    * Hydrate runtime data strictly from the real Backend API (`/api/Sam_Att/*`).
+   * - Uses in-flight request deduplication so concurrent callers share a single hydration cycle.
    * - For `GENERAL_USER`, strictly calls ONLY `/api/Sam_Att/me/*` endpoints with full pagination.
    * - For `ADMIN` and `RESPONSIBLE_STAFF`, loads all pages from `/api/Sam_Att/*`.
    * - Never falls back to Mock Data if `/api/Sam_Att/*` returns an error or is unreachable.
    */
   public async hydrateFromRealApi(role?: UserRole): Promise<void> {
+    if (this.hydrationPromise) {
+      return this.hydrationPromise;
+    }
+
+    const task = this.runHydrateFromRealApi(role).finally(() => {
+      this.hydrationPromise = null;
+    });
+    this.hydrationPromise = task;
+    return task;
+  }
+
+  private async runHydrateFromRealApi(role?: UserRole): Promise<void> {
     this.isHydrating = true;
     this.lastApiError = null;
+    this.lastErrorIsRateLimit = false;
     try {
       if (role === 'GENERAL_USER') {
         const [myShiftsRes, myAttRecords, myRawScans] = await Promise.all([
@@ -242,23 +266,31 @@ class MockAttendanceService {
 
       this.notifyHydrated();
     } catch (err: unknown) {
-      // Never populate mock data on API failure; expose accurate error state
-      this.attendance = [];
-      this.rawScans = [];
-      this.scanners = [];
-      this.syncSchedules = [];
-      this.syncRuns = [];
-      this.auditLogs = [];
-      this.pushHistory = [];
-      this.personnel = [];
-      this.shifts = [];
-      this.personnelTypeRules = [];
-      this.assignments = [];
-      this.cancellationLogs = [];
-      this.lastApiError =
-        err instanceof Error
-          ? err.message
-          : 'ไม่สามารถดึงข้อมูลจาก Central API Gateway (/api/Sam_Att) ได้';
+      const isRateLimit =
+        (err instanceof ApiRequestError && err.isRateLimit) ||
+        (err instanceof Error && /RATE_LIMIT_EXCEEDED|HTTP 429/i.test(err.message));
+
+      this.lastErrorIsRateLimit = isRateLimit;
+      this.lastApiError = extractSafeErrorMessage(
+        err,
+        'ไม่สามารถดึงข้อมูลจาก Central API Gateway (/api/Sam_Att) ได้'
+      );
+
+      // Only clear runtime state on non-429 failures; on 429 preserve already-loaded real state and do not trigger a remount storm
+      if (!isRateLimit) {
+        this.attendance = [];
+        this.rawScans = [];
+        this.scanners = [];
+        this.syncSchedules = [];
+        this.syncRuns = [];
+        this.auditLogs = [];
+        this.pushHistory = [];
+        this.personnel = [];
+        this.shifts = [];
+        this.personnelTypeRules = [];
+        this.assignments = [];
+        this.cancellationLogs = [];
+      }
       this.notifyHydrated();
     } finally {
       this.isHydrating = false;
@@ -527,7 +559,8 @@ class MockAttendanceService {
   }
 
   public setScannersFromApi(scanners: ScannerDevice[]): void {
-    this.scanners = scanners.map((scanner) => {
+    const safeList = Array.isArray(scanners) ? scanners : [];
+    this.scanners = safeList.map((scanner) => {
       const machineScans = this.rawScans.filter(
         (r) => r.machineNo === scanner.machineNo
       );
@@ -537,7 +570,6 @@ class MockAttendanceService {
         lastEventAt: scanner.lastEventAt || machineScans[0]?.scanDateTime || null,
       };
     });
-    this.notifyHydrated();
   }
 
   public saveScannerDevice(device: Partial<ScannerDevice> & { machineNo: number; name: string; ip: string; port: number; location: string }): ScannerDevice {

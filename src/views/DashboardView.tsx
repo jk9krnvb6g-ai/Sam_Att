@@ -1,5 +1,9 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
-import { apiAttendanceAdapter, DashboardSummaryResponse } from '../services/apiAttendanceAdapter';
+import {
+  apiAttendanceAdapter,
+  DashboardSummaryResponse,
+  extractSafeErrorMessage,
+} from '../services/apiAttendanceAdapter';
 import {
   AttendanceRecord,
   AuditLogEntry,
@@ -183,9 +187,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
       );
     } catch (err) {
       setApiError(
-        err instanceof Error
-          ? err.message
-          : 'ไม่สามารถดึงข้อมูลจาก Central API Gateway (/api/Sam_Att/*) ได้'
+        extractSafeErrorMessage(
+          err,
+          'ไม่สามารถดึงข้อมูลจาก Central API Gateway (/api/Sam_Att/*) ได้'
+        )
       );
     } finally {
       setIsLoading(false);

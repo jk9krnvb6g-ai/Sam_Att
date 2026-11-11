@@ -1,7 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { mockAttendanceService } from '../services/mockAttendanceService';
-import { apiAttendanceAdapter } from '../services/apiAttendanceAdapter';
+import {
+  apiAttendanceAdapter,
+  extractSafeErrorMessage,
+} from '../services/apiAttendanceAdapter';
 import { ScannerDevice, SyncScheduleSlot } from '../types/attendance';
 import { SharedModal } from '../components/common/SharedModal';
 import {
@@ -21,6 +24,8 @@ import {
 export const ScannerManagementView: React.FC = () => {
   const { currentUser } = useAuth();
   const isAdmin = currentUser?.role === 'ADMIN';
+  const canSyncScanners =
+    currentUser?.role === 'ADMIN' || currentUser?.role === 'RESPONSIBLE_STAFF';
 
   const [scanners, setScanners] = useState<ScannerDevice[]>(() =>
     mockAttendanceService.getScanners()
@@ -42,6 +47,12 @@ export const ScannerManagementView: React.FC = () => {
   const [pendingDeviceId, setPendingDeviceId] = useState<string | null>(null);
   const [isRefreshingAll, setIsRefreshingAll] = useState(false);
 
+  // Synchronous in-flight & mount guards to prevent duplicate/looping requests even under React StrictMode
+  const hasLoadedOnMountRef = useRef(false);
+  const isFetchingScannersRef = useRef(false);
+  const syncAllInFlightRef = useRef(false);
+  const deviceActionInFlightRef = useRef(false);
+
   // Scanner Detail Popup
   const [selectedScannerPopup, setSelectedScannerPopup] =
     useState<ScannerDevice | null>(null);
@@ -57,12 +68,16 @@ export const ScannerManagementView: React.FC = () => {
     useState<SyncScheduleSlot | null>(null);
   const [isNewSchedule, setIsNewSchedule] = useState(false);
 
-  const reloadData = () => {
+  const reloadData = useCallback(() => {
     setScanners(mockAttendanceService.getScanners());
     setSchedules(mockAttendanceService.getSyncSchedules());
-  };
+  }, []);
 
-  const reloadScannersFromBackend = async () => {
+  const reloadScannersFromBackend = useCallback(async () => {
+    if (isFetchingScannersRef.current) {
+      return;
+    }
+    isFetchingScannersRef.current = true;
     setIsLoadingScanners(true);
     try {
       const remoteScanners = await apiAttendanceAdapter.fetchScanners();
@@ -70,18 +85,24 @@ export const ScannerManagementView: React.FC = () => {
       setScanners(mockAttendanceService.getScanners());
       setApiError(null);
     } catch (err: unknown) {
-      const message =
-        err instanceof Error
-          ? err.message
-          : 'ไม่สามารถโหลดข้อมูลทะเบียนเครื่องสแกนจากฐานข้อมูลได้';
-      setApiError(message);
+      setApiError(
+        extractSafeErrorMessage(
+          err,
+          'ไม่สามารถโหลดข้อมูลทะเบียนเครื่องสแกนจากฐานข้อมูลได้'
+        )
+      );
     } finally {
+      isFetchingScannersRef.current = false;
       setIsLoadingScanners(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    void reloadScannersFromBackend();
+    if (!hasLoadedOnMountRef.current) {
+      hasLoadedOnMountRef.current = true;
+      void reloadScannersFromBackend();
+    }
+
     const handleHydrated = () => {
       setScanners(mockAttendanceService.getScanners());
       setSchedules(mockAttendanceService.getSyncSchedules());
@@ -90,7 +111,7 @@ export const ScannerManagementView: React.FC = () => {
     return () => {
       window.removeEventListener('sam-att-data-hydrated', handleHydrated);
     };
-  }, []);
+  }, [reloadScannersFromBackend]);
 
   // Verify persistent registry record & ingested raw scans for this device
   const handleTestConnection = async (
@@ -98,7 +119,8 @@ export const ScannerManagementView: React.FC = () => {
     e?: React.MouseEvent
   ) => {
     e?.stopPropagation();
-    if (testingId) return;
+    if (testingId || deviceActionInFlightRef.current) return;
+    deviceActionInFlightRef.current = true;
     setTestingId(device.id);
     setTestResult(null);
     setApiError(null);
@@ -133,31 +155,40 @@ export const ScannerManagementView: React.FC = () => {
         ok: true,
       });
     } catch (err: unknown) {
-      const message =
-        err instanceof Error
-          ? err.message
-          : 'ตรวจสอบสถานะเครื่องสแกนจากฐานข้อมูลไม่สำเร็จ';
+      const message = extractSafeErrorMessage(
+        err,
+        'ตรวจสอบสถานะเครื่องสแกนจากฐานข้อมูลไม่สำเร็จ'
+      );
       setTestResult({ id: device.id, message, ok: false });
       setApiError(message);
     } finally {
+      deviceActionInFlightRef.current = false;
       setTestingId(null);
     }
   };
 
-  // Refresh single device's real ingested scans and registry status from backend
+  // Refresh single device's real ingested scans and registry status from backend (Manual action only)
   const handleSyncDevice = async (
     device: ScannerDevice,
     e?: React.MouseEvent
   ) => {
     e?.stopPropagation();
-    if (pendingDeviceId || isRefreshingAll) return;
+    if (!canSyncScanners || pendingDeviceId || isRefreshingAll || deviceActionInFlightRef.current) {
+      return;
+    }
+    deviceActionInFlightRef.current = true;
     setPendingDeviceId(device.id);
     setApiError(null);
     setToastMsg(null);
 
     try {
       await mockAttendanceService.hydrateFromRealApi(currentUser?.role);
-      await reloadScannersFromBackend();
+      const hydrateErr = mockAttendanceService.getLastApiError();
+      if (hydrateErr) {
+        setApiError(hydrateErr);
+        return;
+      }
+      setScanners(mockAttendanceService.getScanners());
       const machineScansCount = mockAttendanceService
         .getRawScans()
         .filter((r) => r.machineNo === device.machineNo).length;
@@ -165,13 +196,55 @@ export const ScannerManagementView: React.FC = () => {
         `รีเฟรชข้อมูลจริงจากฐานข้อมูลสำหรับเครื่อง #${device.machineNo} (${device.name}) สำเร็จ: พบข้อมูลสแกนดิบของเครื่องนี้ ${machineScansCount} รายการ`
       );
     } catch (err: unknown) {
-      const message =
-        err instanceof Error
-          ? err.message
-          : 'ไม่สามารถรีเฟรชข้อมูลเครื่องสแกนจากฐานข้อมูลได้';
-      setApiError(message);
+      setApiError(
+        extractSafeErrorMessage(
+          err,
+          'ไม่สามารถรีเฟรชข้อมูลเครื่องสแกนจากฐานข้อมูลได้'
+        )
+      );
     } finally {
+      deviceActionInFlightRef.current = false;
       setPendingDeviceId(null);
+    }
+  };
+
+  // Manual Sync All button handler — strictly user-initiated, never auto-triggered on mount
+  const handleManualSyncAll = async () => {
+    if (
+      !canSyncScanners ||
+      isRefreshingAll ||
+      isLoadingScanners ||
+      syncAllInFlightRef.current
+    ) {
+      return;
+    }
+    syncAllInFlightRef.current = true;
+    setIsRefreshingAll(true);
+    setApiError(null);
+    setToastMsg(null);
+    try {
+      await mockAttendanceService.hydrateFromRealApi(currentUser?.role);
+      const hydrateErr = mockAttendanceService.getLastApiError();
+      if (hydrateErr) {
+        setApiError(hydrateErr);
+        return;
+      }
+      const latestScanners = mockAttendanceService.getScanners();
+      setScanners(latestScanners);
+      const rawScansCount = mockAttendanceService.getRawScans().length;
+      setToastMsg(
+        `รีเฟรชทะเบียนเครื่องสแกน (${latestScanners.length} เครื่อง) และข้อมูลสแกนดิบในระบบ (${rawScansCount} รายการ) จากฐานข้อมูลจริงเสร็จสิ้น`
+      );
+    } catch (err: unknown) {
+      setApiError(
+        extractSafeErrorMessage(
+          err,
+          'ไม่สามารถรีเฟรชข้อมูลเครื่องสแกนและสแกนดิบจากฐานข้อมูลได้'
+        )
+      );
+    } finally {
+      syncAllInFlightRef.current = false;
+      setIsRefreshingAll(false);
     }
   };
 
@@ -207,10 +280,10 @@ export const ScannerManagementView: React.FC = () => {
         `${isNewScanner ? 'เพิ่ม' : 'แก้ไข'}เครื่องสแกน #${payload.machineNo} (${payload.name}) ลงฐานข้อมูลเรียบร้อยแล้ว`
       );
     } catch (err: unknown) {
-      const message =
-        err instanceof Error
-          ? err.message
-          : 'ไม่สามารถบันทึกข้อมูลเครื่องสแกนลงฐานข้อมูลได้';
+      const message = extractSafeErrorMessage(
+        err,
+        'ไม่สามารถบันทึกข้อมูลเครื่องสแกนลงฐานข้อมูลได้'
+      );
       setModalError(message);
       setApiError(message);
     } finally {
@@ -224,7 +297,8 @@ export const ScannerManagementView: React.FC = () => {
     e: React.MouseEvent
   ) => {
     e.stopPropagation();
-    if (!isAdmin || pendingDeviceId) return;
+    if (!isAdmin || pendingDeviceId || deviceActionInFlightRef.current) return;
+    deviceActionInFlightRef.current = true;
     setPendingDeviceId(device.id);
     setApiError(null);
     setToastMsg(null);
@@ -239,12 +313,14 @@ export const ScannerManagementView: React.FC = () => {
         `${updated.enabled ? 'เปิดใช้งาน' : 'ปิดใช้งาน'}เครื่องสแกน #${updated.machineNo} (${updated.name}) ในฐานข้อมูลเรียบร้อยแล้ว`
       );
     } catch (err: unknown) {
-      const message =
-        err instanceof Error
-          ? err.message
-          : 'ไม่สามารถเปลี่ยนสถานะเครื่องสแกนในฐานข้อมูลได้';
-      setApiError(message);
+      setApiError(
+        extractSafeErrorMessage(
+          err,
+          'ไม่สามารถเปลี่ยนสถานะเครื่องสแกนในฐานข้อมูลได้'
+        )
+      );
     } finally {
+      deviceActionInFlightRef.current = false;
       setPendingDeviceId(null);
     }
   };
@@ -255,7 +331,8 @@ export const ScannerManagementView: React.FC = () => {
     e: React.MouseEvent
   ) => {
     e.stopPropagation();
-    if (!isAdmin || pendingDeviceId) return;
+    if (!isAdmin || pendingDeviceId || deviceActionInFlightRef.current) return;
+    deviceActionInFlightRef.current = true;
     setPendingDeviceId(device.id);
     setApiError(null);
     setToastMsg(null);
@@ -267,12 +344,14 @@ export const ScannerManagementView: React.FC = () => {
         `ลบเครื่องสแกน #${device.machineNo} (${device.name}) ออกจากทะเบียนฐานข้อมูลแล้ว (คงข้อมูลสแกนดิบและเวลาปฏิบัติงานเดิมไว้ทั้งหมด)`
       );
     } catch (err: unknown) {
-      const message =
-        err instanceof Error
-          ? err.message
-          : 'ไม่สามารถลบเครื่องสแกนออกจากฐานข้อมูลได้';
-      setApiError(message);
+      setApiError(
+        extractSafeErrorMessage(
+          err,
+          'ไม่สามารถลบเครื่องสแกนออกจากฐานข้อมูลได้'
+        )
+      );
     } finally {
+      deviceActionInFlightRef.current = false;
       setPendingDeviceId(null);
     }
   };
@@ -333,6 +412,7 @@ export const ScannerManagementView: React.FC = () => {
         <div className="flex flex-wrap items-center gap-2">
           {isAdmin && (
             <button
+              type="button"
               onClick={() => {
                 const nextNo =
                   scanners.length > 0
@@ -363,40 +443,21 @@ export const ScannerManagementView: React.FC = () => {
             </button>
           )}
 
-          <button
-            onClick={async () => {
-              if (isRefreshingAll) return;
-              setIsRefreshingAll(true);
-              setApiError(null);
-              setToastMsg(null);
-              try {
-                await mockAttendanceService.hydrateFromRealApi(currentUser?.role);
-                await reloadScannersFromBackend();
-                const latestScanners = mockAttendanceService.getScanners();
-                const rawScansCount = mockAttendanceService.getRawScans().length;
-                setToastMsg(
-                  `รีเฟรชทะเบียนเครื่องสแกน (${latestScanners.length} เครื่อง) และข้อมูลสแกนดิบในระบบ (${rawScansCount} รายการ) จากฐานข้อมูลจริงเสร็จสิ้น`
-                );
-              } catch (err: unknown) {
-                const message =
-                  err instanceof Error
-                    ? err.message
-                    : 'ไม่สามารถรีเฟรชข้อมูลเครื่องสแกนและสแกนดิบจากฐานข้อมูลได้';
-                setApiError(message);
-              } finally {
-                setIsRefreshingAll(false);
-              }
-            }}
-            disabled={isRefreshingAll || isLoadingScanners}
-            className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-white bg-[#6D28D9] hover:bg-[#5B21B6] rounded-xl shadow-xs transition-colors cursor-pointer disabled:opacity-50"
-          >
-            <Zap className="w-3.5 h-3.5 text-amber-300" />
-            <span>
-              {isRefreshingAll
-                ? 'กำลังรีเฟรชข้อมูล...'
-                : 'รีเฟรชข้อมูลสแกนทุกเครื่อง (Sync All)'}
-            </span>
-          </button>
+          {canSyncScanners && (
+            <button
+              type="button"
+              onClick={() => void handleManualSyncAll()}
+              disabled={isRefreshingAll || isLoadingScanners}
+              className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-white bg-[#6D28D9] hover:bg-[#5B21B6] rounded-xl shadow-xs transition-colors cursor-pointer disabled:opacity-50"
+            >
+              <Zap className="w-3.5 h-3.5 text-amber-300" />
+              <span>
+                {isRefreshingAll
+                  ? 'กำลังรีเฟรชข้อมูล...'
+                  : 'รีเฟรชข้อมูลสแกนทุกเครื่อง (Sync All)'}
+              </span>
+            </button>
+          )}
         </div>
       </div>
 

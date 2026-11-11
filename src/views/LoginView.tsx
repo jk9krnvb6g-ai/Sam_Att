@@ -1,26 +1,46 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { extractSafeErrorMessage } from '../services/apiAttendanceAdapter';
 import { Fingerprint, Lock, UserCheck, Shield, Server, Database, AlertCircle, Loader2 } from 'lucide-react';
 
 export const LoginView: React.FC = () => {
-  const { login, enterDemoMode } = useAuth();
+  const { login, enterDemoMode, authError, clearAuthError } = useAuth();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const isSubmittingRef = useRef(false);
+
+  const displayedError = error || authError || '';
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
+    clearAuthError();
     setError('');
     setIsSubmitting(true);
     try {
       const result = await login(username, password);
       if (!result.success) {
-        setError(result.error || 'ชื่อผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง กรุณาตรวจสอบอีกครั้ง');
+        setError(
+          extractSafeErrorMessage(
+            result.error,
+            'ชื่อผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง กรุณาตรวจสอบอีกครั้ง'
+          )
+        );
       } else {
         setPassword('');
       }
+    } catch (err) {
+      setError(
+        extractSafeErrorMessage(
+          err,
+          'ไม่สามารถเข้าสู่ระบบได้ในขณะนี้ กรุณาลองใหม่อีกครั้ง'
+        )
+      );
     } finally {
+      isSubmittingRef.current = false;
       setIsSubmitting(false);
     }
   };
@@ -102,10 +122,10 @@ export const LoginView: React.FC = () => {
               </div>
             </div>
 
-            {error && (
+            {displayedError && (
               <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-medium flex items-start gap-2">
                 <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
-                <span>{error}</span>
+                <span>{displayedError}</span>
               </div>
             )}
 

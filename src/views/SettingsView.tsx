@@ -1,6 +1,10 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { apiAttendanceAdapter, ConnectionSettingsResponse } from '../services/apiAttendanceAdapter';
+import {
+  apiAttendanceAdapter,
+  ConnectionSettingsResponse,
+  extractSafeErrorMessage,
+} from '../services/apiAttendanceAdapter';
 import { UserAccount, PageSizeOption } from '../types/attendance';
 import { SharedModal } from '../components/common/SharedModal';
 import {
@@ -87,7 +91,7 @@ export const SettingsView: React.FC = () => {
       }
     } catch (err) {
       setDbTestResult(
-        `ไม่สามารถติดต่อ API ตรวจสอบฐานข้อมูลได้: ${err instanceof Error ? err.message : 'Unknown error'}`
+        `ไม่สามารถติดต่อ API ตรวจสอบฐานข้อมูลได้: ${extractSafeErrorMessage(err, 'ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้')}`
       );
     }
   };
@@ -107,7 +111,7 @@ export const SettingsView: React.FC = () => {
       }
     } catch (err) {
       setHosTestResult(
-        `ไม่สามารถตรวจสอบการตั้งค่า HOSOffice ได้: ${err instanceof Error ? err.message : 'Unknown error'}`
+        `ไม่สามารถตรวจสอบการตั้งค่า HOSOffice ได้: ${extractSafeErrorMessage(err, 'ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้')}`
       );
     }
   };
