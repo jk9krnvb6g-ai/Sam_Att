@@ -32,10 +32,27 @@ import { ScannerAdapter } from '../../backend/services/scannerAdapter';
 import { AttendanceCalculator } from '../../backend/services/attendanceCalculator';
 import { apiAttendanceAdapter } from './apiAttendanceAdapter';
 
-export const CURRENT_SYSTEM_DATE = '2026-11-06';
+export function getCurrentSystemDate(): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Bangkok',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const y = parts.find((p) => p.type === 'year')?.value;
+  const m = parts.find((p) => p.type === 'month')?.value;
+  const d = parts.find((p) => p.type === 'day')?.value;
+  if (y && m && d) {
+    return `${y}-${m}-${d}`;
+  }
+  const bangkokMs = Date.now() + 7 * 60 * 60 * 1000;
+  return new Date(bangkokMs).toISOString().slice(0, 10);
+}
+
+export const CURRENT_SYSTEM_DATE = getCurrentSystemDate();
 
 export function isPastWorkDate(workDate: string): boolean {
-  return workDate < CURRENT_SYSTEM_DATE;
+  return workDate < getCurrentSystemDate();
 }
 
 class MockAttendanceService {
@@ -975,11 +992,12 @@ class MockAttendanceService {
       return true;
     });
 
+    const currentSystemDate = getCurrentSystemDate();
     const futureAssignments = this.assignments.filter(
       (a) =>
         a.workDate >= params.fromDate &&
         a.workDate <= params.toDate &&
-        a.workDate > CURRENT_SYSTEM_DATE
+        a.workDate > currentSystemDate
     );
 
     const rawInRange = this.rawScans.filter((raw) => {
@@ -1051,12 +1069,14 @@ class MockAttendanceService {
       }
     });
 
+    const currentSystemDate = getCurrentSystemDate();
+
     // Also check future assignments in range that cannot be evaluated yet
     this.assignments.forEach((asgn) => {
       if (
         asgn.workDate >= fromDate &&
         asgn.workDate <= toDate &&
-        asgn.workDate > CURRENT_SYSTEM_DATE
+        asgn.workDate > currentSystemDate
       ) {
         const p = this.personnel.find((x) => x.personId === asgn.personId);
         if (
@@ -1107,7 +1127,7 @@ class MockAttendanceService {
         return;
       }
 
-      if (att.workDate > CURRENT_SYSTEM_DATE) {
+      if (att.workDate > currentSystemDate) {
         return;
       }
 
@@ -1538,8 +1558,9 @@ class MockAttendanceService {
     personName: string;
     department: string;
   }> {
+    const currentSystemDate = getCurrentSystemDate();
     return this.assignments
-      .filter((a) => a.shiftId === shiftId && a.workDate >= CURRENT_SYSTEM_DATE)
+      .filter((a) => a.shiftId === shiftId && a.workDate >= currentSystemDate)
       .map((assignment) => {
         const p = this.personnel.find((x) => x.personId === assignment.personId);
         return {
@@ -1868,7 +1889,12 @@ class MockAttendanceService {
    * Check whether two shifts on the same day overlap in time.
    * Note: Touching boundaries (endA === startB, e.g., 08:00-16:00 and 16:00-00:00) do NOT overlap.
    */
-  public doShiftsOverlap(shiftA: Shift, shiftB: Shift, dateA = '2026-11-06', dateB = '2026-11-06'): boolean {
+  public doShiftsOverlap(
+    shiftA: Shift,
+    shiftB: Shift,
+    dateA: string = getCurrentSystemDate(),
+    dateB: string = getCurrentSystemDate()
+  ): boolean {
     if (dateA === dateB && shiftA.id === shiftB.id) return true;
     const [startA, endA] = this.getAbsoluteShiftInterval(dateA, shiftA);
     const [startB, endB] = this.getAbsoluteShiftInterval(dateB, shiftB);
@@ -1876,11 +1902,11 @@ class MockAttendanceService {
   }
 
   /**
-   * Check whether a workDate is in the past (before CURRENT_SYSTEM_DATE).
+   * Check whether a workDate is in the past (before current date in Asia/Bangkok).
    * Per Grill-Me Rule #8 (§4.6): Retroactive shift addition, editing, or cancellation is prohibited.
    */
   public isPastWorkDate(workDate: string): boolean {
-    return workDate < CURRENT_SYSTEM_DATE;
+    return workDate < getCurrentSystemDate();
   }
 
   /**
@@ -2222,7 +2248,7 @@ class MockAttendanceService {
   // Dashboard & Reports Metrics
   // ==========================================
 
-  public getDashboardSummary(workDate: string = '2026-11-06'): DashboardSummary {
+  public getDashboardSummary(workDate: string = getCurrentSystemDate()): DashboardSummary {
     const dayRecords = this.attendance.filter((r) => r.workDate === workDate);
 
     const totalPersonnel = this.personnel.filter((p) => p.active).length;
