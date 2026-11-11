@@ -11,7 +11,7 @@
 | :--- | :--- | :--- |
 | **Frontend Web** | HTTPS พอร์ต `3001` ภายใต้ URL Prefix `/Sam_Att/` | Reverse Proxy / IIS จัดเส้นทางมายัง Frontend build |
 | **Backend API** | Central API Gateway พอร์ต `3002` ภายใต้ Prefix `/api/Sam_Att/` | **ใช้ Shared HTTP Listener เดิมตัวเดียว** |
-| **Database** | ฐานข้อมูลชื่อ `samchuk_attendance` | **แยกเด็ดขาด** ไม่ใช้ตารางร่วมกับระบบอื่น |
+| **Database** | ฐานข้อมูลชื่อ `samchuk_attendance_v2` | **แยกเด็ดขาด** ไม่ใช้ตารางร่วมกับระบบอื่น |
 | **ระบบอื่นที่อยู่ร่วม** | `Procurement` (`/Procurement/`, `/api/Procurement/`)<br/>`Cash_Cheque` (`/Cash_Cheque/`, `/api/Cash_Cheque/`) | **ห้ามแก้ไขหรือกระทบกระเทือนเด็ดขาด** |
 
 ---
@@ -23,7 +23,7 @@
    - **ห้ามเรียก `app.listen()` หรือ `server.listen()` ในโค้ดของ Sam_Att**
    - ห้ามเปิดพอร์ต 3003, 3004 หรือพอร์ตอื่นบนเซิร์ฟเวอร์
 2. **ห้ามนำข้อมูลไปเก็บปะปนกับฐานข้อมูลของ Procurement หรือ Cash_Cheque:**
-   - ใช้ Database connection แยกไปยังฐานข้อมูล `samchuk_attendance`
+   - ใช้ Database connection แยกไปยังฐานข้อมูล `samchuk_attendance_v2`
 3. **การเข้าถึงฐานข้อมูลและเครื่องสแกน:**
    - เป็นการเชื่อมต่อไปยังบริการภายนอกจาก Backend
    - ห้ามเก็บ Database credentials ในฝั่ง Frontend
@@ -75,13 +75,18 @@ app.listen(PORT, () => {
 | :--- | :--- | :--- | :--- |
 | `POST` | `/api/Sam_Att/auth/login` | ตรวจสอบชื่อผู้ใช้และรหัสผ่าน | ทุกคน |
 | `GET` | `/api/Sam_Att/auth/me` | ตรวจสอบข้อมูลผู้ใช้งานและสิทธิ์ปัจจุบัน | ผู้ที่ล็อกอินแล้ว |
+| `POST` | `/api/Sam_Att/auth/logout` | เพิกถอนโทเค็นเซสชันปัจจุบัน (Session Revocation) | ผู้ที่ล็อกอินแล้ว |
 | `GET` | `/api/Sam_Att/me/attendance` | ข้อมูลการลงเวลาเฉพาะของตนเอง (derive personId) | ทุกคนที่ผูก PERSON_ID |
 | `GET` | `/api/Sam_Att/dashboard/summary` | สรุป KPI การลงเวลาประจำวัน/ช่วงเวลา | STAFF, ADMIN |
 | `GET` | `/api/Sam_Att/reports/lateness` | รายงานและอันดับการมาสาย | STAFF, ADMIN |
 | `GET` | `/api/Sam_Att/personnel` | บัญชีรายชื่อบุคลากร HOSOffice | STAFF, ADMIN |
 | `POST` | `/api/Sam_Att/personnel/sync` | ดึง/อัปเดตบุคลากรจาก HOSOffice | STAFF, ADMIN |
 | `GET` | `/api/Sam_Att/shifts` | รายการกะการทำงานและช่วงเวลา | STAFF, ADMIN |
-| `GET` | `/api/Sam_Att/scanners` | รายการเครื่องสแกนและสถานะ | STAFF, ADMIN |
+| `GET` | `/api/Sam_Att/scanners` | รายการเครื่องสแกนและสถานะจาก `scanner_devices` | STAFF, ADMIN |
+| `POST` | `/api/Sam_Att/scanners` | ลงทะเบียนเครื่องสแกนใหม่ลงฐานข้อมูล `scanner_devices` | ADMIN เท่านั้น |
+| `PUT` | `/api/Sam_Att/scanners/:id` | แก้ไขข้อมูลเครื่องสแกนใน `scanner_devices` | ADMIN เท่านั้น |
+| `PATCH` | `/api/Sam_Att/scanners/:id/enabled` | เปิด/ปิดการใช้งานเครื่องสแกนใน `scanner_devices` | ADMIN เท่านั้น |
+| `DELETE` | `/api/Sam_Att/scanners/:id` | ลบเครื่องสแกนออกจากทะเบียน (โดยไม่ลบข้อมูล `raw_scans` หรือ `attendance`) | ADMIN เท่านั้น |
 | `POST` | `/api/Sam_Att/scanners/sync` | รับผลลัพธ์ JSON 6 ฟิลด์จาก Scanner Reader EXE | STAFF, ADMIN |
 | `GET` | `/api/Sam_Att/raw-scans` | ดูข้อมูลสแกนดิบ (Immutable Read-Only) | STAFF, ADMIN |
 | `GET` | `/api/Sam_Att/attendance` | ดูตารางเวลาปฏิบัติงานบุคลากรทั้งหมด | STAFF, ADMIN |
@@ -90,6 +95,9 @@ app.listen(PORT, () => {
 | `POST` | `/api/Sam_Att/hosoffice/push` | ส่งผลเวลาไปยัง HOSOffice โดยตรง | STAFF, ADMIN |
 | `GET` | `/api/Sam_Att/hosoffice/push-history` | ดูประวัติการส่งข้อมูลไป HOSOffice | STAFF, ADMIN |
 | `GET` | `/api/Sam_Att/settings/connections` | ดูค่าการเชื่อมต่อ DB / HOSOffice (Masked) | ADMIN เท่านั้น |
+| `GET` | `/api/Sam_Att/settings/connections/health` | ตรวจสอบสถานะการเชื่อมต่อ MySQL `samchuk_attendance_v2` และ HOSOffice จริง | ADMIN เท่านั้น |
+| `GET` | `/api/Sam_Att/deployment/status` | ตรวจสอบสถานะ Deployment Center & Preflight (Read-Only) | ADMIN เท่านั้น |
+| `POST` | `/api/Sam_Att/deployment/preflight` | รันการตรวจสอบ Preflight Check 8 รายการตามหลักฐานจริง | ADMIN เท่านั้น |
 
 ---
 
@@ -99,6 +107,6 @@ app.listen(PORT, () => {
 - [ ] โครงสร้างโปรเจกต์ Gateway และตำแหน่งไฟล์ Module Registry
 - [ ] วิธีจัดการ Middleware Authentication (JWT / Session / Bearer Token)
 - [ ] Environment Variables และ Secret Store ที่ใช้
-- [ ] Database Connection Pool สำหรับ `samchuk_attendance`
+- [ ] Database Connection Pool สำหรับ `samchuk_attendance_v2`
 - [ ] การตั้งค่า IIS Application / Reverse Proxy บน Port 3001 (`/Sam_Att/`) และ Port 3002 (`/api/Sam_Att/`)
 - [ ] ทดสอบว่าไม่มีการกระทบกระเทือนต่อ Procurement และ Cash_Cheque
