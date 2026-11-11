@@ -725,7 +725,7 @@ export const PersonnelView: React.FC = () => {
             </span>
             <span className="text-slate-400">·</span>
             <span className="text-slate-600 font-medium">
-              วันปัจจุบันของระบบจำลอง:{' '}
+              วันที่อ้างอิงปัจจุบัน:{' '}
               <strong className="font-mono-data text-violet-800">{CURRENT_SYSTEM_DATE}</strong>
             </span>
           </div>

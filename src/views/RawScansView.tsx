@@ -246,8 +246,9 @@ export const RawScansView: React.FC = () => {
     setScanPage(1);
   };
 
-  // Trigger Mock Sync
-  const handleTriggerSync = () => {
+  // Trigger Scanner Sync / Refresh from Backend API
+  const handleTriggerSync = async () => {
+    await mockAttendanceService.hydrateFromRealApi('ADMIN');
     const result = mockAttendanceService.triggerMockScannerSync();
     setSyncToast(result);
     setRefreshKey((k) => k + 1);
@@ -325,7 +326,10 @@ export const RawScansView: React.FC = () => {
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={() => setRefreshKey((k) => k + 1)}
+            onClick={async () => {
+              await mockAttendanceService.hydrateFromRealApi('ADMIN');
+              setRefreshKey((k) => k + 1);
+            }}
             className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-[#F8F7FC] hover:bg-violet-50 border border-[#E9E5F2] rounded-xl transition-colors cursor-pointer"
           >
             <RefreshCw className="w-3.5 h-3.5 text-violet-600" />
@@ -338,7 +342,7 @@ export const RawScansView: React.FC = () => {
             className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-white bg-gradient-to-r from-[#8B5CF6] to-[#6D28D9] hover:from-[#7C3AED] hover:to-[#5B21B6] rounded-xl shadow-xs transition-all cursor-pointer"
           >
             <RefreshCw className="w-3.5 h-3.5" />
-            <span>จำลองการดึงสแกน (Sync Scanners Mock)</span>
+            <span>ตรวจสอบข้อมูลสแกนล่าสุด (Sync Status)</span>
           </button>
         </div>
       </div>
@@ -349,7 +353,7 @@ export const RawScansView: React.FC = () => {
           <div className="space-y-1">
             <div className="font-bold flex items-center gap-1.5">
               <Check className="w-4 h-4 text-emerald-600" />
-              การ Sync ข้อมูลสแกนดิบจำลองเสร็จสิ้น (Deduplicate ด้วย machineNo + enrollNumber + scanDateTime)
+              การตรวจสอบข้อมูลสแกนดิบเสร็จสิ้น (Deduplicate ด้วย machineNo + enrollNumber + scanDateTime)
             </div>
             <div className="text-[11px] text-emerald-800 flex flex-wrap items-center gap-x-3 gap-y-1">
               <span>

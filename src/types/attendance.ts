@@ -18,6 +18,8 @@ export interface UserAccount {
   active: boolean;
 }
 
+export type User = UserAccount;
+
 export type AttendanceStatus =
   | 'NORMAL'             // เข้างานปกติ
   | 'LATE'               // มาสาย
@@ -38,6 +40,8 @@ export type NoScanReasonCode =
   | 'LATE_EXPLANATION'  // ชี้แจงเหตุผลการมาสาย
   | 'SCANNER_ISSUE'     // เครื่องสแกนขัดข้อง / ลายนิ้วมือไม่ติด
   | 'OTHER';            // อื่นๆ
+
+export type NoteReasonCode = NoScanReasonCode;
 
 export type HRReviewStatus = 'PENDING_REVIEW' | 'REVIEWED' | 'NOT_REQUIRED';
 
@@ -245,17 +249,9 @@ export interface AuditLogEntry {
   actorUsername: string;
   actorName: string;
   actorRole: UserRole;
-  action:
-    | 'SYNC_SCANNERS'
-    | 'SYNC_HOSOFFICE_HR'
-    | 'REPROCESS_ATTENDANCE'
-    | 'PUSH_HOSOFFICE'
-    | 'SET_NO_SCAN_NOTE'
-    | 'MANAGE_SHIFT_MATRIX'
-    | 'ASSIGN_SHIFT'
-    | 'MANAGE_SCANNER'
-    | 'MANAGE_SYNC_SCHEDULE'
-    | 'TEST_DB_CONNECTION';
+  actor?: string;
+  role?: UserRole;
+  action: string;
   entityType: string;
   entityId: string;
   summary: string;
@@ -344,6 +340,16 @@ export interface PushHistory {
   pushedAt: string;
   responseStatus: 'SUCCESS' | 'FAILED';
   responseSummary: string;
+}
+
+export interface HosOfficePushBatch {
+  id: string;
+  pushedAt: string;
+  pushedBy: string;
+  recordsCount: number;
+  skippedDuplicateCount: number;
+  status: 'SUCCESS' | 'PARTIAL' | 'FAILED';
+  note: string;
 }
 
 export interface DashboardSummary {

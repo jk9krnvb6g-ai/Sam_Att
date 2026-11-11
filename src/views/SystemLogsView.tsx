@@ -1,5 +1,6 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { mockAttendanceService } from '../services/mockAttendanceService';
+import { apiAttendanceAdapter, ConnectionSettingsResponse } from '../services/apiAttendanceAdapter';
 import { SyncRunLog, AuditLogEntry } from '../types/attendance';
 import { SharedModal } from '../components/common/SharedModal';
 import {
@@ -16,7 +17,6 @@ import {
   Search,
   History,
   FileText,
-  Send,
   Lock,
   X,
 } from 'lucide-react';
@@ -24,18 +24,19 @@ import {
 export const SystemLogsView: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'dual_db' | 'sync_logs' | 'audit_logs'>('dual_db');
   const [refreshKey, setRefreshKey] = useState(0);
+  const [connSettings, setConnSettings] = useState<ConnectionSettingsResponse | null>(null);
 
   // =========================================================
-  // Tab 1: Dual Database Hub Mock Connection States
+  // Tab 1: Dual Database Hub Connection States
   // =========================================================
   const [samchukDbStatus, setSamchukDbStatus] = useState<string>(
-    'พร้อมทดสอบการเชื่อมต่อ (Mock Adapter)'
+    'พร้อมตรวจสอบสถานะการเชื่อมต่อฐานข้อมูล'
   );
   const [hosofficeDbStatus, setHosofficeDbStatus] = useState<string>(
-    'พร้อมทดสอบการเชื่อมต่อ (Mock Adapter)'
+    'พร้อมตรวจสอบสถานะการเชื่อมต่อฐานข้อมูล'
   );
   const [testingDb, setTestingDb] = useState<'NONE' | 'BOTH' | 'SAMCHUK' | 'HOSOFFICE'>('NONE');
-  const [mockWriteFeedback, setMockWriteFeedback] = useState<string | null>(null);
+  const [statusFeedback, setStatusFeedback] = useState<string | null>(null);
 
   // =========================================================
   // Tab 2 & 3: Sync Logs & Audit Logs Search, Sort & Pagination
@@ -57,75 +58,99 @@ export const SystemLogsView: React.FC = () => {
   const [selectedSyncLog, setSelectedSyncLog] = useState<SyncRunLog | null>(null);
   const [selectedAuditLog, setSelectedAuditLog] = useState<AuditLogEntry | null>(null);
 
+  useEffect(() => {
+    apiAttendanceAdapter
+      .fetchConnectionSettings()
+      .then((settings) => {
+        setConnSettings(settings);
+        setSamchukDbStatus(
+          `เชื่อมต่อสำเร็จ (${settings.samchukDb.engine} — ${settings.samchukDb.status})`
+        );
+        setHosofficeDbStatus(
+          `พร้อมใช้งาน (${settings.hosofficeDb.mode} — Push: ${
+            settings.hosofficeDb.pushEnabled ? 'Enabled' : 'Preview Safe Mode'
+          })`
+        );
+      })
+      .catch(() => {
+        // Ignore initial error if not admin
+      });
+  }, [refreshKey]);
+
   const syncRuns = useMemo(() => mockAttendanceService.getSyncRuns(), [refreshKey]);
   const auditLogs = useMemo(() => mockAttendanceService.getAuditLogs(), [refreshKey]);
 
-  // Mock Connection Test Handlers (Explicitly labeled as Mock Connection Test)
-  const handleTestSamchukDb = () => {
+  const handleTestSamchukDb = async () => {
     setTestingDb('SAMCHUK');
-    setTimeout(() => {
-      setTestingDb('NONE');
-      setSamchukDbStatus(
-        'จำลองการเชื่อมต่อสำเร็จ (Mock Connection Test: 28ms — ตาราง attendance_raw_scan, shifts, attendance_records พร้อมใช้งานในโหมด Prototype)'
-      );
-      mockAttendanceService.recordAuditLog({
-        action: 'TEST_DB_CONNECTION',
-        entityType: 'Database',
-        entityId: 'samchuk_attendance',
-        summary: 'จำลองการทดสอบเชื่อมต่อฐานข้อมูล samchuk_attendance (Mock Connection Test)',
-      });
+    try {
+      const health = await apiAttendanceAdapter.checkHealth();
+      if (health.ok) {
+        setSamchukDbStatus(
+          `เชื่อมต่อฐานข้อมูล ${health.database} สำเร็จ (${health.engine} — สถานะ ${health.status})`
+        );
+        setStatusFeedback(`ตรวจสอบฐานข้อมูล ${health.database} สำเร็จ (${health.engine})`);
+      } else {
+        setSamchukDbStatus(`การเชื่อมต่อขัดข้อง: ${health.error || health.status}`);
+      }
+      await mockAttendanceService.hydrateFromRealApi('ADMIN');
       setRefreshKey((k) => k + 1);
-    }, 400);
+    } catch (err) {
+      setSamchukDbStatus(
+        `ไม่สามารถตรวจสอบฐานข้อมูลได้: ${err instanceof Error ? err.message : 'Unknown error'}`
+      );
+    } finally {
+      setTestingDb('NONE');
+    }
   };
 
-  const handleTestHosofficeDb = () => {
+  const handleTestHosofficeDb = async () => {
     setTestingDb('HOSOFFICE');
-    setTimeout(() => {
-      setTestingDb('NONE');
+    try {
+      const settings = await apiAttendanceAdapter.fetchConnectionSettings();
+      setConnSettings(settings);
       setHosofficeDbStatus(
-        'จำลองการเชื่อมต่อสำเร็จ (Mock Connection Test: 34ms — ตาราง hr_person และ fingle_scan พร้อมใช้งานในโหมด Prototype)'
+        `เชื่อมต่อ ${settings.hosofficeDb.database} (${settings.hosofficeDb.host}:${settings.hosofficeDb.port}) — โหมด ${settings.hosofficeDb.mode}`
       );
-      mockAttendanceService.recordAuditLog({
-        action: 'TEST_DB_CONNECTION',
-        entityType: 'Database',
-        entityId: 'hosoffice',
-        summary: 'จำลองการทดสอบเชื่อมต่อฐานข้อมูล hosoffice (Mock Connection Test)',
-      });
+      setStatusFeedback(`ตรวจสอบการตั้งค่าฐานข้อมูล ${settings.hosofficeDb.database} สำเร็จ`);
+      await mockAttendanceService.hydrateFromRealApi('ADMIN');
       setRefreshKey((k) => k + 1);
-    }, 400);
+    } catch (err) {
+      setHosofficeDbStatus(
+        `ไม่สามารถตรวจสอบการตั้งค่า HOSOffice ได้: ${err instanceof Error ? err.message : 'Unknown error'}`
+      );
+    } finally {
+      setTestingDb('NONE');
+    }
   };
 
-  const handleTestBothDbs = () => {
+  const handleTestBothDbs = async () => {
     setTestingDb('BOTH');
-    setTimeout(() => {
-      setTestingDb('NONE');
+    try {
+      const [health, settings] = await Promise.all([
+        apiAttendanceAdapter.checkHealth(),
+        apiAttendanceAdapter.fetchConnectionSettings(),
+      ]);
+      setConnSettings(settings);
       setSamchukDbStatus(
-        'จำลองการเชื่อมต่อสำเร็จ (Mock Connection Test: 25ms — โหมด UI Prototype)'
+        health.ok
+          ? `เชื่อมต่อฐานข้อมูล ${health.database} สำเร็จ (${health.engine} — ${health.status})`
+          : `การเชื่อมต่อขัดข้อง: ${health.error || health.status}`
       );
       setHosofficeDbStatus(
-        'จำลองการเชื่อมต่อสำเร็จ (Mock Connection Test: 31ms — โหมด UI Prototype)'
+        `เชื่อมต่อ ${settings.hosofficeDb.database} (${settings.hosofficeDb.host}:${settings.hosofficeDb.port}) — โหมด ${settings.hosofficeDb.mode}`
       );
-      mockAttendanceService.recordAuditLog({
-        action: 'TEST_DB_CONNECTION',
-        entityType: 'DualDatabaseHub',
-        entityId: 'samchuk_attendance + hosoffice',
-        summary: 'จำลองการทดสอบเชื่อมต่อทั้ง 2 ฐานข้อมูลพร้อมกัน (Mock Connection Test)',
-      });
+      setStatusFeedback(
+        `ตรวจสอบสถานะทั้ง 2 ฐานข้อมูล (${health.database} & ${settings.hosofficeDb.database}) เรียบร้อยแล้ว`
+      );
+      await mockAttendanceService.hydrateFromRealApi('ADMIN');
       setRefreshKey((k) => k + 1);
-    }, 500);
-  };
-
-  const handleMockWriteSingleScan = () => {
-    setMockWriteFeedback(
-      'จำลองการเขียน 1 รายการสแกนลงตาราง fingle_scan (hosoffice) สำเร็จในโหมด Mock State (ไม่ได้เขียนลง MySQL จริง)'
-    );
-    mockAttendanceService.recordAuditLog({
-      action: 'PUSH_HOSOFFICE',
-      entityType: 'hosoffice.fingle_scan',
-      entityId: 'MOCK_SINGLE_WRITE',
-      summary: 'จำลองการทดสอบเขียน 1 สแกนลงฐานข้อมูล hosoffice (Mock Write Test)',
-    });
-    setRefreshKey((k) => k + 1);
+    } catch (err) {
+      setStatusFeedback(
+        `เกิดข้อผิดพลาดในการตรวจสอบฐานข้อมูล: ${err instanceof Error ? err.message : 'Unknown error'}`
+      );
+    } finally {
+      setTestingDb('NONE');
+    }
   };
 
   // Filtered & Sorted Sync Logs
@@ -184,10 +209,13 @@ export const SystemLogsView: React.FC = () => {
     return filteredAuditLogs.slice(start, start + auditPageSize);
   }, [filteredAuditLogs, auditPage, auditPageSize]);
 
+  const dbHost = connSettings?.samchukDb.host || '10.2.0.201';
+  const dbPort = connSettings?.samchukDb.port || 3306;
+
   return (
     <div className="space-y-5 pb-8">
       {/* =================================================================
-          1. TOP HEADER & 3 MAIN TABS (Matches Reference Image 3)
+          1. TOP HEADER & 3 MAIN TABS
          ================================================================= */}
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
@@ -196,15 +224,15 @@ export const SystemLogsView: React.FC = () => {
               ศูนย์เชื่อมต่อฐานข้อมูล สถาปัตยกรรม และประวัติการทำงาน (System & Logs)
             </h1>
             <span className="px-2.5 py-0.5 rounded-md text-xs font-mono font-bold bg-violet-100 text-violet-800 border border-violet-200">
-              10.2.0.201 (Mock DB Hub)
+              {dbHost} (Database Hub)
             </span>
           </div>
           <p className="text-xs text-slate-500 mt-0.5">
-            จำลองการทดสอบเชื่อมต่อทั้ง 2 ฐานข้อมูล (samchuk_attendance & hosoffice), สถาปัตยกรรม Central API Gateway, Sync Logs และ Audit Logs
+            ตรวจสอบสถานะการเชื่อมต่อทั้ง 2 ฐานข้อมูล (samchuk_attendance & hosoffice), สถาปัตยกรรม Central API Gateway, Sync Logs และ Audit Logs
           </p>
         </div>
 
-        {/* 3 Main Tabs matching Image 3 */}
+        {/* 3 Main Tabs */}
         <div className="inline-flex flex-wrap items-center gap-1 p-1 bg-white border border-[#E9E5F2] rounded-2xl shadow-2xs text-xs">
           <button
             type="button"
@@ -248,29 +276,29 @@ export const SystemLogsView: React.FC = () => {
       </div>
 
       {/* =================================================================
-          TAB 1: DUAL DATABASE HUB & SYSTEM ARCHITECTURE (Matches Image 3)
+          TAB 1: DUAL DATABASE HUB & SYSTEM ARCHITECTURE
          ================================================================= */}
       {activeTab === 'dual_db' && (
         <div className="space-y-5">
-          {/* Dark Hero Banner matching Reference Image 3 */}
+          {/* Dark Hero Banner */}
           <div className="bg-gradient-to-r from-slate-950 via-violet-950 to-slate-900 rounded-2xl p-6 text-white shadow-md flex flex-col lg:flex-row lg:items-center justify-between gap-4">
             <div className="space-y-2">
               <div className="flex flex-wrap items-center gap-2 text-xs">
                 <span className="px-2.5 py-0.5 rounded-md bg-violet-500/20 border border-violet-400/30 text-violet-200 font-mono font-semibold">
-                  Mock Database Connection: 10.2.0.201
+                  Database Host: {dbHost}
                 </span>
                 <span className="px-2.5 py-0.5 rounded-md bg-emerald-500/20 border border-emerald-400/30 text-emerald-300 font-semibold">
-                  โหมดจำลองการเชื่อมต่อ (Mock Connection Test)
+                  Production API & Database Mode
                 </span>
               </div>
 
               <h2 className="text-lg sm:text-xl font-bold tracking-tight">
-                ศูนย์ทดสอบการเชื่อมต่อและจัดการฐานข้อมูล 2 ฐาน (Dual Database Hub)
+                ศูนย์ตรวจสอบการเชื่อมต่อและจัดการฐานข้อมูล 2 ฐาน (Dual Database Hub)
               </h2>
               <p className="text-xs text-violet-200">
-                จำลองการทำงานร่วมกับฐานข้อมูล MySQL บน{' '}
+                เชื่อมต่อฐานข้อมูล MySQL บน{' '}
                 <code className="px-1.5 py-0.5 rounded bg-white/10 font-mono text-white">
-                  10.2.0.201:3306
+                  {dbHost}:{dbPort}
                 </code>{' '}
                 โดยแยกฐานข้อมูลของระบบลงเวลาออกจากฐานข้อมูล HOSOffice อย่างชัดเจน (ไม่แสดงรหัสผ่านหรือ Secret จริงบนหน้าเว็บ)
               </p>
@@ -284,20 +312,20 @@ export const SystemLogsView: React.FC = () => {
                 className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-xs font-bold shadow-sm transition-colors cursor-pointer"
               >
                 <RefreshCw className={`w-4 h-4 ${testingDb === 'BOTH' ? 'animate-spin' : ''}`} />
-                <span>ทดสอบเชื่อมต่อทั้ง 2 ฐานข้อมูล (Mock)</span>
+                <span>ตรวจสอบการเชื่อมต่อทั้ง 2 ฐานข้อมูล</span>
               </button>
             </div>
           </div>
 
-          {mockWriteFeedback && (
+          {statusFeedback && (
             <div className="bg-violet-50 border border-violet-200 rounded-2xl px-4 py-3 text-xs text-violet-950 flex items-center justify-between">
               <div className="flex items-center gap-2 font-semibold">
                 <CheckCircle2 className="w-4 h-4 text-violet-600 shrink-0" />
-                <span>{mockWriteFeedback}</span>
+                <span>{statusFeedback}</span>
               </div>
               <button
                 type="button"
-                onClick={() => setMockWriteFeedback(null)}
+                onClick={() => setStatusFeedback(null)}
                 className="p-1 text-violet-700 hover:text-violet-950 cursor-pointer"
               >
                 <X className="w-4 h-4" />
@@ -305,7 +333,7 @@ export const SystemLogsView: React.FC = () => {
             </div>
           )}
 
-          {/* Two Database Cards Side-by-Side (Matches Reference Image 3) */}
+          {/* Two Database Cards Side-by-Side */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
             {/* Database 1: samchuk_attendance */}
             <div className="bg-white border border-[#E9E5F2] rounded-2xl p-5 shadow-2xs flex flex-col justify-between space-y-4">
@@ -317,7 +345,7 @@ export const SystemLogsView: React.FC = () => {
                     </div>
                     <div>
                       <h3 className="text-base font-bold text-slate-900">
-                        ฐานข้อมูลที่ 1: samchuk_attendance
+                        ฐานข้อมูลที่ 1: {connSettings?.samchukDb.database || 'samchuk_attendance'}
                       </h3>
                       <p className="text-xs text-slate-500">
                         ระบบบันทึกเวลา, ตารางกะ, ผังเวร, ข้อมูลสแกนดิบ (แยกอิสระจากระบบอื่น)
@@ -325,18 +353,22 @@ export const SystemLogsView: React.FC = () => {
                     </div>
                   </div>
                   <span className="px-2.5 py-1 rounded-lg bg-violet-50 border border-violet-200 text-violet-800 font-mono text-xs font-bold">
-                    10.2.0.201
+                    {dbHost}
                   </span>
                 </div>
 
                 <div className="bg-[#F8F7FC] border border-[#E9E5F2] rounded-xl p-4 space-y-2.5 text-xs">
                   <div className="flex items-center justify-between">
                     <span className="text-slate-500">ชื่อฐานข้อมูล (Schema):</span>
-                    <span className="font-mono font-bold text-slate-900">samchuk_attendance</span>
+                    <span className="font-mono font-bold text-slate-900">
+                      {connSettings?.samchukDb.database || 'samchuk_attendance'}
+                    </span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-slate-500">Host / Port:</span>
-                    <span className="font-mono text-slate-700">10.2.0.201 : 3306</span>
+                    <span className="font-mono text-slate-700">
+                      {dbHost} : {dbPort}
+                    </span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-slate-500">การจัดการข้อมูลความลับ:</span>
@@ -363,7 +395,7 @@ export const SystemLogsView: React.FC = () => {
                 <RefreshCw
                   className={`w-3.5 h-3.5 ${testingDb === 'SAMCHUK' ? 'animate-spin' : ''}`}
                 />
-                <span>ทดสอบเชื่อมต่อ samchuk_attendance (Mock)</span>
+                <span>ตรวจสอบการเชื่อมต่อ samchuk_attendance</span>
               </button>
             </div>
 
@@ -377,7 +409,7 @@ export const SystemLogsView: React.FC = () => {
                     </div>
                     <div>
                       <h3 className="text-base font-bold text-slate-900">
-                        ฐานข้อมูลที่ 2: hosoffice
+                        ฐานข้อมูลที่ 2: {connSettings?.hosofficeDb.database || 'hosoffice'}
                       </h3>
                       <p className="text-xs text-slate-500">
                         ระบบงานบุคลากรโรงพยาบาลสามชุก, hr_person (Authoritative), fingle_scan
@@ -385,24 +417,28 @@ export const SystemLogsView: React.FC = () => {
                     </div>
                   </div>
                   <span className="px-2.5 py-1 rounded-lg bg-purple-50 border border-purple-200 text-purple-800 font-mono text-xs font-bold">
-                    10.2.0.201
+                    {connSettings?.hosofficeDb.host || dbHost}
                   </span>
                 </div>
 
                 <div className="bg-[#F8F7FC] border border-[#E9E5F2] rounded-xl p-4 space-y-2.5 text-xs">
                   <div className="flex items-center justify-between">
                     <span className="text-slate-500">ชื่อฐานข้อมูล (Schema):</span>
-                    <span className="font-mono font-bold text-slate-900">hosoffice</span>
+                    <span className="font-mono font-bold text-slate-900">
+                      {connSettings?.hosofficeDb.database || 'hosoffice'}
+                    </span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-slate-500">Host / Port:</span>
-                    <span className="font-mono text-slate-700">10.2.0.201 : 3306</span>
+                    <span className="font-mono text-slate-700">
+                      {connSettings?.hosofficeDb.host || dbHost} : {connSettings?.hosofficeDb.port || dbPort}
+                    </span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-slate-500">สิทธิ์และการป้องกันข้อมูล:</span>
                     <span className="inline-flex items-center gap-1 text-slate-600 font-medium">
                       <ShieldCheck className="w-3.5 h-3.5 text-purple-600" />
-                      Read HR / Direct Push Only
+                      {connSettings?.hosofficeDb.mode || 'READ_ONLY_PERSONNEL_LIVE_SYNC'}
                     </span>
                   </div>
                   <div className="pt-2 border-t border-[#E9E5F2] flex items-start justify-between gap-2">
@@ -414,28 +450,17 @@ export const SystemLogsView: React.FC = () => {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                <button
-                  type="button"
-                  onClick={handleTestHosofficeDb}
-                  disabled={testingDb !== 'NONE'}
-                  className="sm:col-span-2 py-2.5 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer"
-                >
-                  <RefreshCw
-                    className={`w-3.5 h-3.5 ${testingDb === 'HOSOFFICE' ? 'animate-spin' : ''}`}
-                  />
-                  <span>ทดสอบเชื่อมต่อ hosoffice (Mock)</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={handleMockWriteSingleScan}
-                  className="py-2.5 px-3 rounded-xl bg-violet-600 hover:bg-violet-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                >
-                  <Send className="w-3.5 h-3.5" />
-                  <span>ทดสอบเขียน 1 สแกน</span>
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={handleTestHosofficeDb}
+                disabled={testingDb !== 'NONE'}
+                className="w-full py-2.5 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer"
+              >
+                <RefreshCw
+                  className={`w-3.5 h-3.5 ${testingDb === 'HOSOFFICE' ? 'animate-spin' : ''}`}
+                />
+                <span>ตรวจสอบการเชื่อมต่อ hosoffice</span>
+              </button>
             </div>
           </div>
 
@@ -443,7 +468,7 @@ export const SystemLogsView: React.FC = () => {
           <div className="bg-white border border-[#E9E5F2] rounded-2xl p-5 shadow-2xs space-y-3">
             <div className="flex items-center gap-2 text-sm font-bold text-slate-900">
               <Server className="w-4 h-4 text-violet-600" />
-              <span>สถาปัตยกรรมระบบตาม MASTER DEVELOPMENT PROMPT (System Architecture)</span>
+              <span>สถาปัตยกรรมระบบ (System Architecture)</span>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
               <div className="bg-[#F8F7FC] border border-[#E9E5F2] rounded-xl p-4">
@@ -451,7 +476,7 @@ export const SystemLogsView: React.FC = () => {
                   1. Frontend Web Server
                 </div>
                 <div className="text-sm font-mono font-bold text-slate-900 mt-1">
-                  HTTPS Port 3001 — /Sam_Att/
+                  HTTPS Port {connSettings?.gateway.frontendPort || 3001} — {connSettings?.gateway.frontendBase || '/Sam_Att/'}
                 </div>
                 <p className="text-slate-500 mt-1">
                   เสิร์ฟผ่าน Web Server เดิมของโรงพยาบาล รองรับทั้ง Desktop และ Mobile
@@ -463,7 +488,7 @@ export const SystemLogsView: React.FC = () => {
                   2. Central API Gateway
                 </div>
                 <div className="text-sm font-mono font-bold text-slate-900 mt-1">
-                  Port 3002 — /api/Sam_Att/
+                  Port {connSettings?.gateway.apiGatewayPort || 3002} — {connSettings?.gateway.apiMount || '/api/Sam_Att/'}
                 </div>
                 <p className="text-slate-500 mt-1">
                   Mount Express Router เข้ากับ Central API Gateway เดิมโดยไม่เปิดพอร์ตใหม่
@@ -583,7 +608,7 @@ export const SystemLogsView: React.FC = () => {
                       </span>
                     </td>
                     <td className="py-3 px-4 font-mono-data text-slate-600">
-                      {run.startedAt} → {run.finishedAt.split(' ')[1]}
+                      {run.startedAt} → {run.finishedAt.split(' ')[1] || run.finishedAt}
                     </td>
                     <td className="py-3 px-4 text-right font-mono-data font-bold text-slate-900">
                       {run.totalRead}

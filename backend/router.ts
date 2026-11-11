@@ -426,8 +426,16 @@ export function createSamAttRouter(customRepository?: ISamAttRepository): Router
     staffOrAdmin,
     asyncRoute(async (req: Request, res: Response) => {
       const user = (req as any).user as AuthenticatedUser;
-      const { id, code, name, category, startTime, endTime, crossMidnight, graceMinutes } =
-        req.body || {};
+      const {
+        id,
+        code,
+        name,
+        category,
+        startTime,
+        endTime,
+        crossMidnight,
+        graceMinutes,
+      } = req.body || {};
 
       if (!code || !name || !startTime || !endTime) {
         return res.status(400).json({

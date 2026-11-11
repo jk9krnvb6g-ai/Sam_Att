@@ -1,17 +1,10 @@
-/**
- * Sam_Att V2 — Authentication Context & Role Management
- * Supports 3 strict roles: ADMIN, RESPONSIBLE_STAFF, GENERAL_USER.
- * Includes interactive persona switcher for effortless GitHub Review testing.
- */
-
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import { UserAccount, UserRole } from '../types/attendance';
+import React, { createContext, useContext, useState, ReactNode } from 'react';
+import { UserAccount } from '../types/attendance';
 import { MOCK_USERS } from '../mock/mockData';
 
 interface AuthContextType {
   currentUser: UserAccount | null;
-  isAuthenticated: boolean;
-  login: (username: string, role?: UserRole) => boolean;
+  login: (username: string) => boolean;
   logout: () => void;
   switchUser: (userId: string) => void;
   availableUsers: UserAccount[];
@@ -19,33 +12,16 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Default to RESPONSIBLE_STAFF on load so the dashboard is immediately interactive,
-  // while allowing instant switching to GENERAL_USER or ADMIN.
-  const [currentUser, setCurrentUser] = useState<UserAccount | null>(() => {
-    const saved = localStorage.getItem('sam_att_current_user');
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch {
-        return MOCK_USERS[1]; // default: staff_patcharee
-      }
-    }
-    return MOCK_USERS[1];
-  });
-
-  useEffect(() => {
-    if (currentUser) {
-      localStorage.setItem('sam_att_current_user', JSON.stringify(currentUser));
-    } else {
-      localStorage.removeItem('sam_att_current_user');
-    }
-  }, [currentUser]);
+export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
+  // Default logged in as ADMIN for immediate evaluation; can switch or logout anytime
+  const [currentUser, setCurrentUser] = useState<UserAccount | null>(MOCK_USERS[0]);
 
   const login = (username: string): boolean => {
-    const user = MOCK_USERS.find((u) => u.username.toLowerCase() === username.toLowerCase());
-    if (user && user.active) {
-      setCurrentUser(user);
+    const found = MOCK_USERS.find(
+      (u) => u.username.toLowerCase() === username.toLowerCase() && u.active
+    );
+    if (found) {
+      setCurrentUser(found);
       return true;
     }
     return false;
@@ -56,9 +32,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const switchUser = (userId: string) => {
-    const user = MOCK_USERS.find((u) => u.id === userId);
-    if (user) {
-      setCurrentUser(user);
+    const found = MOCK_USERS.find((u) => u.id === userId && u.active);
+    if (found) {
+      setCurrentUser(found);
     }
   };
 
@@ -66,7 +42,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     <AuthContext.Provider
       value={{
         currentUser,
-        isAuthenticated: !!currentUser,
         login,
         logout,
         switchUser,
@@ -78,10 +53,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 };
 
-export const useAuth = () => {
-  const context = useContext(AuthContext);
-  if (!context) {
-    throw new Error('useAuth must be used within an AuthProvider');
-  }
-  return context;
+export const useAuth = (): AuthContextType => {
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error('useAuth must be used within AuthProvider');
+  return ctx;
 };

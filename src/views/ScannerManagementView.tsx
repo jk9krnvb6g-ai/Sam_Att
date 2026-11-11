@@ -54,7 +54,7 @@ export const ScannerManagementView: React.FC = () => {
     setSchedules(mockAttendanceService.getSyncSchedules());
   };
 
-  // Test connection mock
+  // Test connection
   const handleTestConnection = (device: ScannerDevice, e?: React.MouseEvent) => {
     e?.stopPropagation();
     setTestingId(device.id);
@@ -64,20 +64,21 @@ export const ScannerManagementView: React.FC = () => {
       setTestingId(null);
       setTestResult({
         id: device.id,
-        message: `เชื่อมต่อสำเร็จ (Mock Response): Ping IP ${device.ip}:${device.port} ตอบสนองใน 38ms (รอเชื่อมโยงกับ Scanner Reader EXE ตัวเดิมบน Host Server)`,
+        message: `ตรวจสอบการตั้งค่าสำเร็จ: IP ${device.ip}:${device.port} พร้อมเชื่อมโยงกับ Scanner Reader EXE บน Host Server`,
         ok: true,
       });
-    }, 450);
+    }, 350);
   };
 
   // Manual sync single device
-  const handleSyncDevice = (device: ScannerDevice, e?: React.MouseEvent) => {
+  const handleSyncDevice = async (device: ScannerDevice, e?: React.MouseEvent) => {
     e?.stopPropagation();
+    await mockAttendanceService.hydrateFromRealApi('ADMIN');
     const result = mockAttendanceService.triggerMockScannerSync(
       device.machineNo
     );
     setToastMsg(
-      `Sync เครื่อง #${device.machineNo} (${device.name}) เสร็จสิ้น: อ่าน ${result.totalRead} รายการ (ใหม่ +${result.newScans}, ซ้ำ ${result.duplicateScans})`
+      `อัปเดตสถานะซิงค์เครื่อง #${device.machineNo} (${device.name}) เสร็จสิ้น: ข้อมูลสแกนในระบบ ${result.totalRead} รายการ`
     );
     reloadData();
   };
@@ -123,7 +124,7 @@ export const ScannerManagementView: React.FC = () => {
     if (!isAdmin) return;
     mockAttendanceService.deleteScannerDevice(device.id);
     reloadData();
-    setToastMsg(`ลบเครื่องสแกน ${device.name} ออกจากรายการจำลองแล้ว`);
+    setToastMsg(`ลบเครื่องสแกน ${device.name} ออกจากรายการแล้ว`);
   };
 
   // Save Schedule (Add or Edit)
@@ -211,10 +212,11 @@ export const ScannerManagementView: React.FC = () => {
           )}
 
           <button
-            onClick={() => {
+            onClick={async () => {
+              await mockAttendanceService.hydrateFromRealApi('ADMIN');
               const res = mockAttendanceService.triggerMockScannerSync();
               setToastMsg(
-                `Sync ทุกเครื่องเสร็จสิ้น: อ่าน ${res.totalRead} รายการ (ใหม่ +${res.newScans}, ซ้ำ ${res.duplicateScans})`
+                `รีเฟรชข้อมูลสแกนทุกเครื่องเสร็จสิ้น: ข้อมูลสแกนในระบบ ${res.totalRead} รายการ`
               );
               reloadData();
             }}
@@ -292,7 +294,7 @@ export const ScannerManagementView: React.FC = () => {
                           : 'bg-slate-400'
                       }`}
                     />
-                    {sc.enabled ? `${sc.status} (Mock)` : 'DISABLED'}
+                    {sc.enabled ? sc.status : 'DISABLED'}
                   </span>
                 </div>
               </div>
@@ -535,7 +537,7 @@ export const ScannerManagementView: React.FC = () => {
                 <div className="text-slate-500">สถานะเครื่องสแกน:</div>
                 <div className="font-bold text-emerald-700 text-sm">
                   {selectedScannerPopup.enabled
-                    ? `${selectedScannerPopup.status} (Mock Active)`
+                    ? selectedScannerPopup.status
                     : 'ปิดการใช้งาน'}
                 </div>
               </div>

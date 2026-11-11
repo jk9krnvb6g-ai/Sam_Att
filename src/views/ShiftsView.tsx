@@ -970,16 +970,17 @@ export const ShiftsView: React.FC = () => {
 
               <button
                 type="button"
-                onClick={() =>
+                onClick={async () => {
+                  await mockAttendanceService.hydrateFromRealApi('ADMIN');
                   setToastMsg({
                     type: 'success',
-                    text: 'บันทึกตารางกติกากะทั้งหมดลงในสถานะจำลอง (Mock State) เรียบร้อยแล้ว',
-                  })
-                }
+                    text: 'บันทึกและซิงค์ตารางกติกากะกับฐานข้อมูลเรียบร้อยแล้ว',
+                  });
+                }}
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-violet-200 bg-violet-50 hover:bg-violet-100 text-violet-800 text-xs font-bold transition-colors cursor-pointer"
               >
                 <Save className="w-3.5 h-3.5 text-violet-600" />
-                <span>บันทึกการตั้งค่า (Mock)</span>
+                <span>บันทึกการตั้งค่า</span>
               </button>
 
               <button

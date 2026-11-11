@@ -309,18 +309,20 @@ export const HRAttendanceManagementView: React.FC = () => {
   };
 
   // Quick Actions
-  const handleSyncScanners = () => {
+  const handleSyncScanners = async () => {
+    await mockAttendanceService.hydrateFromRealApi('ADMIN');
     const res = mockAttendanceService.triggerMockScannerSync();
     setRefreshKey((k) => k + 1);
     setToastMessage(
-      `ดึงข้อมูลจากเครื่องสแกนจำลองสำเร็จ: อ่าน ${res.totalRead} รายการ (ใหม่ +${res.newScans}, ข้ามซ้ำ ${res.duplicateScans})`
+      `รีเฟรชข้อมูลจากเครื่องสแกนสำเร็จ: ข้อมูลสแกนในระบบ ${res.totalRead} รายการ`
     );
   };
 
-  const handleSyncHosOffice = () => {
+  const handleSyncHosOffice = async () => {
     const res = mockAttendanceService.syncPersonnelFromHosOffice();
+    await mockAttendanceService.hydrateFromRealApi('ADMIN');
     setRefreshKey((k) => k + 1);
-    setToastMessage(`อัปเดตรายชื่อบุคลากรจาก HOSOffice จำลองสำเร็จ: ตรวจสอบ ${res.updatedCount} ท่าน`);
+    setToastMessage(`อัปเดตรายชื่อบุคลากรจาก HOSOffice สำเร็จ (${res.updatedCount} ท่าน)`);
   };
 
   const handleReprocess = () => {
@@ -1591,7 +1593,7 @@ export const HRAttendanceManagementView: React.FC = () => {
             <p className="text-xs leading-relaxed text-violet-900">
               • ระบบ Sam_Att V2 จะแสดงชั่วโมง OT เฉพาะกรณีที่มีข้อมูลการอนุมัติเวร OT หรือกติกา OT ที่ระบุไว้อย่างชัดเจนเท่านั้น
               <br />• <strong>ห้ามเดาหรือคำนวณ OT เองจากเวลาสแกนออก</strong> เพียงอย่างเดียว เพื่อป้องกันความคลาดเคลื่อนทางบัญชีและการเบิกจ่ายของโรงพยาบาลสามชุก
-              <br />• ในชุดข้อมูลจำลองปัจจุบันยังไม่มีรายการอนุมัติ OT แยกต่างหาก ระบบจึงแสดงค่าเป็น{' '}
+              <br />• หากยังไม่มีรายการอนุมัติ OT แยกต่างหาก ระบบจะแสดงค่าเป็น{' '}
               <strong className="font-mono-data">0.0 ชม.</strong> อย่างโปร่งใส
             </p>
           </div>

@@ -1192,10 +1192,11 @@ export const AttendanceReviewView: React.FC = () => {
 
           <button
             type="button"
-            onClick={() => {
+            onClick={async () => {
+              await mockAttendanceService.hydrateFromRealApi('ADMIN');
               setRefreshKey((k) => k + 1);
               setToastMessage(
-                'รีเฟรชข้อมูล Attendance Review จาก Shared Mock State ล่าสุดเรียบร้อยแล้ว'
+                'รีเฟรชข้อมูล Attendance Review จากฐานข้อมูลล่าสุดเรียบร้อยแล้ว'
               );
             }}
             className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-[#E9E5F2] bg-[#F8F7FC] hover:bg-purple-50 text-slate-700 text-xs font-bold transition cursor-pointer"

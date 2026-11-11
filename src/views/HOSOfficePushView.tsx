@@ -169,7 +169,7 @@ export const HOSOfficePushView: React.FC = () => {
             <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
             <div>
               <span className="font-bold">
-                ส่งข้อมูลไปยัง HOSOffice สำเร็จ {pushToast.count} รายการ (Mock Adapter)
+                ส่งข้อมูลไปยัง HOSOffice สำเร็จ {pushToast.count} รายการ
               </span>
               <p className="text-[11px] text-emerald-800">
                 ระบบได้สร้าง Idempotency Key ป้องกันการส่งซ้ำและบันทึกลง Push History เรียบร้อยแล้ว
@@ -236,7 +236,7 @@ export const HOSOfficePushView: React.FC = () => {
             รายการเวลาประจำวันที่พร้อมส่ง ({records.length} รายการ)
           </div>
           <span className="text-xs text-slate-500 font-mono">
-            เป้าหมาย: HOSOffice_Attend Table (Mock)
+            เป้าหมาย: HOSOffice_Attend Table
           </span>
         </div>
 

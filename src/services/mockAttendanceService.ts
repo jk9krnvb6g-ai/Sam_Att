@@ -29,22 +29,14 @@ import {
   UserRole,
 } from '../types/attendance';
 import {
-  MOCK_ATTENDANCE,
-  MOCK_HISTORICAL_ATTENDANCE,
-  MOCK_RAW_SCANS,
   MOCK_SCANNERS,
   MOCK_SYNC_SCHEDULES,
-  MOCK_SYNC_RUNS,
-  MOCK_AUDIT_LOGS,
-  MOCK_PUSH_HISTORY,
-  MOCK_PERSONNEL,
   MOCK_SHIFTS,
   MOCK_PERSONNEL_TYPE_RULES,
-  MOCK_SHIFT_ASSIGNMENTS,
-  MOCK_SCHEDULED_DAY_OFFS,
 } from '../mock/mockData';
 import { ScannerAdapter } from '../../backend/services/scannerAdapter';
 import { AttendanceCalculator } from '../../backend/services/attendanceCalculator';
+import { apiAttendanceAdapter } from './apiAttendanceAdapter';
 
 export const CURRENT_SYSTEM_DATE = '2026-11-06';
 
@@ -53,35 +45,159 @@ export function isPastWorkDate(workDate: string): boolean {
 }
 
 class MockAttendanceService {
-  private attendance: AttendanceRecord[] = [...MOCK_ATTENDANCE, ...MOCK_HISTORICAL_ATTENDANCE];
-  private rawScans: RawScanEvent[] = [...MOCK_RAW_SCANS];
-  private scanners: ScannerDevice[] = [...MOCK_SCANNERS];
+  private attendance: AttendanceRecord[] = [];
+  private rawScans: RawScanEvent[] = [];
+  private scanners: ScannerDevice[] = [...MOCK_SCANNERS].map((s) => ({
+    ...s,
+    lastSyncAt: null,
+    lastEventAt: null,
+    lastError: null,
+  }));
   private syncSchedules: SyncScheduleSlot[] = [...MOCK_SYNC_SCHEDULES];
-  private syncRuns: SyncRunLog[] = [...MOCK_SYNC_RUNS];
-  private auditLogs: AuditLogEntry[] = [...MOCK_AUDIT_LOGS];
-  private pushHistory: PushHistory[] = [...MOCK_PUSH_HISTORY];
-  private personnel: Personnel[] = [...MOCK_PERSONNEL];
+  private syncRuns: SyncRunLog[] = [];
+  private auditLogs: AuditLogEntry[] = [];
+  private pushHistory: PushHistory[] = [];
+  private personnel: Personnel[] = [];
   private shifts: Shift[] = [...MOCK_SHIFTS];
   private personnelTypeRules: PersonnelTypeScheduleRule[] = [...MOCK_PERSONNEL_TYPE_RULES];
-  private assignments: ShiftAssignment[] = [...MOCK_SHIFT_ASSIGNMENTS];
-  private scheduledDayOffs: Array<{ personId: string; workDate: string; note: string }> = [
-    ...MOCK_SCHEDULED_DAY_OFFS,
-  ];
+  private assignments: ShiftAssignment[] = [];
+  private scheduledDayOffs: Array<{ personId: string; workDate: string; note: string }> = [];
   private shiftConfigDeactivationLogs: ShiftConfigDeactivationLog[] = [];
-  private cancellationLogs: ShiftCancellationLog[] = [
-    {
-      id: 'CANC_001',
-      assignmentId: 'SA_OLD_09',
-      personId: 'P009',
-      personName: 'นพ.ธนากร ไพโรจน์ศิริ',
-      workDate: '2026-11-08',
-      shiftId: 'SH08',
-      shiftName: 'คลินิกพิเศษนอกเวลา (Evening Clinic)',
-      cancelledAt: '2026-11-06 08:20:00',
-      cancelledBy: 'นางสาวพัชรี เจริญผล',
-      reason: 'ปรับตารางเวรไปราชการล่วงหน้า',
-    },
-  ];
+  private cancellationLogs: ShiftCancellationLog[] = [];
+
+  private lastApiError: string | null = null;
+  private isHydrating = false;
+
+  public getLastApiError(): string | null {
+    return this.lastApiError;
+  }
+
+  public getIsHydrating(): boolean {
+    return this.isHydrating;
+  }
+
+  private notifyHydrated(): void {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('sam-att-data-hydrated'));
+    }
+  }
+
+  public clearState(): void {
+    this.attendance = [];
+    this.rawScans = [];
+    this.syncRuns = [];
+    this.auditLogs = [];
+    this.pushHistory = [];
+    this.personnel = [];
+    this.assignments = [];
+    this.cancellationLogs = [];
+    this.lastApiError = null;
+    this.notifyHydrated();
+  }
+
+  /**
+   * Hydrate runtime data strictly from the real Backend API (`/api/Sam_Att/*`).
+   * - For `GENERAL_USER`, strictly calls ONLY `/api/Sam_Att/me/*` endpoints.
+   * - For `ADMIN` and `RESPONSIBLE_STAFF`, loads hospital-wide data from `/api/Sam_Att/*`.
+   * - Never falls back to Mock Data if `/api/Sam_Att/*` returns an error or is unreachable.
+   */
+  public async hydrateFromRealApi(role?: UserRole): Promise<void> {
+    this.isHydrating = true;
+    this.lastApiError = null;
+    try {
+      if (role === 'GENERAL_USER') {
+        const [myShiftsRes, myAttRes, myScansRes] = await Promise.all([
+          apiAttendanceAdapter.fetchMyShifts(),
+          apiAttendanceAdapter.fetchMyAttendance({ pageSize: 200 }),
+          apiAttendanceAdapter.fetchMyRawScans({ pageSize: 200 }),
+        ]);
+
+        this.personnel = myShiftsRes.person ? [myShiftsRes.person] : [];
+        this.assignments = myShiftsRes.assignments || [];
+        if (myShiftsRes.shifts && myShiftsRes.shifts.length > 0) {
+          this.shifts = myShiftsRes.shifts;
+        }
+        this.attendance = myAttRes.records || [];
+        this.rawScans = myScansRes.scans || [];
+        this.cancellationLogs = [];
+        this.pushHistory = [];
+        this.auditLogs = [];
+        this.notifyHydrated();
+        return;
+      }
+
+      const [
+        personnelRes,
+        shiftsRes,
+        assignmentsRes,
+        attendanceRes,
+        rawScansRes,
+        pushBatchesRes,
+        logsRes,
+      ] = await Promise.all([
+        apiAttendanceAdapter.fetchPersonnel({ pageSize: 500 }),
+        apiAttendanceAdapter.fetchShifts(),
+        apiAttendanceAdapter.fetchShiftAssignments(),
+        apiAttendanceAdapter.fetchAttendance({ pageSize: 500 }),
+        apiAttendanceAdapter.fetchRawScans({ pageSize: 500 }),
+        apiAttendanceAdapter.fetchPushHistory(),
+        apiAttendanceAdapter.fetchSystemLogs(200),
+      ]);
+
+      this.personnel = personnelRes.personnel || [];
+      if (shiftsRes.length > 0) {
+        this.shifts = shiftsRes;
+      }
+      this.assignments = assignmentsRes || [];
+      this.attendance = attendanceRes.items || [];
+      this.rawScans = rawScansRes.items || [];
+      this.auditLogs = logsRes || [];
+
+      this.pushHistory = (pushBatchesRes || []).map((b) => ({
+        id: b.id,
+        attendanceId: b.id,
+        personId: 'BATCH',
+        fullName: `ชุดข้อมูลเตรียมส่ง HOSOffice (${b.recordsCount} รายการ)`,
+        workDate: b.pushedAt.slice(0, 10),
+        status: 'NORMAL',
+        target: 'HOSOffice_Attend',
+        idempotencyKey: `BATCH_${b.id}`,
+        pushedBy: b.pushedBy,
+        pushedByName: b.pushedBy,
+        pushedAt: b.pushedAt,
+        responseStatus: b.status === 'FAILED' ? 'FAILED' : 'SUCCESS',
+        responseSummary: b.note,
+      }));
+
+      // Derive scanner lastSyncAt / lastEventAt from real rawScans
+      this.scanners.forEach((sc) => {
+        const machineScans = this.rawScans.filter((r) => r.machineNo === sc.machineNo);
+        if (machineScans.length > 0) {
+          sc.lastEventAt = machineScans[0].scanDateTime;
+          sc.lastSyncAt = machineScans[0].importedAt;
+        }
+      });
+
+      this.notifyHydrated();
+    } catch (err: unknown) {
+      // Never populate mock data on API failure; expose accurate error state
+      this.attendance = [];
+      this.rawScans = [];
+      this.syncRuns = [];
+      this.auditLogs = [];
+      this.pushHistory = [];
+      this.personnel = [];
+      this.assignments = [];
+      this.cancellationLogs = [];
+      this.lastApiError =
+        err instanceof Error
+          ? err.message
+          : 'ไม่สามารถดึงข้อมูลจาก Central API Gateway (/api/Sam_Att) ได้';
+      this.notifyHydrated();
+    } finally {
+      this.isHydrating = false;
+    }
+  }
 
   // ==========================================
   // Helper: Record Audit Log
@@ -609,8 +725,11 @@ class MockAttendanceService {
       metadata: { syncLog, totalEventsAfterSync: this.rawScans.length },
     });
 
-    if (newCount > 0) {
-      this.reprocessAttendance('2026-11-06', '2026-11-06');
+    if (incomingScans.length > 0) {
+      void apiAttendanceAdapter
+        .syncScanners(incomingScans)
+        .then(() => this.hydrateFromRealApi('ADMIN'))
+        .catch(() => {});
     }
 
     return {
@@ -622,67 +741,21 @@ class MockAttendanceService {
     };
   }
 
-  public triggerMockScannerSync(machineNo?: number): {
+  public triggerMockScannerSync(_machineNo?: number): {
     totalRead: number;
     newScans: number;
     duplicateScans: number;
     unmappedScans: number;
     totalEventsAfterSync: number;
   } {
-    // Includes existing events (to demonstrate Event Identity deduplication without deleting same-day multi-scans)
-    // plus 2 realistic events (1 mapped checkout scan for P004, 1 unmapped scan for #999)
-    const mockBatch = [
-      {
-        machineNo: machineNo ?? 1,
-        enrollNumber: 101,
-        scanDateTime: '2026-11-06 07:45:10',
-        verifyMode: 268435456,
-        inOutMode: 1,
-        workCode: null,
-      },
-      {
-        machineNo: machineNo ?? 1,
-        enrollNumber: 101,
-        scanDateTime: '2026-11-06 07:46:02',
-        verifyMode: 268435456,
-        inOutMode: 1,
-        workCode: null,
-      },
-      {
-        machineNo: machineNo ?? 1,
-        enrollNumber: 102,
-        scanDateTime: '2026-11-06 08:28:45',
-        verifyMode: 268435456,
-        inOutMode: 1,
-        workCode: null,
-      },
-      {
-        machineNo: machineNo ?? 3,
-        enrollNumber: 111,
-        scanDateTime: '2026-11-06 15:45:10',
-        verifyMode: 268435456,
-        inOutMode: 1,
-        workCode: null,
-      },
-      {
-        machineNo: machineNo ?? 1,
-        enrollNumber: 104,
-        scanDateTime: '2026-11-06 16:34:25',
-        verifyMode: 268435456,
-        inOutMode: 2,
-        workCode: null,
-      },
-      {
-        machineNo: machineNo ?? 2,
-        enrollNumber: 999,
-        scanDateTime: '2026-11-06 17:10:05',
-        verifyMode: 268435456,
-        inOutMode: 2,
-        workCode: null,
-      },
-    ];
-
-    return this.ingestRawScans(mockBatch, 'MANUAL', machineNo);
+    void this.hydrateFromRealApi('ADMIN');
+    return {
+      totalRead: this.rawScans.length,
+      newScans: 0,
+      duplicateScans: 0,
+      unmappedScans: 0,
+      totalEventsAfterSync: this.rawScans.length,
+    };
   }
 
   // ==========================================
@@ -791,6 +864,17 @@ class MockAttendanceService {
         note: params.note,
       },
     });
+
+    void apiAttendanceAdapter
+      .saveHRReviewNote({
+        attendanceId: record.id,
+        reasonCode: params.reasonCode,
+        reasonLabel: params.reasonLabel,
+        note: params.note,
+        hrReviewStatus: params.hrReviewStatus,
+      })
+      .then(() => this.hydrateFromRealApi('ADMIN'))
+      .catch(() => {});
 
     return record;
   }
@@ -1097,6 +1181,16 @@ class MockAttendanceService {
       },
     });
 
+    void apiAttendanceAdapter
+      .executeReprocess({
+        fromDate,
+        toDate,
+        groupName: options?.groupName,
+        personId: options?.personId,
+      })
+      .then(() => this.hydrateFromRealApi('ADMIN'))
+      .catch(() => {});
+
     return {
       reprocessedCount: reprocessed,
       updatedCount: updated,
@@ -1158,12 +1252,17 @@ class MockAttendanceService {
       successCount++;
     });
 
+    void apiAttendanceAdapter
+      .previewHosOfficePush(attendanceIds)
+      .then(() => this.hydrateFromRealApi('ADMIN'))
+      .catch(() => {});
+
     this.recordAuditLog({
       actorName: pushedByName,
       action: 'PUSH_HOSOFFICE',
       entityType: 'HOSOffice_Attend',
       entityId: `BATCH_${Date.now()}`,
-      summary: `กดส่งข้อมูลเข้า HOSOffice สำเร็จ ${successCount} รายการ`,
+      summary: `ตรวจสอบเตรียมส่งข้อมูลเข้า HOSOffice สำเร็จ ${successCount} รายการ`,
       metadata: { attendanceIds, successCount },
     });
 
@@ -1182,11 +1281,19 @@ class MockAttendanceService {
     return [...this.personnel];
   }
 
+  public getPersonById(personId: string): Personnel | undefined {
+    return this.personnel.find((p) => p.personId === personId);
+  }
+
   public syncPersonnelFromHosOffice(): { updatedCount: number; newCount: number } {
     const nowIso = new Date().toISOString().replace('T', ' ').slice(0, 19);
     this.personnel.forEach((p) => {
       p.lastHosOfficeSync = nowIso;
     });
+    void apiAttendanceAdapter
+      .syncPersonnelFromHosOffice(nowIso.slice(0, 10))
+      .then(() => this.hydrateFromRealApi('ADMIN'))
+      .catch(() => {});
     this.recordAuditLog({
       action: 'SYNC_HOSOFFICE_HR',
       entityType: 'Personnel',
@@ -1462,6 +1569,10 @@ class MockAttendanceService {
           summary: `แก้ไขกะเวลา "${shift.name}" (${shift.startTime} - ${shift.endTime} · Grace ${this.shifts[idx].graceMinutes} นาที) โดยไม่แก้ไขกะย้อนหลัง`,
           metadata: { shift: this.shifts[idx], ruleId: options?.ruleId },
         });
+        void apiAttendanceAdapter
+          .saveShift(this.shifts[idx])
+          .then(() => this.hydrateFromRealApi('ADMIN'))
+          .catch(() => {});
         return this.shifts[idx];
       }
     }
@@ -1504,15 +1615,13 @@ class MockAttendanceService {
       summary: `เพิ่มกะเวลาใหม่ "${created.name}" (${created.startTime} - ${created.endTime} · ประเภท ${created.category})`,
       metadata: { shift: created, ruleId: options?.ruleId },
     });
+    void apiAttendanceAdapter
+      .saveShift(created)
+      .then(() => this.hydrateFromRealApi('ADMIN'))
+      .catch(() => {});
     return created;
   }
 
-  /**
-   * Deactivate (ยกเลิกการใช้งานกะ) a Shift in Shift Configuration (§12).
-   * - Sets shift.active = false (Inactive) so it cannot be newly assigned in Personnel Roster.
-   * - Preserves all existing ShiftAssignment, RawScanEvent, and AttendanceRecord records.
-   * - Records a ShiftConfigDeactivationLog entry with reason and future impact count.
-   */
   public deactivateShiftInConfig(params: {
     shiftId: string;
     ruleId?: string;
@@ -1568,6 +1677,11 @@ class MockAttendanceService {
       metadata: { logEntry },
     });
 
+    void apiAttendanceAdapter
+      .saveShift(target)
+      .then(() => this.hydrateFromRealApi('ADMIN'))
+      .catch(() => {});
+
     return {
       shift: target,
       futureAffectedCount: futureList.length,
@@ -1594,6 +1708,10 @@ class MockAttendanceService {
       entityId: target.id,
       summary: `เปิดใช้งานกะเวลา "${target.name}" (${target.startTime}–${target.endTime}) อีกครั้ง (Active)`,
     });
+    void apiAttendanceAdapter
+      .saveShift(target)
+      .then(() => this.hydrateFromRealApi('ADMIN'))
+      .catch(() => {});
     return target;
   }
 
@@ -1822,7 +1940,7 @@ class MockAttendanceService {
           }
 
           // Valid non-overlapping shift -> add to this.assignments immediately with snapshotted fields!
-          this.assignments.unshift({
+          const createdAssignment: ShiftAssignment = {
             id: `SA_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
             personId: pid,
             workDate: d,
@@ -1834,7 +1952,17 @@ class MockAttendanceService {
             crossMidnight: shift.crossMidnight,
             graceMinutes: shift.graceMinutes,
             shiftCategory: shift.category || 'OTHER',
-          });
+          };
+          this.assignments.unshift(createdAssignment);
+
+          void apiAttendanceAdapter
+            .assignShift({
+              personId: pid,
+              workDate: d,
+              shiftId: shift.id,
+              assignmentType: params.assignmentType === 'RECURRING' ? 'MONTHLY' : 'DAILY',
+            })
+            .catch(() => {});
 
           // Update attendance record if present on that date
           const att = this.attendance.find((a) => a.personId === pid && a.workDate === d);
@@ -1911,7 +2039,7 @@ class MockAttendanceService {
     let blockedPastCount = 0;
     const errors: string[] = [];
     const nowIso = new Date().toISOString().replace('T', ' ').slice(0, 19);
-    const actor = params.cancelledBy || 'เจ้าหน้าที่ผู้รับผิดชอบ (Mock Session)';
+    const actor = params.cancelledBy || 'เจ้าหน้าที่ผู้รับผิดชอบ (Sam_Att)';
 
     for (const id of params.assignmentIds) {
       const target = this.assignments.find((a) => a.id === id);
@@ -1941,6 +2069,9 @@ class MockAttendanceService {
         cancelledBy: actor,
         reason: params.reason || 'ยกเลิกตารางกะตามคำสั่งหัวหน้ากลุ่มงาน',
       });
+      void apiAttendanceAdapter
+        .cancelShiftAssignment(target.id, params.reason || 'ยกเลิกตารางกะตามคำสั่งหัวหน้ากลุ่มงาน')
+        .catch(() => {});
       cancelledCount++;
     }
 

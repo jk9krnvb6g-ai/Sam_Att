@@ -16,15 +16,34 @@ import {
   ChevronRight,
 } from 'lucide-react';
 
+export type NavItemKey =
+  | 'dashboard'
+  | 'my-attendance'
+  | 'hr-attendance'
+  | 'hr-reports'
+  | 'attendance-review'
+  | 'personnel'
+  | 'shifts'
+  | 'scanners'
+  | 'raw-scans'
+  | 'hosoffice-push'
+  | 'reports'
+  | 'system-logs'
+  | 'settings';
+
 interface SidebarProps {
-  activeView: string;
-  onSelectView: (view: string) => void;
-  isOpen: boolean;
-  onClose: () => void;
+  activeKey?: NavItemKey;
+  onSelect?: (view: NavItemKey) => void;
+  mobileOpen?: boolean;
+  onCloseMobile?: () => void;
+  activeView?: string;
+  onSelectView?: (view: string) => void;
+  isOpen?: boolean;
+  onClose?: () => void;
 }
 
 interface NavItem {
-  id: string;
+  id: NavItemKey;
   label: string;
   subLabel?: string;
   icon: React.ElementType;
@@ -38,11 +57,21 @@ interface NavGroup {
   items: NavItem[];
 }
 
-export const Sidebar: React.FC<SidebarProps> = ({ activeView, onSelectView, isOpen, onClose }) => {
+export const Sidebar: React.FC<SidebarProps> = (props) => {
+  const activeView = (props.activeKey || props.activeView || 'dashboard') as NavItemKey;
+  const isOpen = Boolean(props.mobileOpen ?? props.isOpen);
+  const handleClose = () => {
+    props.onCloseMobile?.();
+    props.onClose?.();
+  };
+  const handleSelectView = (view: NavItemKey) => {
+    props.onSelect?.(view);
+    props.onSelectView?.(view);
+  };
+
   const { currentUser } = useAuth();
   const role = currentUser?.role || 'GENERAL_USER';
 
-  // Collapsible state for the 4 groups (all open by default)
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
     group_dashboard: true,
     group_hr: true,
@@ -57,7 +86,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeView, onSelectView, isOp
     }));
   };
 
-  // 4 Collapsible Menu Categories as specified in Requirement #8
   const navGroups: NavGroup[] = [
     {
       id: 'group_dashboard',
@@ -85,7 +113,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeView, onSelectView, isOp
       title: 'งานบุคลากรและการลงเวลา',
       items: [
         {
-          id: 'hr-reports',
+          id: 'hr-attendance',
           label: 'จัดการ HR และรายงานการลงเวลา',
           subLabel: 'HR Attendance & Reports',
           icon: FileBarChart2,
@@ -167,20 +195,19 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeView, onSelectView, isOp
     },
   ];
 
-  const handleSelect = (viewId: string) => {
-    onSelectView(viewId);
+  const handleSelect = (viewId: NavItemKey) => {
+    handleSelectView(viewId);
     if (window.innerWidth < 1024) {
-      onClose();
+      handleClose();
     }
   };
 
   return (
     <>
-      {/* Mobile backdrop */}
       {isOpen && (
         <div
           className="fixed inset-0 z-40 bg-slate-900/40 backdrop-blur-xs lg:hidden"
-          onClick={onClose}
+          onClick={handleClose}
         />
       )}
 
@@ -189,11 +216,10 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeView, onSelectView, isOp
           isOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
         }`}
       >
-        {/* Mobile Header */}
         <div className="lg:hidden p-4 border-b border-[#E9E5F2] flex items-center justify-between">
           <span className="font-bold text-slate-800">เมนูนำทาง Sam_Att V2</span>
           <button
-            onClick={onClose}
+            onClick={handleClose}
             className="p-1 rounded-lg text-slate-400 hover:text-slate-600 cursor-pointer"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -202,7 +228,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeView, onSelectView, isOp
           </button>
         </div>
 
-        {/* Navigation Groups */}
         <nav className="flex-1 p-3 space-y-2.5 overflow-y-auto">
           {navGroups.map((group) => {
             const visibleItems = group.items.filter((item) => item.roles.includes(role));
@@ -216,7 +241,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeView, onSelectView, isOp
                 key={group.id}
                 className="rounded-xl border border-[#E9E5F2]/80 bg-[#F8F7FC]/60 overflow-hidden"
               >
-                {/* Collapsible Group Header */}
                 <button
                   type="button"
                   onClick={() => toggleGroup(group.id)}
@@ -234,7 +258,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeView, onSelectView, isOp
                   )}
                 </button>
 
-                {/* Group Items */}
                 {isExpanded && (
                   <div className="p-1.5 space-y-1 bg-white">
                     {visibleItems.map((item) => {
@@ -291,7 +314,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeView, onSelectView, isOp
           })}
         </nav>
 
-        {/* Role information box */}
         <div className="p-3 m-3 bg-[#F8F7FC] border border-[#E9E5F2] rounded-xl text-xs text-slate-600">
           <div className="text-[11px] font-bold text-violet-700 mb-0.5">สิทธิ์ผู้ใช้งานปัจจุบัน:</div>
           <div className="font-bold text-slate-900 truncate">{currentUser?.fullName}</div>
