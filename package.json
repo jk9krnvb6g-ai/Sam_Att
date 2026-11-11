@@ -10,9 +10,9 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test backend/__tests__/attendanceEngine.unit.test.ts backend/__tests__/samAttPhase2.integration.test.ts",
+    "test": "npm run build && tsx --test backend/__tests__/attendanceEngine.unit.test.ts backend/__tests__/samAttPhase2.integration.test.ts",
     "test:unit": "tsx --test backend/__tests__/attendanceEngine.unit.test.ts",
-    "test:integration": "tsx --test backend/__tests__/samAttPhase2.integration.test.ts"
+    "test:integration": "npm run build && tsx --test backend/__tests__/samAttPhase2.integration.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -34,7 +34,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.4.21",
-    "esbuild": "^0.25.0",
+    "esbuild": "^0.28.0",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
     "typescript": "^7.0.2",
