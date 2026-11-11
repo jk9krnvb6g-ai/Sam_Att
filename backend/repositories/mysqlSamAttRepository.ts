@@ -29,13 +29,19 @@ import {
   ValidatedRawScanEvent,
 } from '../types';
 import {
+  CreateScannerDeviceInput,
   ISamAttRepository,
   RepositoryAuditLog,
   RepositoryMode,
   RepositoryPushHistory,
   RepositoryRateLimitEntry,
+  RepositoryScannerDevice,
   RepositoryShiftCancellationLog,
   RepositoryUserAccount,
+  ScannerConflictError,
+  ScannerDeviceStatus,
+  ScannerNotFoundError,
+  UpdateScannerDeviceInput,
 } from './interfaces';
 import { ScannerAdapter, RawScanIngestionSummary } from '../services/scannerAdapter';
 import { AttendanceCalculator } from '../services/attendanceCalculator';
@@ -153,6 +159,14 @@ export class MySqlSamAttRepository implements ISamAttRepository {
             try {
               return (await realPool.execute(sql, values)) as unknown as [T, mysql.FieldPacket[]];
             } catch (err) {
+              if (
+                (err as any)?.code === 'ER_DUP_ENTRY' ||
+                (err as any)?.errno === 1062
+              ) {
+                throw new ScannerConflictError(
+                  `ข้อมูลเครื่องสแกนซ้ำในฐานข้อมูล MySQL (${cfg.database}): ${(err as Error).message}`
+                );
+              }
               throw new DatabaseUnavailableError(
                 `MySQL Query Execution Failed (${cfg.database}): ${(err as Error).message}`
               );
@@ -994,8 +1008,298 @@ export class MySqlSamAttRepository implements ISamAttRepository {
   }
 
   // ==========================================
-  // 5. Immutable Raw Scans
+  // 5. Scanner Registry & Immutable Raw Scans
   // ==========================================
+  private mapScannerRow(r: RowDataPacket): RepositoryScannerDevice {
+    const enabled = Boolean(r.enabled);
+    return {
+      id: String(r.id),
+      machineNo: Number(r.machine_no),
+      name: String(r.name || ''),
+      ip: String(r.ip || ''),
+      port: Number(r.device_port ?? r.port ?? 4370),
+      location: r.location !== null && r.location !== undefined ? String(r.location) : '',
+      enabled,
+      autoSyncEnabled:
+        r.auto_sync_enabled !== null && r.auto_sync_enabled !== undefined
+          ? Boolean(r.auto_sync_enabled)
+          : true,
+      status: (r.status || (enabled ? 'ONLINE' : 'OFFLINE')) as ScannerDeviceStatus,
+      lastSyncAt: r.last_sync_at ? String(r.last_sync_at) : null,
+      lastEventAt: r.last_event_at ? String(r.last_event_at) : null,
+      lastError: r.last_error ? String(r.last_error) : null,
+    };
+  }
+
+  public async getScanners(): Promise<RepositoryScannerDevice[]> {
+    const rows = await this.queryRows(
+      `SELECT id, machine_no, name, ip, device_port, location, enabled, auto_sync_enabled, status, last_sync_at, last_event_at, last_error
+       FROM scanner_devices
+       ORDER BY machine_no ASC`,
+      []
+    );
+    return rows.map((r) => this.mapScannerRow(r));
+  }
+
+  public async getScannerById(
+    id: string
+  ): Promise<RepositoryScannerDevice | undefined> {
+    const rows = await this.queryRows(
+      `SELECT id, machine_no, name, ip, device_port, location, enabled, auto_sync_enabled, status, last_sync_at, last_event_at, last_error
+       FROM scanner_devices
+       WHERE id = ?
+       LIMIT 1`,
+      [id]
+    );
+    if (rows.length === 0) return undefined;
+    return this.mapScannerRow(rows[0]);
+  }
+
+  public async createScanner(
+    input: CreateScannerDeviceInput,
+    actor = 'ADMIN'
+  ): Promise<RepositoryScannerDevice> {
+    const existingByMachine = await this.queryRows(
+      `SELECT id, machine_no, name FROM scanner_devices WHERE machine_no = ? LIMIT 1 FOR UPDATE`,
+      [input.machineNo]
+    );
+    if (existingByMachine.length > 0) {
+      throw new ScannerConflictError(
+        `หมายเลขเครื่องสแกน (machineNo) #${input.machineNo} ถูกลงทะเบียนไว้ในฐานข้อมูลแล้ว (${existingByMachine[0].name || existingByMachine[0].id})`
+      );
+    }
+
+    const generatedId = (
+      input.id?.trim() ||
+      `SCN_${Date.now().toString(36).toUpperCase()}_${Math.random()
+        .toString(36)
+        .slice(2, 5)
+        .toUpperCase()}`
+    ).slice(0, 20);
+
+    const enabled = Boolean(input.enabled);
+    const created: RepositoryScannerDevice = {
+      id: generatedId,
+      machineNo: input.machineNo,
+      name: input.name.trim(),
+      ip: input.ip.trim(),
+      port: input.port,
+      location: input.location.trim(),
+      enabled,
+      autoSyncEnabled: Boolean(input.autoSyncEnabled),
+      status: input.status || (enabled ? 'ONLINE' : 'OFFLINE'),
+      lastSyncAt: null,
+      lastEventAt: null,
+      lastError: null,
+    };
+
+    await this.executeMutation(
+      `INSERT INTO scanner_devices
+        (id, machine_no, name, ip, device_port, location, enabled, auto_sync_enabled, status, last_sync_at, last_event_at, last_error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        created.id,
+        created.machineNo,
+        created.name,
+        created.ip,
+        created.port,
+        created.location,
+        created.enabled ? 1 : 0,
+        created.autoSyncEnabled ? 1 : 0,
+        created.status,
+        created.lastSyncAt,
+        created.lastEventAt,
+        created.lastError,
+      ]
+    );
+
+    await this.recordAuditLog({
+      actor,
+      actorRole: 'ADMIN',
+      action: 'CREATE_SCANNER_DEVICE',
+      entityType: 'ScannerDevice',
+      entityId: created.id,
+      summary: `เพิ่มเครื่องสแกน #${created.machineNo} (${created.name}) IP ${created.ip}:${created.port} ลง MySQL`,
+      metadata: { scanner: created },
+    });
+
+    return created;
+  }
+
+  public async updateScanner(
+    id: string,
+    input: UpdateScannerDeviceInput,
+    actor = 'ADMIN'
+  ): Promise<RepositoryScannerDevice> {
+    const rows = await this.queryRows(
+      `SELECT id, machine_no, name, ip, device_port, location, enabled, auto_sync_enabled, status, last_sync_at, last_event_at, last_error
+       FROM scanner_devices
+       WHERE id = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [id]
+    );
+    if (rows.length === 0) {
+      throw new ScannerNotFoundError(`ไม่พบเครื่องสแกนรหัส ${id} ในฐานข้อมูล`);
+    }
+
+    const existing = this.mapScannerRow(rows[0]);
+    const nextMachineNo =
+      input.machineNo !== undefined ? input.machineNo : existing.machineNo;
+
+    if (nextMachineNo !== existing.machineNo) {
+      const conflictRows = await this.queryRows(
+        `SELECT id, machine_no, name FROM scanner_devices WHERE machine_no = ? AND id <> ? LIMIT 1 FOR UPDATE`,
+        [nextMachineNo, id]
+      );
+      if (conflictRows.length > 0) {
+        throw new ScannerConflictError(
+          `หมายเลขเครื่องสแกน (machineNo) #${nextMachineNo} ถูกลงทะเบียนไว้กับเครื่องอื่นแล้ว (${conflictRows[0].name || conflictRows[0].id})`
+        );
+      }
+    }
+
+    const nextEnabled =
+      input.enabled !== undefined ? Boolean(input.enabled) : existing.enabled;
+    const nextStatus: ScannerDeviceStatus =
+      input.status !== undefined
+        ? input.status
+        : nextEnabled
+        ? existing.status === 'OFFLINE'
+          ? 'ONLINE'
+          : existing.status
+        : 'OFFLINE';
+
+    const updated: RepositoryScannerDevice = {
+      ...existing,
+      machineNo: nextMachineNo,
+      name: input.name !== undefined ? input.name.trim() : existing.name,
+      ip: input.ip !== undefined ? input.ip.trim() : existing.ip,
+      port: input.port !== undefined ? input.port : existing.port,
+      location:
+        input.location !== undefined ? input.location.trim() : existing.location,
+      enabled: nextEnabled,
+      autoSyncEnabled:
+        input.autoSyncEnabled !== undefined
+          ? Boolean(input.autoSyncEnabled)
+          : existing.autoSyncEnabled,
+      status: nextStatus,
+    };
+
+    await this.executeMutation(
+      `UPDATE scanner_devices
+       SET machine_no = ?, name = ?, ip = ?, device_port = ?, location = ?, enabled = ?, auto_sync_enabled = ?, status = ?
+       WHERE id = ?`,
+      [
+        updated.machineNo,
+        updated.name,
+        updated.ip,
+        updated.port,
+        updated.location,
+        updated.enabled ? 1 : 0,
+        updated.autoSyncEnabled ? 1 : 0,
+        updated.status,
+        updated.id,
+      ]
+    );
+
+    await this.recordAuditLog({
+      actor,
+      actorRole: 'ADMIN',
+      action: 'UPDATE_SCANNER_DEVICE',
+      entityType: 'ScannerDevice',
+      entityId: updated.id,
+      summary: `แก้ไขการตั้งค่าเครื่องสแกน #${updated.machineNo} (${updated.name}) IP ${updated.ip}:${updated.port} ใน MySQL`,
+      metadata: { scanner: updated },
+    });
+
+    return updated;
+  }
+
+  public async setScannerEnabled(
+    id: string,
+    enabled: boolean,
+    actor = 'ADMIN'
+  ): Promise<RepositoryScannerDevice> {
+    const rows = await this.queryRows(
+      `SELECT id, machine_no, name, ip, device_port, location, enabled, auto_sync_enabled, status, last_sync_at, last_event_at, last_error
+       FROM scanner_devices
+       WHERE id = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [id]
+    );
+    if (rows.length === 0) {
+      throw new ScannerNotFoundError(`ไม่พบเครื่องสแกนรหัส ${id} ในฐานข้อมูล`);
+    }
+
+    const existing = this.mapScannerRow(rows[0]);
+    const nextEnabled = Boolean(enabled);
+    const nextStatus: ScannerDeviceStatus = nextEnabled ? 'ONLINE' : 'OFFLINE';
+
+    const updated: RepositoryScannerDevice = {
+      ...existing,
+      enabled: nextEnabled,
+      status: nextStatus,
+    };
+
+    await this.executeMutation(
+      `UPDATE scanner_devices
+       SET enabled = ?, status = ?
+       WHERE id = ?`,
+      [updated.enabled ? 1 : 0, updated.status, updated.id]
+    );
+
+    await this.recordAuditLog({
+      actor,
+      actorRole: 'ADMIN',
+      action: 'SET_SCANNER_ENABLED',
+      entityType: 'ScannerDevice',
+      entityId: updated.id,
+      summary: `${updated.enabled ? 'เปิดใช้งาน' : 'ปิดใช้งาน'} เครื่องสแกน #${updated.machineNo} (${updated.name}) ใน MySQL`,
+      metadata: { enabled: updated.enabled, status: updated.status },
+    });
+
+    return updated;
+  }
+
+  public async deleteScanner(
+    id: string,
+    actor = 'ADMIN'
+  ): Promise<{ deleted: boolean; device?: RepositoryScannerDevice }> {
+    const rows = await this.queryRows(
+      `SELECT id, machine_no, name, ip, device_port, location, enabled, auto_sync_enabled, status, last_sync_at, last_event_at, last_error
+       FROM scanner_devices
+       WHERE id = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [id]
+    );
+    if (rows.length === 0) {
+      throw new ScannerNotFoundError(`ไม่พบเครื่องสแกนรหัส ${id} ในฐานข้อมูล`);
+    }
+
+    const deletedDevice = this.mapScannerRow(rows[0]);
+
+    // Delete ONLY from `scanner_devices`; NEVER delete or cascade to `raw_scans` or `attendance`!
+    await this.executeMutation(
+      `DELETE FROM scanner_devices WHERE id = ?`,
+      [id]
+    );
+
+    await this.recordAuditLog({
+      actor,
+      actorRole: 'ADMIN',
+      action: 'DELETE_SCANNER_DEVICE',
+      entityType: 'ScannerDevice',
+      entityId: id,
+      summary: `ลบเครื่องสแกน #${deletedDevice.machineNo} (${deletedDevice.name}) ออกจากตาราง scanner_devices ใน MySQL (คงข้อมูล raw_scans และ attendance ทั้งหมดไว้)`,
+      metadata: { deletedDevice },
+    });
+
+    return { deleted: true, device: deletedDevice };
+  }
+
   public async ingestRawScans(
     incomingScans: ReadonlyArray<unknown>,
     actor = 'SCANNER_SYNC'
@@ -1014,6 +1318,22 @@ export class MySqlSamAttRepository implements ISamAttRepository {
       personnel,
       fingerprintMappings: mappings,
     });
+
+    const latestEventByMachine = new Map<number, string>();
+    const syncedMachineNos = new Set<number>();
+
+    for (const rawItem of incomingScans) {
+      const check = ScannerAdapter.validateScanRecord(rawItem);
+      if (check.valid) {
+        const mNo = check.value.machineNo;
+        const dt = check.value.scanDateTime;
+        syncedMachineNos.add(mNo);
+        const prev = latestEventByMachine.get(mNo);
+        if (!prev || dt > prev) {
+          latestEventByMachine.set(mNo, dt);
+        }
+      }
+    }
 
     for (const ev of summary.newEvents) {
       await this.executeMutation(
@@ -1034,6 +1354,23 @@ export class MySqlSamAttRepository implements ISamAttRepository {
           ev.dedupeKey,
         ]
       );
+    }
+
+    if (syncedMachineNos.size > 0) {
+      const syncTimestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
+      for (const machineNo of syncedMachineNos) {
+        const latestDt = latestEventByMachine.get(machineNo) || null;
+        await this.executeMutation(
+          `UPDATE scanner_devices
+           SET last_sync_at = ?,
+               last_event_at = CASE
+                 WHEN ? IS NOT NULL AND (last_event_at IS NULL OR ? > last_event_at) THEN ?
+                 ELSE last_event_at
+               END
+           WHERE machine_no = ?`,
+          [syncTimestamp, latestDt, latestDt, latestDt, machineNo]
+        );
+      }
     }
 
     if (summary.newScansCount > 0 || summary.duplicateScansCount > 0) {

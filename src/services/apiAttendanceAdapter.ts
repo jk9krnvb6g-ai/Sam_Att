@@ -14,6 +14,7 @@ import {
   NoteReasonCode,
   Personnel,
   RawScanEvent,
+  ScannerDevice,
   Shift,
   ShiftAssignment,
   ShiftCancellationLog,
@@ -801,8 +802,89 @@ class ApiAttendanceAdapter {
   }
 
   // ==========================================
-  // 7. Scanners & Raw Scans (`/scanners/sync`, `/raw-scans`)
+  // 7. Scanners & Raw Scans (`/scanners*`, `/raw-scans`)
   // ==========================================
+  public async fetchScanners(): Promise<ScannerDevice[]> {
+    const data = await this.requestJson<{
+      success: boolean;
+      total?: number;
+      scanners: ScannerDevice[];
+    }>('/scanners', { method: 'GET' });
+    return data.scanners || [];
+  }
+
+  public async createScanner(payload: {
+    machineNo: number;
+    name: string;
+    ip: string;
+    port: number;
+    location: string;
+    enabled?: boolean;
+    autoSyncEnabled?: boolean;
+  }): Promise<ScannerDevice> {
+    const data = await this.requestJson<{
+      success: boolean;
+      scanner: ScannerDevice;
+    }>('/scanners', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    return data.scanner;
+  }
+
+  public async updateScanner(
+    id: string,
+    payload: {
+      machineNo: number;
+      name: string;
+      ip: string;
+      port: number;
+      location: string;
+      enabled?: boolean;
+      autoSyncEnabled?: boolean;
+    }
+  ): Promise<ScannerDevice> {
+    const data = await this.requestJson<{
+      success: boolean;
+      scanner: ScannerDevice;
+    }>(`/scanners/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+    return data.scanner;
+  }
+
+  public async setScannerEnabled(
+    id: string,
+    enabled: boolean
+  ): Promise<ScannerDevice> {
+    const data = await this.requestJson<{
+      success: boolean;
+      scanner: ScannerDevice;
+    }>(`/scanners/${encodeURIComponent(id)}/enabled`, {
+      method: 'PATCH',
+      body: JSON.stringify({ enabled }),
+    });
+    return data.scanner;
+  }
+
+  public async deleteScanner(id: string): Promise<{
+    deleted: boolean;
+    scanner?: ScannerDevice;
+  }> {
+    const data = await this.requestJson<{
+      success: boolean;
+      deleted: boolean;
+      scanner?: ScannerDevice;
+    }>(`/scanners/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+    return {
+      deleted: Boolean(data.deleted),
+      scanner: data.scanner,
+    };
+  }
+
   public async syncScanners(scansPayload: unknown[]) {
     return this.requestJson<{
       success: boolean;

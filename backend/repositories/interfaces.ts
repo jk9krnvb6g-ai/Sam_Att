@@ -198,7 +198,32 @@ export interface ISamAttRepository {
 
   getShiftCancellationLogs(personId?: string): Promise<RepositoryShiftCancellationLog[]> | RepositoryShiftCancellationLog[];
 
-  // Immutable Raw Scans
+  // Scanner Registry & Immutable Raw Scans
+  getScanners(): Promise<RepositoryScannerDevice[]> | RepositoryScannerDevice[];
+  getScannerById(
+    id: string
+  ): Promise<RepositoryScannerDevice | undefined> | RepositoryScannerDevice | undefined;
+  createScanner(
+    input: CreateScannerDeviceInput,
+    actor?: string
+  ): Promise<RepositoryScannerDevice> | RepositoryScannerDevice;
+  updateScanner(
+    id: string,
+    input: UpdateScannerDeviceInput,
+    actor?: string
+  ): Promise<RepositoryScannerDevice> | RepositoryScannerDevice;
+  setScannerEnabled(
+    id: string,
+    enabled: boolean,
+    actor?: string
+  ): Promise<RepositoryScannerDevice> | RepositoryScannerDevice;
+  deleteScanner(
+    id: string,
+    actor?: string
+  ):
+    | Promise<{ deleted: boolean; device?: RepositoryScannerDevice }>
+    | { deleted: boolean; device?: RepositoryScannerDevice };
+
   ingestRawScans(
     incomingScans: ReadonlyArray<unknown>,
     actor?: string
@@ -302,6 +327,64 @@ export interface RepositoryRateLimitEntry {
   failedAttempts: number;
   firstFailedAtMs: number;
   lockedUntilMs: number | null;
+}
+
+export type ScannerDeviceStatus = 'ONLINE' | 'OFFLINE' | 'SYNCING' | 'ERROR';
+
+export interface RepositoryScannerDevice {
+  id: string;
+  machineNo: number;
+  name: string;
+  ip: string;
+  port: number;
+  location: string;
+  enabled: boolean;
+  autoSyncEnabled: boolean;
+  status: ScannerDeviceStatus;
+  lastSyncAt: string | null;
+  lastEventAt: string | null;
+  lastError: string | null;
+}
+
+export interface CreateScannerDeviceInput {
+  id?: string;
+  machineNo: number;
+  name: string;
+  ip: string;
+  port: number;
+  location: string;
+  enabled: boolean;
+  autoSyncEnabled: boolean;
+  status?: ScannerDeviceStatus;
+}
+
+export interface UpdateScannerDeviceInput {
+  machineNo?: number;
+  name?: string;
+  ip?: string;
+  port?: number;
+  location?: string;
+  enabled?: boolean;
+  autoSyncEnabled?: boolean;
+  status?: ScannerDeviceStatus;
+}
+
+export class ScannerConflictError extends Error {
+  public readonly code = 'SAM_ATT_SCANNER_CONFLICT';
+  public readonly statusCode = 409;
+  constructor(message: string) {
+    super(message);
+    this.name = 'ScannerConflictError';
+  }
+}
+
+export class ScannerNotFoundError extends Error {
+  public readonly code = 'SAM_ATT_SCANNER_NOT_FOUND';
+  public readonly statusCode = 404;
+  constructor(message: string) {
+    super(message);
+    this.name = 'ScannerNotFoundError';
+  }
 }
 
 export type {

@@ -51,7 +51,7 @@ import { createSamAttRouter } from '../router';
 async function invokeGatewayRoute(
   app: express.Express,
   options: {
-    method: 'GET' | 'POST' | 'PUT' | 'DELETE';
+    method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
     url: string;
     headers?: Record<string, string>;
     body?: unknown;
@@ -2264,7 +2264,511 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
       else delete process.env.SAM_ATT_DB_PASSWORD;
     }
   });
+
+  it('Scenario 22: A93.3 Persistent Scanner Registry CRUD, RBAC Authorization, Duplicate machineNo Conflict (409), Zero-Scan Visibility, Post-Sync & Post-Restart Persistence, Safe Delete Preserving Raw Scans, and MySQL Parameterized SQL / 503 Failure Handling', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sam-att-a93-3-scanners-'));
+    const persistenceFile = path.join(tmpDir, 'scanner-registry-db.json');
+
+    try {
+      const { app } = createTestEnvironment('TEST', persistenceFile);
+
+      const adminHeaders = { 'x-sam-att-dev-user-id': 'USR_ADMIN' };
+      const staffHeaders = { 'x-sam-att-dev-user-id': 'USR_STAFF' };
+      const generalHeaders = { 'x-sam-att-dev-user-id': 'USR_GEN_1' };
+
+      // Initially empty scanner list (no mock fallback when seeded empty)
+      const initialList = await invokeGatewayRoute(app, {
+        method: 'GET',
+        url: '/api/Sam_Att/scanners',
+        headers: adminHeaders,
+      });
+      assert.equal(initialList.status, 200);
+      assert.equal(initialList.body.success, true);
+      assert.equal(initialList.body.total, 0);
+      assert.deepEqual(initialList.body.scanners, []);
+
+      // Test Case #1 & #6: ADMIN creates Scanner #1 (machineNo: 1) and reads it back
+      const createRes1 = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/scanners',
+        headers: adminHeaders,
+        body: {
+          machineNo: 1,
+          name: 'เครื่องสแกนหน้าห้องบัตร OPD',
+          ip: '192.168.10.201',
+          port: 4370,
+          location: 'ชั้น 1 อาคารผู้ป่วยนอก',
+          enabled: true,
+          autoSyncEnabled: true,
+        },
+      });
+      assert.equal(createRes1.status, 201);
+      assert.equal(createRes1.body.success, true);
+      const scanner1 = createRes1.body.scanner;
+      assert.ok(scanner1.id);
+      assert.equal(scanner1.machineNo, 1);
+      assert.equal(scanner1.name, 'เครื่องสแกนหน้าห้องบัตร OPD');
+      assert.equal(scanner1.ip, '192.168.10.201');
+      assert.equal(scanner1.port, 4370);
+      assert.equal(scanner1.location, 'ชั้น 1 อาคารผู้ป่วยนอก');
+      assert.equal(scanner1.enabled, true);
+      assert.equal(scanner1.autoSyncEnabled, true);
+
+      // Test Case #10: Create Scanner #2 (machineNo: 99) with zero Raw Scans — must remain visible
+      const createRes2 = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/scanners',
+        headers: adminHeaders,
+        body: {
+          machineNo: 99,
+          name: 'เครื่องสแกนอาคารผู้ป่วยในใหม่ (ยังไม่มีข้อมูลสแกน)',
+          ip: '192.168.10.250',
+          port: 4370,
+          location: 'ชั้น 3 อาคารผู้ป่วยใน',
+          enabled: true,
+          autoSyncEnabled: false,
+        },
+      });
+      assert.equal(createRes2.status, 201);
+      const scanner2 = createRes2.body.scanner;
+      assert.equal(scanner2.machineNo, 99);
+
+      const readAfterCreate = await invokeGatewayRoute(app, {
+        method: 'GET',
+        url: '/api/Sam_Att/scanners',
+        headers: adminHeaders,
+      });
+      assert.equal(readAfterCreate.status, 200);
+      assert.equal(readAfterCreate.body.total, 2);
+      assert.equal(readAfterCreate.body.scanners[0].machineNo, 1);
+      assert.equal(readAfterCreate.body.scanners[1].machineNo, 99);
+
+      // Test Case #2: ADMIN updates Scanner #1 and reads it back
+      const updateRes = await invokeGatewayRoute(app, {
+        method: 'PUT',
+        url: `/api/Sam_Att/scanners/${scanner1.id}`,
+        headers: adminHeaders,
+        body: {
+          machineNo: 1,
+          name: 'เครื่องสแกน OPD (แก้ไขชื่อและพอร์ต)',
+          ip: '192.168.10.211',
+          port: 4375,
+          location: 'โถงชั้น 1 อาคาร OPD',
+          enabled: true,
+          autoSyncEnabled: false,
+        },
+      });
+      assert.equal(updateRes.status, 200);
+      assert.equal(updateRes.body.scanner.name, 'เครื่องสแกน OPD (แก้ไขชื่อและพอร์ต)');
+      assert.equal(updateRes.body.scanner.ip, '192.168.10.211');
+      assert.equal(updateRes.body.scanner.port, 4375);
+      assert.equal(updateRes.body.scanner.location, 'โถงชั้น 1 อาคาร OPD');
+      assert.equal(updateRes.body.scanner.autoSyncEnabled, false);
+
+      const readAfterUpdate = await invokeGatewayRoute(app, {
+        method: 'GET',
+        url: '/api/Sam_Att/scanners',
+        headers: adminHeaders,
+      });
+      const updatedFromGet = readAfterUpdate.body.scanners.find((s: any) => s.id === scanner1.id);
+      assert.equal(updatedFromGet.name, 'เครื่องสแกน OPD (แก้ไขชื่อและพอร์ต)');
+      assert.equal(updatedFromGet.port, 4375);
+
+      // Test Case #3: Duplicate machineNo rejected with HTTP 409 on both POST and PUT
+      const dupCreateRes = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/scanners',
+        headers: adminHeaders,
+        body: {
+          machineNo: 1,
+          name: 'เครื่องซ้ำหมายเลข 1',
+          ip: '192.168.10.222',
+          port: 4370,
+          location: 'ชั้น 2',
+          enabled: true,
+          autoSyncEnabled: true,
+        },
+      });
+      assert.equal(dupCreateRes.status, 409);
+      assert.equal(dupCreateRes.body.code, 'SAM_ATT_SCANNER_CONFLICT');
+
+      const dupUpdateRes = await invokeGatewayRoute(app, {
+        method: 'PUT',
+        url: `/api/Sam_Att/scanners/${scanner2.id}`,
+        headers: adminHeaders,
+        body: {
+          machineNo: 1, // Conflicts with scanner1
+          name: scanner2.name,
+          ip: scanner2.ip,
+          port: scanner2.port,
+          location: scanner2.location,
+          enabled: true,
+          autoSyncEnabled: false,
+        },
+      });
+      assert.equal(dupUpdateRes.status, 409);
+      assert.equal(dupUpdateRes.body.code, 'SAM_ATT_SCANNER_CONFLICT');
+
+      // Input validation checks (400)
+      const invalidCreateRes = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/scanners',
+        headers: adminHeaders,
+        body: {
+          machineNo: 0,
+          name: '',
+          ip: '999.999.999.999',
+          port: 70000,
+          location: 'X',
+          enabled: true,
+          autoSyncEnabled: true,
+        },
+      });
+      assert.equal(invalidCreateRes.status, 400);
+
+      // Test Case #4: Enable/disable persistence via PATCH /api/Sam_Att/scanners/:id/enabled
+      const disableRes = await invokeGatewayRoute(app, {
+        method: 'PATCH',
+        url: `/api/Sam_Att/scanners/${scanner2.id}/enabled`,
+        headers: adminHeaders,
+        body: { enabled: false },
+      });
+      assert.equal(disableRes.status, 200);
+      assert.equal(disableRes.body.scanner.enabled, false);
+      assert.equal(disableRes.body.scanner.status, 'OFFLINE');
+
+      const listAfterDisable = await invokeGatewayRoute(app, {
+        method: 'GET',
+        url: '/api/Sam_Att/scanners',
+        headers: adminHeaders,
+      });
+      const disabledScanner = listAfterDisable.body.scanners.find((s: any) => s.id === scanner2.id);
+      assert.equal(disabledScanner.enabled, false);
+
+      const reEnableRes = await invokeGatewayRoute(app, {
+        method: 'PATCH',
+        url: `/api/Sam_Att/scanners/${scanner2.id}/enabled`,
+        headers: adminHeaders,
+        body: { enabled: true },
+      });
+      assert.equal(reEnableRes.status, 200);
+      assert.equal(reEnableRes.body.scanner.enabled, true);
+
+      // Test Case #7: RESPONSIBLE_STAFF read-only authorization (GET allowed 200; POST/PUT/PATCH/DELETE rejected 403)
+      const staffGetRes = await invokeGatewayRoute(app, {
+        method: 'GET',
+        url: '/api/Sam_Att/scanners',
+        headers: staffHeaders,
+      });
+      assert.equal(staffGetRes.status, 200);
+      assert.equal(staffGetRes.body.total, 2);
+
+      const staffPostRes = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/scanners',
+        headers: staffHeaders,
+        body: {
+          machineNo: 5,
+          name: 'Staff Unauthorized Scanner',
+          ip: '192.168.10.205',
+          port: 4370,
+          location: 'ER',
+          enabled: true,
+          autoSyncEnabled: true,
+        },
+      });
+      assert.equal(staffPostRes.status, 403);
+
+      const staffPutRes = await invokeGatewayRoute(app, {
+        method: 'PUT',
+        url: `/api/Sam_Att/scanners/${scanner1.id}`,
+        headers: staffHeaders,
+        body: {
+          machineNo: 1,
+          name: 'Staff Edit Attempt',
+          ip: '192.168.10.211',
+          port: 4375,
+          location: 'OPD',
+          enabled: true,
+          autoSyncEnabled: true,
+        },
+      });
+      assert.equal(staffPutRes.status, 403);
+
+      const staffPatchRes = await invokeGatewayRoute(app, {
+        method: 'PATCH',
+        url: `/api/Sam_Att/scanners/${scanner1.id}/enabled`,
+        headers: staffHeaders,
+        body: { enabled: false },
+      });
+      assert.equal(staffPatchRes.status, 403);
+
+      const staffDeleteRes = await invokeGatewayRoute(app, {
+        method: 'DELETE',
+        url: `/api/Sam_Att/scanners/${scanner1.id}`,
+        headers: staffHeaders,
+      });
+      assert.equal(staffDeleteRes.status, 403);
+
+      // Test Case #8: GENERAL_USER denied on all /scanners endpoints (403)
+      const genGetRes = await invokeGatewayRoute(app, {
+        method: 'GET',
+        url: '/api/Sam_Att/scanners',
+        headers: generalHeaders,
+      });
+      assert.equal(genGetRes.status, 403);
+
+      const genPostRes = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/scanners',
+        headers: generalHeaders,
+        body: {
+          machineNo: 6,
+          name: 'General Unauthorized Scanner',
+          ip: '192.168.10.206',
+          port: 4370,
+          location: 'IPD',
+          enabled: true,
+          autoSyncEnabled: true,
+        },
+      });
+      assert.equal(genPostRes.status, 403);
+
+      const genDeleteRes = await invokeGatewayRoute(app, {
+        method: 'DELETE',
+        url: `/api/Sam_Att/scanners/${scanner1.id}`,
+        headers: generalHeaders,
+      });
+      assert.equal(genDeleteRes.status, 403);
+
+      // Test Case #11: Scanner remains registered after synchronization (even when another scanner has 0 raw scans)
+      const syncRes = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/scanners/sync',
+        headers: adminHeaders,
+        body: {
+          scans: [
+            {
+              machineNo: 1,
+              enrollNumber: 101,
+              scanDateTime: '2026-10-15 07:55:00',
+              verifyMode: 1,
+              inOutMode: 1,
+              workCode: null,
+            },
+            {
+              machineNo: 1,
+              enrollNumber: 101,
+              scanDateTime: '2026-10-15 16:05:00',
+              verifyMode: 1,
+              inOutMode: 2,
+              workCode: null,
+            },
+          ],
+        },
+      });
+      assert.equal(syncRes.status, 200);
+      assert.equal(syncRes.body.newScansCount, 2);
+
+      const listAfterSync = await invokeGatewayRoute(app, {
+        method: 'GET',
+        url: '/api/Sam_Att/scanners',
+        headers: adminHeaders,
+      });
+      assert.equal(listAfterSync.status, 200);
+      assert.equal(listAfterSync.body.total, 2, 'Both scanners (including machineNo 99 with 0 scans) must remain registered after sync');
+      const syncedScanner1 = listAfterSync.body.scanners.find((s: any) => s.machineNo === 1);
+      const zeroScanScanner99 = listAfterSync.body.scanners.find((s: any) => s.machineNo === 99);
+      assert.ok(syncedScanner1.lastSyncAt, 'Synced scanner #1 must have lastSyncAt updated');
+      assert.equal(syncedScanner1.lastEventAt, '2026-10-15 16:05:00');
+      assert.ok(zeroScanScanner99, 'Scanner #99 with zero raw scans must remain visible after sync');
+      assert.equal(zeroScanScanner99.name, 'เครื่องสแกนอาคารผู้ป่วยในใหม่ (ยังไม่มีข้อมูลสแกน)');
+
+      // Test Case #12: Scanner remains registered after repository or application restart
+      const restartedRepo = new SamAttRepository(undefined, {
+        mode: 'TEST',
+        persistenceFilePath: persistenceFile,
+      });
+      const restartedApp = express();
+      restartedApp.use('/api/Sam_Att', createSamAttRouter(restartedRepo));
+
+      const listAfterRestart = await invokeGatewayRoute(restartedApp, {
+        method: 'GET',
+        url: '/api/Sam_Att/scanners',
+        headers: adminHeaders,
+      });
+      assert.equal(listAfterRestart.status, 200);
+      assert.equal(listAfterRestart.body.total, 2);
+      assert.equal(listAfterRestart.body.scanners[0].machineNo, 1);
+      assert.equal(listAfterRestart.body.scanners[0].port, 4375);
+      assert.equal(listAfterRestart.body.scanners[1].machineNo, 99);
+
+      // Test Case #5: Delete scanner and verify 100% of Raw Scans and Attendance records are preserved
+      const rawScansBeforeDelete = await invokeGatewayRoute(restartedApp, {
+        method: 'GET',
+        url: '/api/Sam_Att/raw-scans?machineNo=1',
+        headers: adminHeaders,
+      });
+      assert.equal(rawScansBeforeDelete.status, 200);
+      assert.equal(rawScansBeforeDelete.body.total, 2);
+
+      const deleteRes = await invokeGatewayRoute(restartedApp, {
+        method: 'DELETE',
+        url: `/api/Sam_Att/scanners/${scanner1.id}`,
+        headers: adminHeaders,
+      });
+      assert.equal(deleteRes.status, 200);
+      assert.equal(deleteRes.body.deleted, true);
+      assert.equal(deleteRes.body.scanner.id, scanner1.id);
+
+      // Deleting non-existent scanner returns 404
+      const deleteAgainRes = await invokeGatewayRoute(restartedApp, {
+        method: 'DELETE',
+        url: `/api/Sam_Att/scanners/${scanner1.id}`,
+        headers: adminHeaders,
+      });
+      assert.equal(deleteAgainRes.status, 404);
+      assert.equal(deleteAgainRes.body.code, 'SAM_ATT_SCANNER_NOT_FOUND');
+
+      // Scanner #1 is removed from registry while Scanner #99 remains
+      const listAfterDelete = await invokeGatewayRoute(restartedApp, {
+        method: 'GET',
+        url: '/api/Sam_Att/scanners',
+        headers: adminHeaders,
+      });
+      assert.equal(listAfterDelete.body.total, 1);
+      assert.equal(listAfterDelete.body.scanners[0].machineNo, 99);
+
+      // Historical Raw Scans from machineNo 1 are 100% preserved
+      const rawScansAfterDelete = await invokeGatewayRoute(restartedApp, {
+        method: 'GET',
+        url: '/api/Sam_Att/raw-scans?machineNo=1',
+        headers: adminHeaders,
+      });
+      assert.equal(rawScansAfterDelete.status, 200);
+      assert.equal(rawScansAfterDelete.body.total, 2, 'Deleting a scanner device must never delete historical Raw Scans');
+
+      // Test Case #9: Database failure returns an error (HTTP 503) without mock fallback + MySqlSamAttRepository parameterized SQL verification
+      const origSecret = process.env.SAM_ATT_JWT_SECRET;
+      process.env.SAM_ATT_JWT_SECRET =
+        'samchuk_hospital_a93_3_scanner_registry_secret_key_min_32_chars';
+      try {
+        const executeBrokenScannerSql = async <T = any>(
+          sql: string
+        ): Promise<[T, any]> => {
+          const norm = sql.trim();
+          if (norm.includes('revoked_sessions')) {
+            return [[] as unknown as T, []];
+          }
+          if (norm.includes('FROM users')) {
+            return [
+              [
+                {
+                  id: 'USR_ADMIN',
+                  username: 'admin_test',
+                  password_hash: '',
+                  full_name: 'นายสมศักดิ์ บริหารงาน',
+                  role: 'ADMIN',
+                  person_id: null,
+                  department: 'HR',
+                  position: 'Admin',
+                  active: 1,
+                },
+              ] as unknown as T,
+              [],
+            ];
+          }
+          throw new DatabaseUnavailableError(
+            'MySQL scanner_devices connection failed: ECONNREFUSED 127.0.0.1:3306'
+          );
+        };
+        const brokenPool: SqlConnectionPool = {
+          execute: executeBrokenScannerSql,
+          async getConnection(): Promise<SqlQueryableConnection> {
+            return {
+              execute: executeBrokenScannerSql,
+              async beginTransaction() {},
+              async commit() {},
+              async rollback() {},
+              release() {},
+            };
+          },
+          async end() {},
+        };
+        const brokenMysqlRepo = new MySqlSamAttRepository(brokenPool);
+        const brokenApp = express();
+        brokenApp.use('/api/Sam_Att', createSamAttRouter(brokenMysqlRepo));
+
+        const validProdToken = AuthService.issueSignedToken(
+          {
+            id: 'USR_ADMIN',
+            username: 'admin_test',
+            passwordHash: '',
+            fullName: 'นายสมศักดิ์ บริหารงาน',
+            role: 'ADMIN',
+            personId: null,
+            department: 'HR',
+            position: 'Admin',
+            active: true,
+          },
+          3600,
+          'REAL'
+        );
+
+        const dbFailGetRes = await invokeGatewayRoute(brokenApp, {
+          method: 'GET',
+          url: '/api/Sam_Att/scanners',
+          headers: { Authorization: `Bearer ${validProdToken}` },
+        });
+        assert.equal(dbFailGetRes.status, 503);
+        assert.equal(dbFailGetRes.body.code, 'SAM_ATT_MYSQL_UNAVAILABLE');
+        assert.equal(
+          dbFailGetRes.body.scanners,
+          undefined,
+          'Must never return mock scanner fallback when MySQL fails'
+        );
+
+        const dbFailPostRes = await invokeGatewayRoute(brokenApp, {
+          method: 'POST',
+          url: '/api/Sam_Att/scanners',
+          headers: { Authorization: `Bearer ${validProdToken}` },
+          body: {
+            machineNo: 7,
+            name: 'Scanner When DB Down',
+            ip: '192.168.10.207',
+            port: 4370,
+            location: 'OPD',
+            enabled: true,
+            autoSyncEnabled: true,
+          },
+        });
+        assert.equal(dbFailPostRes.status, 503);
+        assert.equal(dbFailPostRes.body.code, 'SAM_ATT_MYSQL_UNAVAILABLE');
+      } finally {
+        if (origSecret !== undefined) process.env.SAM_ATT_JWT_SECRET = origSecret;
+        else delete process.env.SAM_ATT_JWT_SECRET;
+      }
+
+      // Verify Migration 002 file exists and is strictly non-destructive
+      const mig002Path = path.resolve(
+        process.cwd(),
+        'database',
+        'migrations',
+        '002_a93_3_scanner_devices_safe_migration.sql'
+      );
+      assert.equal(fs.existsSync(mig002Path), true);
+      const mig002Sql = fs.readFileSync(mig002Path, 'utf8');
+      assert.equal(/DROP\s+TABLE/i.test(mig002Sql), false, 'Migration 002 must not contain DROP TABLE');
+      assert.equal(/TRUNCATE/i.test(mig002Sql), false, 'Migration 002 must not contain TRUNCATE');
+      assert.equal(mig002Sql.includes('scanner_devices'), true);
+      assert.equal(mig002Sql.includes('uq_scanner_devices_machine_no'), true);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });
+
+
 
 
 

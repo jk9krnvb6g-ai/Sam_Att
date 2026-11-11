@@ -143,6 +143,7 @@ class MockAttendanceService {
         assignmentsRes,
         attendanceList,
         rawScansList,
+        scannersRes,
         pushBatchesRes,
         logsRes,
       ] = await Promise.all([
@@ -151,6 +152,7 @@ class MockAttendanceService {
         apiAttendanceAdapter.fetchShiftAssignments(),
         apiAttendanceAdapter.fetchAllAttendance(),
         apiAttendanceAdapter.fetchAllRawScans(),
+        apiAttendanceAdapter.fetchScanners(),
         apiAttendanceAdapter.fetchPushHistory(),
         apiAttendanceAdapter.fetchSystemLogs(200),
       ]);
@@ -225,25 +227,16 @@ class MockAttendanceService {
         responseSummary: b.note,
       }));
 
-      // Derive scanner devices strictly from real rawScans machineNo values
-      const distinctMachineNos = Array.from(
-        new Set(this.rawScans.map((r) => r.machineNo))
-      ).sort((a, b) => a - b);
-      this.scanners = distinctMachineNos.map((machineNo) => {
-        const machineScans = this.rawScans.filter((r) => r.machineNo === machineNo);
+      // Load persistent scanner devices from Backend Scanner Registry (`GET /api/Sam_Att/scanners`)
+      // Scanners with 0 raw scans remain registered and visible; never overwrite with derived rawScans!
+      this.scanners = (scannersRes || []).map((scanner) => {
+        const machineScans = this.rawScans.filter(
+          (r) => r.machineNo === scanner.machineNo
+        );
         return {
-          id: `SC_${machineNo}`,
-          machineNo,
-          name: `เครื่องสแกนหมายเลข #${machineNo}`,
-          ip: '-',
-          port: 4370,
-          location: `จุดติดตั้งเครื่องสแกน #${machineNo}`,
-          enabled: true,
-          autoSyncEnabled: true,
-          lastSyncAt: machineScans[0]?.importedAt || null,
-          lastEventAt: machineScans[0]?.scanDateTime || null,
-          lastError: null,
-          status: 'ONLINE',
+          ...scanner,
+          lastSyncAt: scanner.lastSyncAt || machineScans[0]?.importedAt || null,
+          lastEventAt: scanner.lastEventAt || machineScans[0]?.scanDateTime || null,
         };
       });
 
@@ -531,6 +524,20 @@ class MockAttendanceService {
 
   public getScanners(): ScannerDevice[] {
     return [...this.scanners].sort((a, b) => a.machineNo - b.machineNo);
+  }
+
+  public setScannersFromApi(scanners: ScannerDevice[]): void {
+    this.scanners = scanners.map((scanner) => {
+      const machineScans = this.rawScans.filter(
+        (r) => r.machineNo === scanner.machineNo
+      );
+      return {
+        ...scanner,
+        lastSyncAt: scanner.lastSyncAt || machineScans[0]?.importedAt || null,
+        lastEventAt: scanner.lastEventAt || machineScans[0]?.scanDateTime || null,
+      };
+    });
+    this.notifyHydrated();
   }
 
   public saveScannerDevice(device: Partial<ScannerDevice> & { machineNo: number; name: string; ip: string; port: number; location: string }): ScannerDevice {

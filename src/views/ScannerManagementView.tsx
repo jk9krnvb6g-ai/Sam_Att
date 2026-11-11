@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { mockAttendanceService } from '../services/mockAttendanceService';
+import { apiAttendanceAdapter } from '../services/apiAttendanceAdapter';
 import { ScannerDevice, SyncScheduleSlot } from '../types/attendance';
 import { SharedModal } from '../components/common/SharedModal';
 import {
@@ -14,6 +15,7 @@ import {
   Power,
   Cpu,
   Eye,
+  AlertCircle,
 } from 'lucide-react';
 
 export const ScannerManagementView: React.FC = () => {
@@ -33,6 +35,12 @@ export const ScannerManagementView: React.FC = () => {
     ok: boolean;
   } | null>(null);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [apiError, setApiError] = useState<string | null>(null);
+  const [modalError, setModalError] = useState<string | null>(null);
+  const [isLoadingScanners, setIsLoadingScanners] = useState(false);
+  const [isSubmittingScanner, setIsSubmittingScanner] = useState(false);
+  const [pendingDeviceId, setPendingDeviceId] = useState<string | null>(null);
+  const [isRefreshingAll, setIsRefreshingAll] = useState(false);
 
   // Scanner Detail Popup
   const [selectedScannerPopup, setSelectedScannerPopup] =
@@ -54,77 +62,219 @@ export const ScannerManagementView: React.FC = () => {
     setSchedules(mockAttendanceService.getSyncSchedules());
   };
 
-  // Test connection
-  const handleTestConnection = (device: ScannerDevice, e?: React.MouseEvent) => {
+  const reloadScannersFromBackend = async () => {
+    setIsLoadingScanners(true);
+    try {
+      const remoteScanners = await apiAttendanceAdapter.fetchScanners();
+      mockAttendanceService.setScannersFromApi(remoteScanners);
+      setScanners(mockAttendanceService.getScanners());
+      setApiError(null);
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'ไม่สามารถโหลดข้อมูลทะเบียนเครื่องสแกนจากฐานข้อมูลได้';
+      setApiError(message);
+    } finally {
+      setIsLoadingScanners(false);
+    }
+  };
+
+  useEffect(() => {
+    void reloadScannersFromBackend();
+    const handleHydrated = () => {
+      setScanners(mockAttendanceService.getScanners());
+      setSchedules(mockAttendanceService.getSyncSchedules());
+    };
+    window.addEventListener('sam-att-data-hydrated', handleHydrated);
+    return () => {
+      window.removeEventListener('sam-att-data-hydrated', handleHydrated);
+    };
+  }, []);
+
+  // Verify persistent registry record & ingested raw scans for this device
+  const handleTestConnection = async (
+    device: ScannerDevice,
+    e?: React.MouseEvent
+  ) => {
     e?.stopPropagation();
+    if (testingId) return;
     setTestingId(device.id);
     setTestResult(null);
+    setApiError(null);
 
-    setTimeout(() => {
-      setTestingId(null);
+    try {
+      const [registryList, rawScanRes] = await Promise.all([
+        apiAttendanceAdapter.fetchScanners(),
+        apiAttendanceAdapter.fetchRawScans({
+          machineNo: device.machineNo,
+          page: 1,
+          pageSize: 5,
+        }),
+      ]);
+      mockAttendanceService.setScannersFromApi(registryList);
+      setScanners(mockAttendanceService.getScanners());
+
+      const registered = registryList.find((s) => s.id === device.id);
+      if (!registered) {
+        const msg = `ไม่พบเครื่องสแกน #${device.machineNo} ในตาราง scanner_devices ของฐานข้อมูล`;
+        setTestResult({ id: device.id, message: msg, ok: false });
+        setApiError(msg);
+        return;
+      }
+
+      const latestScan =
+        rawScanRes.items[0]?.scanDateTime ||
+        registered.lastEventAt ||
+        'ยังไม่มีรายการสแกนดิบ';
       setTestResult({
         id: device.id,
-        message: `ตรวจสอบการตั้งค่าสำเร็จ: IP ${device.ip}:${device.port} พร้อมเชื่อมโยงกับ Scanner Reader EXE บน Host Server`,
+        message: `ตรวจสอบทะเบียนฐานข้อมูลสำเร็จ: IP ${registered.ip}:${registered.port} (พบสแกนดิบสะสม ${rawScanRes.total} รายการ • ล่าสุด: ${latestScan}) — การดึงข้อมูล TCP :4370 ดำเนินการโดย Scanner Reader EXE บน Host Server`,
         ok: true,
       });
-    }, 350);
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'ตรวจสอบสถานะเครื่องสแกนจากฐานข้อมูลไม่สำเร็จ';
+      setTestResult({ id: device.id, message, ok: false });
+      setApiError(message);
+    } finally {
+      setTestingId(null);
+    }
   };
 
-  // Manual sync single device
-  const handleSyncDevice = async (device: ScannerDevice, e?: React.MouseEvent) => {
+  // Refresh single device's real ingested scans and registry status from backend
+  const handleSyncDevice = async (
+    device: ScannerDevice,
+    e?: React.MouseEvent
+  ) => {
     e?.stopPropagation();
-    await mockAttendanceService.hydrateFromRealApi('ADMIN');
-    const result = mockAttendanceService.triggerMockScannerSync(
-      device.machineNo
-    );
-    setToastMsg(
-      `อัปเดตสถานะซิงค์เครื่อง #${device.machineNo} (${device.name}) เสร็จสิ้น: ข้อมูลสแกนในระบบ ${result.totalRead} รายการ`
-    );
-    reloadData();
+    if (pendingDeviceId || isRefreshingAll) return;
+    setPendingDeviceId(device.id);
+    setApiError(null);
+    setToastMsg(null);
+
+    try {
+      await mockAttendanceService.hydrateFromRealApi(currentUser?.role);
+      await reloadScannersFromBackend();
+      const machineScansCount = mockAttendanceService
+        .getRawScans()
+        .filter((r) => r.machineNo === device.machineNo).length;
+      setToastMsg(
+        `รีเฟรชข้อมูลจริงจากฐานข้อมูลสำหรับเครื่อง #${device.machineNo} (${device.name}) สำเร็จ: พบข้อมูลสแกนดิบของเครื่องนี้ ${machineScansCount} รายการ`
+      );
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'ไม่สามารถรีเฟรชข้อมูลเครื่องสแกนจากฐานข้อมูลได้';
+      setApiError(message);
+    } finally {
+      setPendingDeviceId(null);
+    }
   };
 
-  // Save Scanner (Add or Edit)
-  const handleSaveScanner = (e: React.FormEvent) => {
+  // Save Scanner (Add or Edit via real Backend API)
+  const handleSaveScanner = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingScanner) return;
-    mockAttendanceService.saveScannerDevice({
-      id: isNewScanner ? undefined : editingScanner.id,
-      machineNo: editingScanner.machineNo,
-      name: editingScanner.name,
-      ip: editingScanner.ip,
-      port: editingScanner.port,
-      location: editingScanner.location,
-      enabled: editingScanner.enabled,
-      autoSyncEnabled: editingScanner.autoSyncEnabled,
-    });
-    reloadData();
-    setEditingScanner(null);
-    setToastMsg(
-      `${isNewScanner ? 'เพิ่ม' : 'แก้ไข'}เครื่องสแกน #${editingScanner.machineNo} (${editingScanner.name}) เรียบร้อยแล้ว`
-    );
+    if (!editingScanner || isSubmittingScanner) return;
+
+    setIsSubmittingScanner(true);
+    setModalError(null);
+    setApiError(null);
+    setToastMsg(null);
+
+    const payload = {
+      machineNo: Number(editingScanner.machineNo),
+      name: editingScanner.name.trim(),
+      ip: editingScanner.ip.trim(),
+      port: Number(editingScanner.port) || 4370,
+      location: editingScanner.location.trim(),
+      enabled: Boolean(editingScanner.enabled),
+      autoSyncEnabled: Boolean(editingScanner.autoSyncEnabled),
+    };
+
+    try {
+      if (isNewScanner) {
+        await apiAttendanceAdapter.createScanner(payload);
+      } else {
+        await apiAttendanceAdapter.updateScanner(editingScanner.id, payload);
+      }
+      await reloadScannersFromBackend();
+      setEditingScanner(null);
+      setToastMsg(
+        `${isNewScanner ? 'เพิ่ม' : 'แก้ไข'}เครื่องสแกน #${payload.machineNo} (${payload.name}) ลงฐานข้อมูลเรียบร้อยแล้ว`
+      );
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'ไม่สามารถบันทึกข้อมูลเครื่องสแกนลงฐานข้อมูลได้';
+      setModalError(message);
+      setApiError(message);
+    } finally {
+      setIsSubmittingScanner(false);
+    }
   };
 
-  // Toggle Scanner Enabled
-  const handleToggleScannerEnabled = (
+  // Toggle Scanner Enabled via real Backend API (`PATCH /api/Sam_Att/scanners/:id/enabled`)
+  const handleToggleScannerEnabled = async (
     device: ScannerDevice,
     e: React.MouseEvent
   ) => {
     e.stopPropagation();
-    if (!isAdmin) return;
-    const updated = mockAttendanceService.toggleScannerEnabled(device.id);
-    reloadData();
-    setToastMsg(
-      `${updated?.enabled ? 'เปิดใช้งาน' : 'ปิดใช้งาน'}เครื่องสแกน #${device.machineNo} เรียบร้อยแล้ว`
-    );
+    if (!isAdmin || pendingDeviceId) return;
+    setPendingDeviceId(device.id);
+    setApiError(null);
+    setToastMsg(null);
+
+    try {
+      const updated = await apiAttendanceAdapter.setScannerEnabled(
+        device.id,
+        !device.enabled
+      );
+      await reloadScannersFromBackend();
+      setToastMsg(
+        `${updated.enabled ? 'เปิดใช้งาน' : 'ปิดใช้งาน'}เครื่องสแกน #${updated.machineNo} (${updated.name}) ในฐานข้อมูลเรียบร้อยแล้ว`
+      );
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'ไม่สามารถเปลี่ยนสถานะเครื่องสแกนในฐานข้อมูลได้';
+      setApiError(message);
+    } finally {
+      setPendingDeviceId(null);
+    }
   };
 
-  // Delete Scanner
-  const handleDeleteScanner = (device: ScannerDevice, e: React.MouseEvent) => {
+  // Delete Scanner via real Backend API (`DELETE /api/Sam_Att/scanners/:id`)
+  const handleDeleteScanner = async (
+    device: ScannerDevice,
+    e: React.MouseEvent
+  ) => {
     e.stopPropagation();
-    if (!isAdmin) return;
-    mockAttendanceService.deleteScannerDevice(device.id);
-    reloadData();
-    setToastMsg(`ลบเครื่องสแกน ${device.name} ออกจากรายการแล้ว`);
+    if (!isAdmin || pendingDeviceId) return;
+    setPendingDeviceId(device.id);
+    setApiError(null);
+    setToastMsg(null);
+
+    try {
+      await apiAttendanceAdapter.deleteScanner(device.id);
+      await reloadScannersFromBackend();
+      setToastMsg(
+        `ลบเครื่องสแกน #${device.machineNo} (${device.name}) ออกจากทะเบียนฐานข้อมูลแล้ว (คงข้อมูลสแกนดิบและเวลาปฏิบัติงานเดิมไว้ทั้งหมด)`
+      );
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'ไม่สามารถลบเครื่องสแกนออกจากฐานข้อมูลได้';
+      setApiError(message);
+    } finally {
+      setPendingDeviceId(null);
+    }
   };
 
   // Save Schedule (Add or Edit)
@@ -175,7 +325,7 @@ export const ScannerManagementView: React.FC = () => {
             จัดการเครื่องสแกนนิ้วและรอบดึงข้อมูลอัตโนมัติ (Scanner Devices)
           </h1>
           <p className="text-xs text-slate-500 mt-0.5">
-            กำหนดค่าเครื่องสแกน ทดสอบการเชื่อมต่อ และตั้งเวลารอบการดึงสแกนอัตโนมัติ (คลิกที่การ์ดเครื่องสแกนเพื่อดูรายละเอียด Popup)
+            กำหนดค่าเครื่องสแกนลงฐานข้อมูล MySQL (`scanner_devices`) ตรวจสอบสถานะ และตั้งเวลารอบการดึงสแกนอัตโนมัติ (คลิกที่การ์ดเครื่องสแกนเพื่อดูรายละเอียด Popup)
           </p>
         </div>
 
@@ -189,6 +339,7 @@ export const ScannerManagementView: React.FC = () => {
                     ? Math.max(...scanners.map((s) => s.machineNo)) + 1
                     : 1;
                 setIsNewScanner(true);
+                setModalError(null);
                 setEditingScanner({
                   id: '',
                   machineNo: nextNo,
@@ -204,7 +355,8 @@ export const ScannerManagementView: React.FC = () => {
                   status: 'ONLINE',
                 });
               }}
-              className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-violet-800 bg-violet-50 hover:bg-violet-100 border border-violet-200 rounded-xl transition-colors cursor-pointer"
+              disabled={isSubmittingScanner || isLoadingScanners}
+              className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-violet-800 bg-violet-50 hover:bg-violet-100 border border-violet-200 rounded-xl transition-colors cursor-pointer disabled:opacity-50"
             >
               <Plus className="w-3.5 h-3.5" />
               <span>เพิ่มเครื่องสแกน</span>
@@ -213,20 +365,56 @@ export const ScannerManagementView: React.FC = () => {
 
           <button
             onClick={async () => {
-              await mockAttendanceService.hydrateFromRealApi('ADMIN');
-              const res = mockAttendanceService.triggerMockScannerSync();
-              setToastMsg(
-                `รีเฟรชข้อมูลสแกนทุกเครื่องเสร็จสิ้น: ข้อมูลสแกนในระบบ ${res.totalRead} รายการ`
-              );
-              reloadData();
+              if (isRefreshingAll) return;
+              setIsRefreshingAll(true);
+              setApiError(null);
+              setToastMsg(null);
+              try {
+                await mockAttendanceService.hydrateFromRealApi(currentUser?.role);
+                await reloadScannersFromBackend();
+                const latestScanners = mockAttendanceService.getScanners();
+                const rawScansCount = mockAttendanceService.getRawScans().length;
+                setToastMsg(
+                  `รีเฟรชทะเบียนเครื่องสแกน (${latestScanners.length} เครื่อง) และข้อมูลสแกนดิบในระบบ (${rawScansCount} รายการ) จากฐานข้อมูลจริงเสร็จสิ้น`
+                );
+              } catch (err: unknown) {
+                const message =
+                  err instanceof Error
+                    ? err.message
+                    : 'ไม่สามารถรีเฟรชข้อมูลเครื่องสแกนและสแกนดิบจากฐานข้อมูลได้';
+                setApiError(message);
+              } finally {
+                setIsRefreshingAll(false);
+              }
             }}
-            className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-white bg-[#6D28D9] hover:bg-[#5B21B6] rounded-xl shadow-xs transition-colors cursor-pointer"
+            disabled={isRefreshingAll || isLoadingScanners}
+            className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-white bg-[#6D28D9] hover:bg-[#5B21B6] rounded-xl shadow-xs transition-colors cursor-pointer disabled:opacity-50"
           >
             <Zap className="w-3.5 h-3.5 text-amber-300" />
-            <span>ดึงสแกนทันทีทุกเครื่อง (Sync All)</span>
+            <span>
+              {isRefreshingAll
+                ? 'กำลังรีเฟรชข้อมูล...'
+                : 'รีเฟรชข้อมูลสแกนทุกเครื่อง (Sync All)'}
+            </span>
           </button>
         </div>
       </div>
+
+      {/* API Error Banner */}
+      {apiError && (
+        <div className="bg-rose-50 border border-rose-200 rounded-xl p-3.5 text-xs text-rose-900 flex items-center justify-between">
+          <div className="flex items-center gap-2 font-medium">
+            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+            <span>{apiError}</span>
+          </div>
+          <button
+            onClick={() => setApiError(null)}
+            className="text-xs font-semibold text-rose-700 hover:text-rose-900 px-2.5 py-1 bg-white border border-rose-200 rounded-lg cursor-pointer"
+          >
+            ปิด
+          </button>
+        </div>
+      )}
 
       {/* Sync Toast */}
       {toastMsg && (
@@ -255,7 +443,7 @@ export const ScannerManagementView: React.FC = () => {
             <strong>ใช้ Scanner Reader EXE ตัวเดิมที่โรงพยาบาลมีอยู่</strong> ห้ามสร้าง แก้ไข หรือเปลี่ยน EXE
           </li>
           <li>
-            Backend adapter ทำงานฝั่ง Server ด้วย Fixed Executable Path และ Arguments ที่ปลอดภัย
+            รายการเครื่องสแกนถูกจัดเก็บอย่างถาวรในฐานข้อมูล <strong>samchuk_attendance_v2 (ตาราง scanner_devices)</strong> ไม่สูญหายเมื่อรีเฟรชหรือยังไม่มีข้อมูลสแกน
           </li>
           <li>
             ไม่เปิด HTTP Listener ใหม่สำหรับเครื่องสแกน และไม่ให้ Frontend ส่ง Arbitrary shell command
@@ -267,143 +455,170 @@ export const ScannerManagementView: React.FC = () => {
       </div>
 
       {/* Scanner List Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-        {scanners.map((sc) => (
-          <div
-            key={sc.id}
-            onClick={() => setSelectedScannerPopup(sc)}
-            className="bg-white border border-[#E9E5F2] hover:border-violet-400 rounded-2xl p-5 shadow-xs flex flex-col justify-between transition-all cursor-pointer group"
-          >
-            <div>
-              <div className="flex items-center justify-between mb-2.5">
-                <span className="font-mono text-xs font-bold px-2.5 py-0.5 rounded-md bg-violet-50 text-violet-800 border border-violet-200">
-                  machineNo: {sc.machineNo}
-                </span>
-                <div className="flex items-center gap-1.5">
-                  <span
-                    className={`inline-flex items-center text-xs font-semibold px-2 py-0.5 rounded-md border ${
-                      sc.enabled && sc.status === 'ONLINE'
-                        ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                        : 'bg-slate-100 text-slate-600 border-slate-200'
-                    }`}
-                  >
+      {scanners.length === 0 ? (
+        <div className="bg-white border border-[#E9E5F2] rounded-2xl p-8 text-center shadow-xs">
+          <Cpu className="w-8 h-8 text-violet-400 mx-auto mb-2" />
+          <p className="text-sm font-bold text-slate-800">
+            {isLoadingScanners
+              ? 'กำลังโหลดทะเบียนเครื่องสแกนจากฐานข้อมูล...'
+              : 'ยังไม่มีเครื่องสแกนลงทะเบียนในฐานข้อมูล'}
+          </p>
+          <p className="text-xs text-slate-500 mt-1">
+            {isAdmin
+              ? 'คลิกปุ่ม "เพิ่มเครื่องสแกน" ด้านบนเพื่อบันทึกเครื่องสแกนนิ้วลงตาราง scanner_devices'
+              : 'กรุณาติดต่อผู้ดูแลระบบ (ADMIN) เพื่อเพิ่มเครื่องสแกนนิ้วในระบบ'}
+          </p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+          {scanners.map((sc) => (
+            <div
+              key={sc.id}
+              onClick={() => setSelectedScannerPopup(sc)}
+              className="bg-white border border-[#E9E5F2] hover:border-violet-400 rounded-2xl p-5 shadow-xs flex flex-col justify-between transition-all cursor-pointer group"
+            >
+              <div>
+                <div className="flex items-center justify-between mb-2.5">
+                  <span className="font-mono text-xs font-bold px-2.5 py-0.5 rounded-md bg-violet-50 text-violet-800 border border-violet-200">
+                    machineNo: {sc.machineNo}
+                  </span>
+                  <div className="flex items-center gap-1.5">
                     <span
-                      className={`w-1.5 h-1.5 rounded-full mr-1 ${
+                      className={`inline-flex items-center text-xs font-semibold px-2 py-0.5 rounded-md border ${
                         sc.enabled && sc.status === 'ONLINE'
-                          ? 'bg-emerald-600'
-                          : 'bg-slate-400'
+                          ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                          : 'bg-slate-100 text-slate-600 border-slate-200'
                       }`}
-                    />
-                    {sc.enabled ? sc.status : 'DISABLED'}
-                  </span>
-                </div>
-              </div>
-
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <h2 className="text-sm font-bold text-slate-900 group-hover:text-violet-700 transition-colors">
-                    {sc.name}
-                  </h2>
-                  <p className="text-xs text-slate-500 mb-3 mt-0.5">
-                    {sc.location}
-                  </p>
-                </div>
-                <Eye className="w-4 h-4 text-slate-300 group-hover:text-violet-600 shrink-0" />
-              </div>
-
-              <div className="bg-slate-50 border border-slate-100 rounded-xl p-3 text-xs font-mono space-y-1.5 text-slate-600">
-                <div className="flex justify-between">
-                  <span className="text-slate-400">IP Address:</span>
-                  <span className="font-semibold text-slate-800">{sc.ip}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-400">Device Port:</span>
-                  <span className="text-slate-800">{sc.port}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-400">Sync ล่าสุด:</span>
-                  <span className="text-slate-700">
-                    {sc.lastSyncAt?.split(' ')[1] || 'ยังไม่มี'}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-400">Auto Sync:</span>
-                  <span
-                    className={`font-sans font-semibold ${
-                      sc.autoSyncEnabled ? 'text-emerald-700' : 'text-slate-400'
-                    }`}
-                  >
-                    {sc.autoSyncEnabled ? 'เปิดใช้งาน' : 'ปิด Auto Sync'}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            {/* Actions */}
-            <div className="mt-4 pt-3.5 border-t border-slate-100 space-y-2.5">
-              {testResult && testResult.id === sc.id && (
-                <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-[11px] text-emerald-800">
-                  {testResult.message}
-                </div>
-              )}
-
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={(e) => handleTestConnection(sc, e)}
-                  disabled={testingId === sc.id}
-                  className="px-2.5 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer text-center"
-                >
-                  {testingId === sc.id ? 'กำลังทดสอบ...' : 'ทดสอบเชื่อมต่อ'}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={(e) => handleSyncDevice(sc, e)}
-                  className="px-2.5 py-1.5 text-xs font-bold text-violet-800 bg-violet-50 hover:bg-violet-100 border border-violet-200 rounded-lg transition-colors cursor-pointer text-center"
-                >
-                  ดึงสแกนเดี๋ยวนี้
-                </button>
-              </div>
-
-              {isAdmin && (
-                <div className="flex items-center justify-between pt-1.5 border-t border-slate-100 text-[11px]">
-                  <button
-                    type="button"
-                    onClick={(e) => handleToggleScannerEnabled(sc, e)}
-                    className="inline-flex items-center gap-1 font-semibold text-slate-600 hover:text-violet-700 cursor-pointer"
-                  >
-                    <Power className="w-3 h-3" />
-                    {sc.enabled ? 'ปิดใช้งาน' : 'เปิดใช้งาน'}
-                  </button>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setIsNewScanner(false);
-                        setEditingScanner({ ...sc });
-                      }}
-                      className="inline-flex items-center gap-1 font-semibold text-violet-700 hover:text-violet-900 cursor-pointer"
                     >
-                      <Edit3 className="w-3 h-3" />
-                      แก้ไข
-                    </button>
-                    <button
-                      type="button"
-                      onClick={(e) => handleDeleteScanner(sc, e)}
-                      className="inline-flex items-center gap-1 font-semibold text-rose-600 hover:text-rose-800 cursor-pointer"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                      ลบ
-                    </button>
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full mr-1 ${
+                          sc.enabled && sc.status === 'ONLINE'
+                            ? 'bg-emerald-600'
+                            : 'bg-slate-400'
+                        }`}
+                      />
+                      {sc.enabled ? sc.status : 'DISABLED'}
+                    </span>
                   </div>
                 </div>
-              )}
+
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <h2 className="text-sm font-bold text-slate-900 group-hover:text-violet-700 transition-colors">
+                      {sc.name}
+                    </h2>
+                    <p className="text-xs text-slate-500 mb-3 mt-0.5">
+                      {sc.location}
+                    </p>
+                  </div>
+                  <Eye className="w-4 h-4 text-slate-300 group-hover:text-violet-600 shrink-0" />
+                </div>
+
+                <div className="bg-slate-50 border border-slate-100 rounded-xl p-3 text-xs font-mono space-y-1.5 text-slate-600">
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">IP Address:</span>
+                    <span className="font-semibold text-slate-800">{sc.ip}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Device Port:</span>
+                    <span className="text-slate-800">{sc.port}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Sync ล่าสุด:</span>
+                    <span className="text-slate-700">
+                      {sc.lastSyncAt?.split(' ')[1] || sc.lastSyncAt || 'ยังไม่มี'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Auto Sync:</span>
+                    <span
+                      className={`font-sans font-semibold ${
+                        sc.autoSyncEnabled ? 'text-emerald-700' : 'text-slate-400'
+                      }`}
+                    >
+                      {sc.autoSyncEnabled ? 'เปิดใช้งาน' : 'ปิด Auto Sync'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Actions */}
+              <div className="mt-4 pt-3.5 border-t border-slate-100 space-y-2.5">
+                {testResult && testResult.id === sc.id && (
+                  <div
+                    className={`p-2.5 rounded-lg border text-[11px] ${
+                      testResult.ok
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                        : 'bg-rose-50 border-rose-200 text-rose-800'
+                    }`}
+                  >
+                    {testResult.message}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={(e) => handleTestConnection(sc, e)}
+                    disabled={testingId === sc.id}
+                    className="px-2.5 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer text-center disabled:opacity-50"
+                  >
+                    {testingId === sc.id ? 'กำลังตรวจสอบ...' : 'ตรวจสอบสถานะ'}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={(e) => handleSyncDevice(sc, e)}
+                    disabled={pendingDeviceId === sc.id || isRefreshingAll}
+                    className="px-2.5 py-1.5 text-xs font-bold text-violet-800 bg-violet-50 hover:bg-violet-100 border border-violet-200 rounded-lg transition-colors cursor-pointer text-center disabled:opacity-50"
+                  >
+                    {pendingDeviceId === sc.id ? 'กำลังรีเฟรช...' : 'รีเฟรชสแกนเครื่องนี้'}
+                  </button>
+                </div>
+
+                {isAdmin && (
+                  <div className="flex items-center justify-between pt-1.5 border-t border-slate-100 text-[11px]">
+                    <button
+                      type="button"
+                      onClick={(e) => handleToggleScannerEnabled(sc, e)}
+                      disabled={pendingDeviceId === sc.id || isSubmittingScanner}
+                      className="inline-flex items-center gap-1 font-semibold text-slate-600 hover:text-violet-700 cursor-pointer disabled:opacity-50"
+                    >
+                      <Power className="w-3 h-3" />
+                      {sc.enabled ? 'ปิดใช้งาน' : 'เปิดใช้งาน'}
+                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setIsNewScanner(false);
+                          setModalError(null);
+                          setEditingScanner({ ...sc });
+                        }}
+                        disabled={pendingDeviceId === sc.id || isSubmittingScanner}
+                        className="inline-flex items-center gap-1 font-semibold text-violet-700 hover:text-violet-900 cursor-pointer disabled:opacity-50"
+                      >
+                        <Edit3 className="w-3 h-3" />
+                        แก้ไข
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => handleDeleteScanner(sc, e)}
+                        disabled={pendingDeviceId === sc.id || isSubmittingScanner}
+                        className="inline-flex items-center gap-1 font-semibold text-rose-600 hover:text-rose-800 cursor-pointer disabled:opacity-50"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        ลบ
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
 
       {/* Auto-Sync Configuration Box (Daily Sync Schedule) */}
       <div className="bg-white border border-[#E9E5F2] rounded-2xl p-5 shadow-xs space-y-4">
@@ -571,19 +786,21 @@ export const ScannerManagementView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => handleTestConnection(selectedScannerPopup)}
-                className="px-3.5 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 font-semibold text-slate-700 cursor-pointer"
+                disabled={testingId === selectedScannerPopup.id}
+                className="px-3.5 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 font-semibold text-slate-700 cursor-pointer disabled:opacity-50"
               >
-                ทดสอบเชื่อมต่อ (Ping)
+                ตรวจสอบสถานะทะเบียน
               </button>
               <button
                 type="button"
                 onClick={() => {
-                  handleSyncDevice(selectedScannerPopup);
+                  void handleSyncDevice(selectedScannerPopup);
                   setSelectedScannerPopup(null);
                 }}
-                className="px-4 py-2 rounded-xl bg-[#6D28D9] hover:bg-[#5B21B6] text-white font-bold cursor-pointer"
+                disabled={pendingDeviceId === selectedScannerPopup.id}
+                className="px-4 py-2 rounded-xl bg-[#6D28D9] hover:bg-[#5B21B6] text-white font-bold cursor-pointer disabled:opacity-50"
               >
-                ดึงสแกนจากเครื่องนี้ทันที
+                รีเฟรชข้อมูลเครื่องนี้
               </button>
             </div>
           </div>
@@ -593,17 +810,29 @@ export const ScannerManagementView: React.FC = () => {
       {/* Modal 2: Add / Edit Scanner Modal */}
       <SharedModal
         open={!!editingScanner}
-        onClose={() => setEditingScanner(null)}
+        onClose={() => {
+          if (!isSubmittingScanner) {
+            setEditingScanner(null);
+            setModalError(null);
+          }
+        }}
         title={
           isNewScanner
             ? 'เพิ่มเครื่องสแกนลายนิ้วมือใหม่ (Add Scanner Device)'
             : `แก้ไขการตั้งค่าเครื่องสแกน #${editingScanner?.machineNo}`
         }
-        subtitle="กำหนดค่า IP Address, Port และสถานะการดึงข้อมูลอัตโนมัติ (เฉพาะ ADMIN)"
+        subtitle="กำหนดค่า IP Address, Port และสถานะการดึงข้อมูลอัตโนมัติลงฐานข้อมูล MySQL (เฉพาะ ADMIN)"
         maxWidthClass="max-w-lg"
       >
         {editingScanner && (
           <form onSubmit={handleSaveScanner} className="space-y-4 text-xs">
+            {modalError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                <span>{modalError}</span>
+              </div>
+            )}
+
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">
@@ -613,6 +842,7 @@ export const ScannerManagementView: React.FC = () => {
                   type="number"
                   required
                   min={1}
+                  max={9999}
                   value={editingScanner.machineNo}
                   onChange={(e) =>
                     setEditingScanner({
@@ -630,6 +860,8 @@ export const ScannerManagementView: React.FC = () => {
                 <input
                   type="number"
                   required
+                  min={1}
+                  max={65535}
                   value={editingScanner.port}
                   onChange={(e) =>
                     setEditingScanner({
@@ -729,16 +961,21 @@ export const ScannerManagementView: React.FC = () => {
             <div className="flex justify-end gap-2 pt-3 border-t border-slate-200">
               <button
                 type="button"
-                onClick={() => setEditingScanner(null)}
-                className="px-4 py-2 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-100 font-semibold cursor-pointer"
+                disabled={isSubmittingScanner}
+                onClick={() => {
+                  setEditingScanner(null);
+                  setModalError(null);
+                }}
+                className="px-4 py-2 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-100 font-semibold cursor-pointer disabled:opacity-50"
               >
                 ยกเลิก
               </button>
               <button
                 type="submit"
-                className="px-4 py-2 rounded-xl bg-[#6D28D9] hover:bg-[#5B21B6] text-white font-bold shadow-xs cursor-pointer"
+                disabled={isSubmittingScanner}
+                className="px-4 py-2 rounded-xl bg-[#6D28D9] hover:bg-[#5B21B6] text-white font-bold shadow-xs cursor-pointer disabled:opacity-50"
               >
-                บันทึกเครื่องสแกน
+                {isSubmittingScanner ? 'กำลังบันทึก...' : 'บันทึกเครื่องสแกน'}
               </button>
             </div>
           </form>

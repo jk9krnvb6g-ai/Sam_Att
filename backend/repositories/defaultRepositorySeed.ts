@@ -5,6 +5,7 @@
 
 import {
   SamAttRepository,
+  RepositoryScannerDevice,
   RepositoryUserAccount,
   ProductionRepositoryConfigurationError,
 } from './samAttRepository';
@@ -13,6 +14,7 @@ import {
   MOCK_PERSONNEL,
   MOCK_SHIFTS,
   MOCK_SHIFT_ASSIGNMENTS,
+  MOCK_SCANNERS,
   MOCK_RAW_SCANS,
   MOCK_ATTENDANCE,
   MOCK_HISTORICAL_ATTENDANCE,
@@ -104,6 +106,21 @@ export function createDefaultSeededRepository(): SamAttRepository {
     status: 'ACTIVE',
   }));
 
+  const scanners: RepositoryScannerDevice[] = MOCK_SCANNERS.map((sc) => ({
+    id: sc.id,
+    machineNo: sc.machineNo,
+    name: sc.name,
+    ip: sc.ip,
+    port: sc.port,
+    location: sc.location,
+    enabled: sc.enabled,
+    autoSyncEnabled: sc.autoSyncEnabled,
+    status: sc.status,
+    lastSyncAt: sc.lastSyncAt,
+    lastEventAt: sc.lastEventAt,
+    lastError: sc.lastError,
+  }));
+
   const rawScans: RawScanDto[] = MOCK_RAW_SCANS.map((r) => ({
     machineNo: r.machineNo,
     enrollNumber: r.enrollNumber,
@@ -173,6 +190,7 @@ export function createDefaultSeededRepository(): SamAttRepository {
     fingerprintMappings,
     shifts,
     assignments,
+    scanners,
     rawScans,
     attendance,
   });

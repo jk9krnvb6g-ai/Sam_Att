@@ -13,7 +13,11 @@
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
-import { ISamAttRepository } from './repositories/interfaces';
+import {
+  ISamAttRepository,
+  ScannerConflictError,
+  ScannerNotFoundError,
+} from './repositories/interfaces';
 import {
   createRepositoryForMode,
   ProductionRepositoryConfigurationError,
@@ -27,6 +31,116 @@ import { DeploymentCenterService } from './services/deploymentCenterService';
 import { AuthenticatedUser, EngineHRReviewStatus } from './types';
 
 export { ProductionRepositoryConfigurationError };
+
+function isValidScannerIpOrHost(ipRaw: string): boolean {
+  const val = ipRaw.trim();
+  if (!val || val.length > 45 || /\s/.test(val)) return false;
+
+  // Check IPv4
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(val)) {
+    const octets = val.split('.').map(Number);
+    return octets.every((o) => Number.isInteger(o) && o >= 0 && o <= 255);
+  }
+
+  // Check IPv6 (basic hex/colon validation)
+  if (val.includes(':')) {
+    return /^[0-9a-fA-F:]+$/.test(val);
+  }
+
+  // Check hostname
+  return /^[a-zA-Z0-9]([a-zA-Z0-9.-]{0,43}[a-zA-Z0-9])?$/.test(val);
+}
+
+function validateScannerDevicePayload(body: any):
+  | {
+      valid: true;
+      value: {
+        machineNo: number;
+        name: string;
+        ip: string;
+        port: number;
+        location: string;
+        enabled: boolean;
+        autoSyncEnabled: boolean;
+      };
+    }
+  | { valid: false; error: string } {
+  if (!body || typeof body !== 'object') {
+    return { valid: false, error: 'รูปแบบข้อมูลเครื่องสแกนไม่ถูกต้อง' };
+  }
+
+  const machineNo = Number(body.machineNo);
+  if (!Number.isInteger(machineNo) || machineNo < 1 || machineNo > 9999) {
+    return {
+      valid: false,
+      error: 'หมายเลขเครื่อง (machineNo) ต้องเป็นจำนวนเต็มบวก ระหว่าง 1 ถึง 9999',
+    };
+  }
+
+  const name = typeof body.name === 'string' ? body.name.trim() : '';
+  if (!name || name.length > 100) {
+    return {
+      valid: false,
+      error: 'กรุณาระบุชื่อเครื่องสแกน (ความยาว 1–100 ตัวอักษร)',
+    };
+  }
+
+  const ip = typeof body.ip === 'string' ? body.ip.trim() : '';
+  if (!isValidScannerIpOrHost(ip)) {
+    return {
+      valid: false,
+      error: 'กรุณาระบุ IP Address หรือ Hostname ของเครื่องสแกนให้ถูกต้อง (เช่น 192.168.111.163)',
+    };
+  }
+
+  const rawPort = body.port !== undefined ? body.port : body.devicePort ?? 4370;
+  const port = Number(rawPort);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return {
+      valid: false,
+      error: 'Port ของเครื่องสแกนต้องเป็นจำนวนเต็มระหว่าง 1 ถึง 65535',
+    };
+  }
+
+  const location =
+    body.location !== undefined && body.location !== null
+      ? String(body.location).trim()
+      : '';
+  if (location.length > 150) {
+    return {
+      valid: false,
+      error: 'สถานที่ติดตั้ง (location) ต้องมีความยาวไม่เกิน 150 ตัวอักษร',
+    };
+  }
+
+  if (body.enabled !== undefined && typeof body.enabled !== 'boolean') {
+    return {
+      valid: false,
+      error: 'ค่า enabled ต้องเป็นชนิด boolean (true หรือ false)',
+    };
+  }
+
+  if (body.autoSyncEnabled !== undefined && typeof body.autoSyncEnabled !== 'boolean') {
+    return {
+      valid: false,
+      error: 'ค่า autoSyncEnabled ต้องเป็นชนิด boolean (true หรือ false)',
+    };
+  }
+
+  return {
+    valid: true,
+    value: {
+      machineNo,
+      name,
+      ip,
+      port,
+      location,
+      enabled: body.enabled !== undefined ? body.enabled : true,
+      autoSyncEnabled:
+        body.autoSyncEnabled !== undefined ? body.autoSyncEnabled : true,
+    },
+  };
+}
 
 export function createSamAttRouter(customRepository?: ISamAttRepository): Router {
   const isProduction = process.env.NODE_ENV === 'production';
@@ -74,6 +188,20 @@ export function createSamAttRouter(customRepository?: ISamAttRepository): Router
             success: false,
             code: err.code,
             repositoryMode: repo.mode,
+            error: err.message,
+          });
+        }
+        if (err instanceof ScannerConflictError) {
+          return res.status(409).json({
+            success: false,
+            code: err.code,
+            error: err.message,
+          });
+        }
+        if (err instanceof ScannerNotFoundError) {
+          return res.status(404).json({
+            success: false,
+            code: err.code,
             error: err.message,
           });
         }
@@ -566,8 +694,133 @@ export function createSamAttRouter(customRepository?: ISamAttRepository): Router
   );
 
   // ==========================================
-  // 6. Scanner Sync & Immutable Raw Scans (6-Field Contract — §1, §5 & §7)
+  // 6. Scanner Registry & Immutable Raw Scans (6-Field Contract — §1, §5 & §7)
   // ==========================================
+  router.get(
+    '/scanners',
+    staffOrAdmin,
+    asyncRoute(async (_req: Request, res: Response) => {
+      const scanners = await repo.getScanners();
+      res.json({
+        success: true,
+        total: scanners.length,
+        scanners,
+      });
+    })
+  );
+
+  router.post(
+    '/scanners',
+    adminOnly,
+    asyncRoute(async (req: Request, res: Response) => {
+      const user = (req as any).user as AuthenticatedUser;
+      const validation = validateScannerDevicePayload(req.body);
+      if (!validation.valid) {
+        return res.status(400).json({
+          success: false,
+          error: validation.error,
+        });
+      }
+
+      const created = await repo.withTransaction((tx) =>
+        tx.createScanner(validation.value, user.username)
+      );
+
+      res.status(201).json({
+        success: true,
+        scanner: created,
+      });
+    })
+  );
+
+  router.put(
+    '/scanners/:id',
+    adminOnly,
+    asyncRoute(async (req: Request, res: Response) => {
+      const user = (req as any).user as AuthenticatedUser;
+      const scannerId = (req.params.id || '').trim();
+      if (!scannerId) {
+        return res.status(400).json({
+          success: false,
+          error: 'กรุณาระบุรหัสเครื่องสแกน (scanner id)',
+        });
+      }
+
+      const validation = validateScannerDevicePayload(req.body);
+      if (!validation.valid) {
+        return res.status(400).json({
+          success: false,
+          error: validation.error,
+        });
+      }
+
+      const updated = await repo.withTransaction((tx) =>
+        tx.updateScanner(scannerId, validation.value, user.username)
+      );
+
+      res.json({
+        success: true,
+        scanner: updated,
+      });
+    })
+  );
+
+  router.patch(
+    '/scanners/:id/enabled',
+    adminOnly,
+    asyncRoute(async (req: Request, res: Response) => {
+      const user = (req as any).user as AuthenticatedUser;
+      const scannerId = (req.params.id || '').trim();
+      if (!scannerId) {
+        return res.status(400).json({
+          success: false,
+          error: 'กรุณาระบุรหัสเครื่องสแกน (scanner id)',
+        });
+      }
+
+      if (typeof req.body?.enabled !== 'boolean') {
+        return res.status(400).json({
+          success: false,
+          error: 'กรุณาระบุค่า enabled เป็น boolean (true หรือ false)',
+        });
+      }
+
+      const updated = await repo.withTransaction((tx) =>
+        tx.setScannerEnabled(scannerId, req.body.enabled, user.username)
+      );
+
+      res.json({
+        success: true,
+        scanner: updated,
+      });
+    })
+  );
+
+  router.delete(
+    '/scanners/:id',
+    adminOnly,
+    asyncRoute(async (req: Request, res: Response) => {
+      const user = (req as any).user as AuthenticatedUser;
+      const scannerId = (req.params.id || '').trim();
+      if (!scannerId) {
+        return res.status(400).json({
+          success: false,
+          error: 'กรุณาระบุรหัสเครื่องสแกน (scanner id)',
+        });
+      }
+
+      const result = await repo.withTransaction((tx) =>
+        tx.deleteScanner(scannerId, user.username)
+      );
+
+      res.json({
+        success: true,
+        deleted: result.deleted,
+        scanner: result.device,
+      });
+    })
+  );
+
   router.post(
     '/scanners/sync',
     staffOrAdmin,

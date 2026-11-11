@@ -25,14 +25,20 @@ import {
   ValidatedRawScanEvent,
 } from '../types';
 import {
+  CreateScannerDeviceInput,
   ISamAttRepository,
   ParameterizedSqlRecord,
   RepositoryAuditLog,
   RepositoryMode,
   RepositoryPushHistory,
   RepositoryRateLimitEntry,
+  RepositoryScannerDevice,
   RepositoryShiftCancellationLog,
   RepositoryUserAccount,
+  ScannerConflictError,
+  ScannerDeviceStatus,
+  ScannerNotFoundError,
+  UpdateScannerDeviceInput,
 } from './interfaces';
 import {
   MySqlSamAttRepository,
@@ -44,16 +50,25 @@ import { ScannerAdapter, RawScanIngestionSummary } from '../services/scannerAdap
 import { AttendanceCalculator } from '../services/attendanceCalculator';
 
 export type {
+  CreateScannerDeviceInput,
   ISamAttRepository,
   ParameterizedSqlRecord,
   RepositoryAuditLog,
   RepositoryMode,
   RepositoryPushHistory,
   RepositoryRateLimitEntry,
+  RepositoryScannerDevice,
   RepositoryShiftCancellationLog,
   RepositoryUserAccount,
+  ScannerDeviceStatus,
+  UpdateScannerDeviceInput,
 };
-export { MySqlSamAttRepository, DatabaseUnavailableError };
+export {
+  MySqlSamAttRepository,
+  DatabaseUnavailableError,
+  ScannerConflictError,
+  ScannerNotFoundError,
+};
 
 export class ProductionRepositoryConfigurationError extends Error {
   public readonly code = 'SAM_ATT_PRODUCTION_REPO_CONFIG_ERROR';
@@ -70,6 +85,7 @@ interface DatabaseSnapshot {
   shifts: EngineShiftConfig[];
   assignments: EngineShiftAssignment[];
   cancellationLogs: RepositoryShiftCancellationLog[];
+  scanners: RepositoryScannerDevice[];
   rawScans: ValidatedRawScanEvent[];
   attendance: EngineAttendanceRecord[];
   notes: Map<string, EngineHRNote>;
@@ -93,6 +109,7 @@ export class SamAttRepository implements ISamAttRepository {
   private shifts: EngineShiftConfig[] = [];
   private assignments: EngineShiftAssignment[] = [];
   private cancellationLogs: RepositoryShiftCancellationLog[] = [];
+  private scanners: RepositoryScannerDevice[] = [];
   private rawScans: ValidatedRawScanEvent[] = [];
   private attendance: EngineAttendanceRecord[] = [];
   private notes = new Map<string, EngineHRNote>();
@@ -113,6 +130,7 @@ export class SamAttRepository implements ISamAttRepository {
       fingerprintMappings: EngineFingerprintMapping[];
       shifts: EngineShiftConfig[];
       assignments: EngineShiftAssignment[];
+      scanners: RepositoryScannerDevice[];
       rawScans: RawScanDto[];
       attendance: EngineAttendanceRecord[];
     }>,
@@ -144,6 +162,7 @@ export class SamAttRepository implements ISamAttRepository {
     }
     if (seed?.shifts) this.shifts = structuredClone(seed.shifts);
     if (seed?.assignments) this.assignments = structuredClone(seed.assignments);
+    if (seed?.scanners) this.scanners = structuredClone(seed.scanners);
     if (seed?.attendance) {
       this.attendance = structuredClone(seed.attendance);
       for (const rec of this.attendance) {
@@ -177,6 +196,7 @@ export class SamAttRepository implements ISamAttRepository {
       shifts: this.shifts,
       assignments: this.assignments,
       cancellationLogs: this.cancellationLogs,
+      scanners: this.scanners,
       rawScans: this.rawScans,
       attendance: this.attendance,
       notesEntries: Array.from(this.notes.entries()),
@@ -199,6 +219,7 @@ export class SamAttRepository implements ISamAttRepository {
     this.shifts = parsed.shifts || [];
     this.assignments = parsed.assignments || [];
     this.cancellationLogs = parsed.cancellationLogs || [];
+    this.scanners = parsed.scanners || [];
     this.rawScans = (parsed.rawScans || []).map((ev: ValidatedRawScanEvent) =>
       Object.freeze({ ...ev })
     );
@@ -260,6 +281,7 @@ export class SamAttRepository implements ISamAttRepository {
         shifts: structuredClone(this.shifts),
         assignments: structuredClone(this.assignments),
         cancellationLogs: structuredClone(this.cancellationLogs),
+        scanners: structuredClone(this.scanners),
         rawScans: [...this.rawScans],
         attendance: structuredClone(this.attendance),
         notes: structuredClone(this.notes),
@@ -285,6 +307,7 @@ export class SamAttRepository implements ISamAttRepository {
         this.shifts = snapshot.shifts;
         this.assignments = snapshot.assignments;
         this.cancellationLogs = snapshot.cancellationLogs;
+        this.scanners = snapshot.scanners;
         this.rawScans = snapshot.rawScans;
         this.attendance = snapshot.attendance;
         this.notes = snapshot.notes;
@@ -923,8 +946,254 @@ export class SamAttRepository implements ISamAttRepository {
   }
 
   // ==========================================
-  // 5. Immutable Raw Scans
+  // 5. Scanner Registry & Immutable Raw Scans
   // ==========================================
+  public getScanners(): RepositoryScannerDevice[] {
+    this.reloadFromDiskIfConfigured();
+    this.recordSql(
+      'SELECT id, machine_no, name, ip, device_port, location, enabled, auto_sync_enabled, status, last_sync_at, last_event_at, last_error FROM scanner_devices ORDER BY machine_no ASC',
+      []
+    );
+    return structuredClone(this.scanners).sort((a, b) => a.machineNo - b.machineNo);
+  }
+
+  public getScannerById(id: string): RepositoryScannerDevice | undefined {
+    this.reloadFromDiskIfConfigured();
+    this.recordSql(
+      'SELECT id, machine_no, name, ip, device_port, location, enabled, auto_sync_enabled, status, last_sync_at, last_event_at, last_error FROM scanner_devices WHERE id = ? LIMIT 1',
+      [id]
+    );
+    const found = this.scanners.find((s) => s.id === id);
+    return found ? structuredClone(found) : undefined;
+  }
+
+  public createScanner(
+    input: CreateScannerDeviceInput,
+    actor = 'ADMIN'
+  ): RepositoryScannerDevice {
+    const duplicateMachine = this.scanners.find(
+      (s) => s.machineNo === input.machineNo
+    );
+    if (duplicateMachine) {
+      throw new ScannerConflictError(
+        `หมายเลขเครื่องสแกน (machineNo) #${input.machineNo} ถูกลงทะเบียนไว้ในระบบแล้ว (${duplicateMachine.name})`
+      );
+    }
+
+    const generatedId =
+      input.id?.trim() ||
+      `SCN_${Date.now().toString(36).toUpperCase()}_${Math.random()
+        .toString(36)
+        .slice(2, 5)
+        .toUpperCase()}`;
+
+    if (this.scanners.some((s) => s.id === generatedId)) {
+      throw new ScannerConflictError(
+        `รหัสเครื่องสแกน (id) ${generatedId} ซ้ำกับรายการที่มีอยู่ในระบบ`
+      );
+    }
+
+    const enabled = Boolean(input.enabled);
+    const created: RepositoryScannerDevice = {
+      id: generatedId.slice(0, 20),
+      machineNo: input.machineNo,
+      name: input.name.trim(),
+      ip: input.ip.trim(),
+      port: input.port,
+      location: input.location.trim(),
+      enabled,
+      autoSyncEnabled: Boolean(input.autoSyncEnabled),
+      status: input.status || (enabled ? 'ONLINE' : 'OFFLINE'),
+      lastSyncAt: null,
+      lastEventAt: null,
+      lastError: null,
+    };
+
+    this.recordSql(
+      'INSERT INTO scanner_devices (id, machine_no, name, ip, device_port, location, enabled, auto_sync_enabled, status, last_sync_at, last_event_at, last_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [
+        created.id,
+        created.machineNo,
+        created.name,
+        created.ip,
+        created.port,
+        created.location,
+        created.enabled,
+        created.autoSyncEnabled,
+        created.status,
+        created.lastSyncAt,
+        created.lastEventAt,
+        created.lastError,
+      ]
+    );
+
+    this.scanners.push(created);
+
+    this.recordAuditLog({
+      actor,
+      actorRole: 'ADMIN',
+      action: 'CREATE_SCANNER_DEVICE',
+      entityType: 'ScannerDevice',
+      entityId: created.id,
+      summary: `เพิ่มเครื่องสแกน #${created.machineNo} (${created.name}) IP ${created.ip}:${created.port}`,
+      metadata: { scanner: created },
+    });
+
+    this.flushToDiskIfConfigured();
+    return structuredClone(created);
+  }
+
+  public updateScanner(
+    id: string,
+    input: UpdateScannerDeviceInput,
+    actor = 'ADMIN'
+  ): RepositoryScannerDevice {
+    const idx = this.scanners.findIndex((s) => s.id === id);
+    if (idx === -1) {
+      throw new ScannerNotFoundError(`ไม่พบเครื่องสแกนรหัส ${id} ในระบบ`);
+    }
+
+    const existing = this.scanners[idx];
+    const nextMachineNo =
+      input.machineNo !== undefined ? input.machineNo : existing.machineNo;
+
+    const conflicting = this.scanners.find(
+      (s) => s.id !== id && s.machineNo === nextMachineNo
+    );
+    if (conflicting) {
+      throw new ScannerConflictError(
+        `หมายเลขเครื่องสแกน (machineNo) #${nextMachineNo} ถูกลงทะเบียนไว้กับเครื่องอื่นแล้ว (${conflicting.name})`
+      );
+    }
+
+    const nextEnabled =
+      input.enabled !== undefined ? Boolean(input.enabled) : existing.enabled;
+    const nextStatus: ScannerDeviceStatus =
+      input.status !== undefined
+        ? input.status
+        : nextEnabled
+        ? existing.status === 'OFFLINE'
+          ? 'ONLINE'
+          : existing.status
+        : 'OFFLINE';
+
+    const updated: RepositoryScannerDevice = {
+      ...existing,
+      machineNo: nextMachineNo,
+      name: input.name !== undefined ? input.name.trim() : existing.name,
+      ip: input.ip !== undefined ? input.ip.trim() : existing.ip,
+      port: input.port !== undefined ? input.port : existing.port,
+      location:
+        input.location !== undefined ? input.location.trim() : existing.location,
+      enabled: nextEnabled,
+      autoSyncEnabled:
+        input.autoSyncEnabled !== undefined
+          ? Boolean(input.autoSyncEnabled)
+          : existing.autoSyncEnabled,
+      status: nextStatus,
+    };
+
+    this.scanners[idx] = updated;
+
+    this.recordSql(
+      'UPDATE scanner_devices SET machine_no = ?, name = ?, ip = ?, device_port = ?, location = ?, enabled = ?, auto_sync_enabled = ?, status = ? WHERE id = ?',
+      [
+        updated.machineNo,
+        updated.name,
+        updated.ip,
+        updated.port,
+        updated.location,
+        updated.enabled,
+        updated.autoSyncEnabled,
+        updated.status,
+        updated.id,
+      ]
+    );
+
+    this.recordAuditLog({
+      actor,
+      actorRole: 'ADMIN',
+      action: 'UPDATE_SCANNER_DEVICE',
+      entityType: 'ScannerDevice',
+      entityId: updated.id,
+      summary: `แก้ไขการตั้งค่าเครื่องสแกน #${updated.machineNo} (${updated.name}) IP ${updated.ip}:${updated.port}`,
+      metadata: { scanner: updated },
+    });
+
+    this.flushToDiskIfConfigured();
+    return structuredClone(updated);
+  }
+
+  public setScannerEnabled(
+    id: string,
+    enabled: boolean,
+    actor = 'ADMIN'
+  ): RepositoryScannerDevice {
+    const idx = this.scanners.findIndex((s) => s.id === id);
+    if (idx === -1) {
+      throw new ScannerNotFoundError(`ไม่พบเครื่องสแกนรหัส ${id} ในระบบ`);
+    }
+
+    const existing = this.scanners[idx];
+    const nextEnabled = Boolean(enabled);
+    const nextStatus: ScannerDeviceStatus = nextEnabled ? 'ONLINE' : 'OFFLINE';
+
+    const updated: RepositoryScannerDevice = {
+      ...existing,
+      enabled: nextEnabled,
+      status: nextStatus,
+    };
+
+    this.scanners[idx] = updated;
+
+    this.recordSql(
+      'UPDATE scanner_devices SET enabled = ?, status = ? WHERE id = ?',
+      [updated.enabled, updated.status, updated.id]
+    );
+
+    this.recordAuditLog({
+      actor,
+      actorRole: 'ADMIN',
+      action: 'SET_SCANNER_ENABLED',
+      entityType: 'ScannerDevice',
+      entityId: updated.id,
+      summary: `${updated.enabled ? 'เปิดใช้งาน' : 'ปิดใช้งาน'} เครื่องสแกน #${updated.machineNo} (${updated.name})`,
+      metadata: { enabled: updated.enabled, status: updated.status },
+    });
+
+    this.flushToDiskIfConfigured();
+    return structuredClone(updated);
+  }
+
+  public deleteScanner(
+    id: string,
+    actor = 'ADMIN'
+  ): { deleted: boolean; device?: RepositoryScannerDevice } {
+    const idx = this.scanners.findIndex((s) => s.id === id);
+    if (idx === -1) {
+      throw new ScannerNotFoundError(`ไม่พบเครื่องสแกนรหัส ${id} ในระบบ`);
+    }
+
+    const deletedDevice = structuredClone(this.scanners[idx]);
+    // Remove ONLY from scanner_devices; NEVER delete raw_scans or attendance records!
+    this.scanners.splice(idx, 1);
+
+    this.recordSql('DELETE FROM scanner_devices WHERE id = ?', [id]);
+
+    this.recordAuditLog({
+      actor,
+      actorRole: 'ADMIN',
+      action: 'DELETE_SCANNER_DEVICE',
+      entityType: 'ScannerDevice',
+      entityId: id,
+      summary: `ลบเครื่องสแกน #${deletedDevice.machineNo} (${deletedDevice.name}) ออกจากทะเบียนเครื่องสแกน (คงข้อมูล Raw Scans และ Attendance ทั้งหมดไว้)`,
+      metadata: { deletedDevice },
+    });
+
+    this.flushToDiskIfConfigured();
+    return { deleted: true, device: deletedDevice };
+  }
+
   public ingestRawScans(
     incomingScans: ReadonlyArray<unknown>,
     actor = 'SCANNER_SYNC'
@@ -936,6 +1205,22 @@ export class SamAttRepository implements ISamAttRepository {
       personnel: this.personnel,
       fingerprintMappings: this.fingerprintMappings,
     });
+
+    const latestEventByMachine = new Map<number, string>();
+    const syncedMachineNos = new Set<number>();
+
+    for (const rawItem of incomingScans) {
+      const check = ScannerAdapter.validateScanRecord(rawItem);
+      if (check.valid) {
+        const mNo = check.value.machineNo;
+        const dt = check.value.scanDateTime;
+        syncedMachineNos.add(mNo);
+        const prev = latestEventByMachine.get(mNo);
+        if (!prev || dt > prev) {
+          latestEventByMachine.set(mNo, dt);
+        }
+      }
+    }
 
     for (const ev of summary.newEvents) {
       this.rawScans.push(ev);
@@ -955,6 +1240,27 @@ export class SamAttRepository implements ISamAttRepository {
           ev.dedupeKey,
         ]
       );
+    }
+
+    if (syncedMachineNos.size > 0) {
+      const syncTimestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
+      for (const machineNo of syncedMachineNos) {
+        const regScanner = this.scanners.find((s) => s.machineNo === machineNo);
+        if (regScanner) {
+          regScanner.lastSyncAt = syncTimestamp;
+          const latestDt = latestEventByMachine.get(machineNo);
+          if (
+            latestDt &&
+            (!regScanner.lastEventAt || latestDt > regScanner.lastEventAt)
+          ) {
+            regScanner.lastEventAt = latestDt;
+          }
+          this.recordSql(
+            'UPDATE scanner_devices SET last_sync_at = ?, last_event_at = ? WHERE machine_no = ?',
+            [regScanner.lastSyncAt, regScanner.lastEventAt, machineNo]
+          );
+        }
+      }
     }
 
     if (summary.newScansCount > 0 || summary.duplicateScansCount > 0) {
