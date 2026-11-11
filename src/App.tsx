@@ -15,11 +15,12 @@ import { ScannerManagementView } from './views/ScannerManagementView';
 import { ReportsView } from './views/ReportsView';
 import { SystemLogsView } from './views/SystemLogsView';
 import { SettingsView } from './views/SettingsView';
+import { DeploymentCenterView } from './views/DeploymentCenterView';
 import { mockAttendanceService } from './services/mockAttendanceService';
-import { AlertTriangle, Loader2, RefreshCw } from 'lucide-react';
+import { AlertTriangle, Loader2, RefreshCw, ShieldAlert, Rocket, LogOut } from 'lucide-react';
 
 const MainShell: React.FC = () => {
-  const { currentUser, isLoadingAuth } = useAuth();
+  const { currentUser, isLoadingAuth, isDemoMode, exitDemoMode } = useAuth();
   const [activeNav, setActiveNav] = useState<NavItemKey>('dashboard');
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [dataVersion, setDataVersion] = useState(0);
@@ -30,13 +31,25 @@ const MainShell: React.FC = () => {
       mockAttendanceService.clearState();
       return;
     }
+
+    // Rule 8.7: When in Development Preview Demo Admin Mode, open Deployment Center
+    // and NEVER call Production Backend APIs.
+    if (isDemoMode && import.meta.env.DEV && !import.meta.env.PROD) {
+      mockAttendanceService.clearState();
+      setActiveNav('deployment-center');
+      return;
+    }
+
     if (currentUser.role === 'GENERAL_USER') {
       setActiveNav('my-attendance');
-    } else if (activeNav === 'settings' && currentUser.role !== 'ADMIN') {
+    } else if (
+      (activeNav === 'settings' || activeNav === 'deployment-center') &&
+      currentUser.role !== 'ADMIN'
+    ) {
       setActiveNav('dashboard');
     }
     void mockAttendanceService.hydrateFromRealApi(currentUser.role);
-  }, [currentUser]);
+  }, [currentUser, isDemoMode]);
 
   useEffect(() => {
     const handleHydrated = () => {
@@ -64,7 +77,7 @@ const MainShell: React.FC = () => {
     return <LoginView />;
   }
 
-  const lastApiError = mockAttendanceService.getLastApiError();
+  const lastApiError = isDemoMode ? null : mockAttendanceService.getLastApiError();
 
   const renderActiveView = () => {
     // Strict guard: GENERAL_USER can ONLY see MyAttendanceView
@@ -102,6 +115,12 @@ const MainShell: React.FC = () => {
         ) : (
           <DashboardView key={`dash-${dataVersion}`} onNavigate={setActiveNav} />
         );
+      case 'deployment-center':
+        return currentUser.role === 'ADMIN' ? (
+          <DeploymentCenterView key={`deploy-${dataVersion}`} />
+        ) : (
+          <DashboardView key={`dash-${dataVersion}`} onNavigate={setActiveNav} />
+        );
       default:
         return <DashboardView key={`dash-${dataVersion}`} onNavigate={setActiveNav} />;
     }
@@ -109,6 +128,47 @@ const MainShell: React.FC = () => {
 
   return (
     <div className="min-h-screen flex flex-col bg-[#F8F7FC] text-slate-900">
+      {/* Rule 8.6: Prominent top banner when in Development Preview Demo Admin Mode */}
+      {isDemoMode && import.meta.env.DEV && !import.meta.env.PROD && (
+        <div className="bg-amber-500 text-slate-950 px-4 py-2 border-b border-amber-600 shadow-xs z-50">
+          <div className="max-w-[1600px] mx-auto flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-slate-950 text-amber-300 font-mono-data font-bold tracking-wide">
+                <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+                DEVELOPMENT PREVIEW — DEMO MODE
+              </span>
+              <span className="font-bold">
+                ผู้ใช้จำลอง: {currentUser.fullName} | สิทธิ์: ADMIN (Frontend Preview Only)
+              </span>
+              <span className="hidden xl:inline text-slate-900 font-medium">
+                • แสดงผลเฉพาะ Google AI Studio Preview เท่านั้น (ไม่มีการสร้างบัญชีใน DB / ไม่สร้าง JWT / ไม่เรียก Production API)
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {activeNav !== 'deployment-center' && (
+                <button
+                  type="button"
+                  onClick={() => setActiveNav('deployment-center')}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/90 hover:bg-white text-slate-900 font-bold transition-colors cursor-pointer"
+                >
+                  <Rocket className="w-3.5 h-3.5 text-violet-700" />
+                  <span>ไปที่ Deployment Center</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={exitDemoMode}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-950 hover:bg-slate-800 text-white font-bold transition-colors cursor-pointer"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>สลับไปหน้าเข้าสู่ระบบจริง (Real Login)</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <Navbar onToggleMobileSidebar={() => setMobileSidebarOpen((v) => !v)} />
       <div className="flex-1 flex">
         <Sidebar
@@ -118,7 +178,7 @@ const MainShell: React.FC = () => {
           onCloseMobile={() => setMobileSidebarOpen(false)}
         />
         <main className="flex-1 min-w-0 p-4 sm:p-6 lg:p-7 max-w-[1600px] mx-auto w-full space-y-4">
-          {lastApiError && activeNav !== 'dashboard' && (
+          {lastApiError && activeNav !== 'dashboard' && activeNav !== 'deployment-center' && (
             <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-xs text-amber-950 flex flex-wrap items-center justify-between gap-3 shadow-2xs">
               <div className="flex items-start gap-2.5">
                 <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />

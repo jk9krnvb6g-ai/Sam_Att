@@ -12,6 +12,7 @@ import {
   Radio,
   UserCheck,
   Server,
+  Rocket,
   ChevronDown,
   ChevronRight,
 } from 'lucide-react';
@@ -29,7 +30,8 @@ export type NavItemKey =
   | 'hosoffice-push'
   | 'reports'
   | 'system-logs'
-  | 'settings';
+  | 'settings'
+  | 'deployment-center';
 
 interface SidebarProps {
   activeKey?: NavItemKey;
@@ -188,6 +190,14 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
           label: 'ตั้งค่าระบบและผู้ใช้งาน',
           subLabel: 'Users & Settings',
           icon: Sliders,
+          roles: ['ADMIN'],
+          badge: 'ADMIN',
+        },
+        {
+          id: 'deployment-center',
+          label: 'Deployment Center',
+          subLabel: 'ศูนย์ควบคุมการอัปเดต GitHub',
+          icon: Rocket,
           roles: ['ADMIN'],
           badge: 'ADMIN',
         },

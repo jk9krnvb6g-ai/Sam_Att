@@ -3,7 +3,7 @@ import { useAuth } from '../context/AuthContext';
 import { Fingerprint, Lock, UserCheck, Shield, Server, Database, AlertCircle, Loader2 } from 'lucide-react';
 
 export const LoginView: React.FC = () => {
-  const { login } = useAuth();
+  const { login, enterDemoMode } = useAuth();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -58,7 +58,7 @@ export const LoginView: React.FC = () => {
               <Shield className="w-3 h-3" /> Gateway :3002/api/Sam_Att/
             </span>
             <span className="inline-flex items-center gap-1 bg-black/15 px-2 py-0.5 rounded">
-              <Database className="w-3 h-3" /> DB: samchuk_attendance
+              <Database className="w-3 h-3" /> DB: samchuk_attendance_v2
             </span>
           </div>
         </div>
@@ -124,6 +124,31 @@ export const LoginView: React.FC = () => {
               )}
             </button>
           </form>
+
+          {import.meta.env.DEV && !import.meta.env.PROD && (
+            <div className="pt-4 border-t border-slate-100">
+              <div className="p-3 rounded-xl bg-amber-50/90 border border-amber-200 text-xs text-amber-900 space-y-2">
+                <div className="font-bold text-amber-950 flex items-center justify-between">
+                  <span>DEVELOPMENT PREVIEW — DEMO MODE</span>
+                  <span className="text-[10px] font-mono-data px-1.5 py-0.5 rounded bg-amber-200/80 text-amber-950">
+                    DEV ONLY
+                  </span>
+                </div>
+                <p className="text-[11px] text-amber-800 leading-relaxed">
+                  สำหรับตรวจสอบหน้า Deployment Center ใน Google AI Studio Preview โดยจำลองสิทธิ์{' '}
+                  <span className="font-semibold">Demo Administrator (ADMIN)</span>{' '}
+                  โดยไม่เชื่อมต่อฐานข้อมูลจริงและไม่สร้าง Token บนเซิร์ฟเวอร์
+                </p>
+                <button
+                  type="button"
+                  onClick={enterDemoMode}
+                  className="w-full py-2 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs transition-colors cursor-pointer"
+                >
+                  เปิดหน้า Deployment Center (Demo Administrator — Preview Only)
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

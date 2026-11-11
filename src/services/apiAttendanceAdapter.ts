@@ -19,6 +19,10 @@ import {
   ShiftCancellationLog,
   User,
 } from '../types/attendance';
+import {
+  DeploymentCenterStatusPayload,
+  DeploymentHistoryItem,
+} from '../types/deploymentCenter';
 
 export type DataSourceMode = 'API';
 
@@ -64,6 +68,7 @@ export interface ConnectionSettingsResponse {
     frontendBase: string;
     apiGatewayPort: number;
     apiMount: string;
+    isolatedDatabase: string;
   };
   samchukDb: {
     configured: boolean;
@@ -75,10 +80,13 @@ export interface ConnectionSettingsResponse {
   };
   hosofficeDb: {
     configured: boolean;
+    configurationStatus: 'CONFIGURED' | 'AWAITING_CONFIGURATION';
     host: string;
     port: number;
     database: string;
+    sourceTable: string;
     mode: string;
+    statusMessage: string;
     pushEnabled: boolean;
   };
 }
@@ -220,7 +228,7 @@ class ApiAttendanceAdapter {
   }
 
   // ==========================================
-  // 2. Read-Only Gateway & Database Connectivity Verification (`/settings/connections` + `/shifts`)
+  // 2. Read-Only Gateway & Database Connectivity Verification (`/settings/connections/health` + `/settings/connections`)
   // ==========================================
   public async checkHealth(): Promise<{
     success: boolean;
@@ -232,35 +240,88 @@ class ApiAttendanceAdapter {
     database: string;
     message: string;
     error?: string;
+    hosofficeDb?: {
+      configured: boolean;
+      connected: boolean;
+      configurationStatus: 'CONFIGURED' | 'AWAITING_CONFIGURATION';
+      host: string;
+      port: number;
+      database: string;
+      sourceTable: string;
+      message: string;
+      error?: string;
+    };
   }> {
-    const [connSettings, shifts] = await Promise.all([
+    const [healthRes, connSettings, shifts] = await Promise.all([
+      this.requestJson<{
+        success: boolean;
+        ok: boolean;
+        healthy: boolean;
+        repositoryMode: string;
+        database: string;
+        message: string;
+        error?: string;
+        samchukAttendanceDb?: {
+          configured: boolean;
+          healthy: boolean;
+          host: string;
+          port: number;
+          database: string;
+          mode: string;
+          message: string;
+          error?: string;
+        };
+        hosofficeDb?: {
+          configured: boolean;
+          connected: boolean;
+          configurationStatus: 'CONFIGURED' | 'AWAITING_CONFIGURATION';
+          host: string;
+          port: number;
+          database: string;
+          sourceTable: string;
+          message: string;
+          error?: string;
+        };
+      }>('/settings/connections/health', { method: 'GET' }).catch(() => null),
       this.fetchConnectionSettings(),
       this.fetchShifts(),
     ]);
-    const isRealMySql =
-      connSettings.repositoryMode === 'REAL' && connSettings.samchukDb.configured;
+
+    const resolvedDb =
+      healthRes?.database ||
+      connSettings.samchukDb.database ||
+      connSettings.gateway.isolatedDatabase ||
+      'samchuk_attendance_v2';
+
     const gatewayReachable = Boolean(connSettings.success && Array.isArray(shifts));
+    const isRealMySql = healthRes
+      ? Boolean(healthRes.healthy && healthRes.repositoryMode === 'REAL')
+      : Boolean(connSettings.repositoryMode === 'REAL' && connSettings.samchukDb.configured);
 
     return {
       success: gatewayReachable,
       ok: gatewayReachable && isRealMySql,
       healthy: gatewayReachable && isRealMySql,
-      repositoryMode: connSettings.repositoryMode || 'UNKNOWN',
+      repositoryMode: healthRes?.repositoryMode || connSettings.repositoryMode || 'UNKNOWN',
       engine: connSettings.samchukDb.engine || connSettings.repositoryMode || 'UNKNOWN',
       status: !gatewayReachable
         ? 'GATEWAY_UNREACHABLE'
         : isRealMySql
         ? `CONNECTED_REAL_MYSQL (${shifts.length} shifts)`
         : `NON_PRODUCTION_MODE (${connSettings.repositoryMode} / DB Configured: ${connSettings.samchukDb.configured})`,
-      database: connSettings.samchukDb.database || 'samchuk_attendance',
+      database: resolvedDb,
       message: !gatewayReachable
         ? 'ไม่สามารถติดต่อ Central API Gateway (/api/Sam_Att) ได้'
         : isRealMySql
-        ? `เชื่อมต่อฐานข้อมูลจริง ${connSettings.samchukDb.database} (${connSettings.samchukDb.host}:${connSettings.samchukDb.port}) ผ่าน Central API Gateway สำเร็จ (อ่านกติกากะ ${shifts.length} รายการ)`
-        : `ติดต่อ API สำเร็จในโหมด ${connSettings.repositoryMode} (ยังไม่ได้เชื่อมต่อไปยัง MySQL จริงบน ${connSettings.samchukDb.host}:${connSettings.samchukDb.port})`,
+        ? healthRes?.message ||
+          `เชื่อมต่อฐานข้อมูลจริง ${resolvedDb} (${connSettings.samchukDb.host}:${connSettings.samchukDb.port}) ผ่าน Central API Gateway สำเร็จ (อ่านกติกากะ ${shifts.length} รายการ)`
+        : healthRes?.message ||
+          `ติดต่อ API สำเร็จในโหมด ${connSettings.repositoryMode} (ยังไม่ได้เชื่อมต่อไปยัง MySQL จริงบน ${connSettings.samchukDb.host}:${connSettings.samchukDb.port})`,
       error: !isRealMySql
-        ? `Repository mode is ${connSettings.repositoryMode} (configured=${connSettings.samchukDb.configured}) — Live MySQL connectivity is NOT VERIFIED`
+        ? healthRes?.error ||
+          `Repository mode is ${connSettings.repositoryMode} (configured=${connSettings.samchukDb.configured}) — Live MySQL connectivity is NOT VERIFIED`
         : undefined,
+      hosofficeDb: healthRes?.hosofficeDb,
     };
   }
 
@@ -285,15 +346,26 @@ class ApiAttendanceAdapter {
       };
       hosofficeDb: {
         configured: boolean;
+        configurationStatus?: 'CONFIGURED' | 'AWAITING_CONFIGURATION';
         host: string;
         port: number;
         database: string;
-        sourceTable: string;
-        targetWriteTable: string;
+        sourceTable?: string;
+        targetWriteTable?: string;
         user: string;
         passwordMasked: string;
+        statusMessage?: string;
       };
     }>('/settings/connections', { method: 'GET' });
+
+    const resolvedDatabase =
+      raw.samchukAttendanceDb?.database ||
+      raw.architecture?.isolatedDatabase ||
+      'samchuk_attendance_v2';
+    const hosConfigured = Boolean(raw.hosofficeDb?.configured);
+    const hosConfigStatus: 'CONFIGURED' | 'AWAITING_CONFIGURATION' =
+      raw.hosofficeDb?.configurationStatus ||
+      (hosConfigured ? 'CONFIGURED' : 'AWAITING_CONFIGURATION');
 
     return {
       success: raw.success,
@@ -303,21 +375,29 @@ class ApiAttendanceAdapter {
         frontendBase: raw.architecture?.frontendPath || '/Sam_Att/',
         apiGatewayPort: raw.architecture?.gatewayPort || 3002,
         apiMount: raw.architecture?.gatewayPath || '/api/Sam_Att/',
+        isolatedDatabase: raw.architecture?.isolatedDatabase || resolvedDatabase,
       },
       samchukDb: {
         configured: Boolean(raw.samchukAttendanceDb?.configured),
-        host: raw.samchukAttendanceDb?.host || '10.2.0.201',
+        host: raw.samchukAttendanceDb?.host || 'ยังไม่ได้ตั้งค่า (Awaiting SAM_ATT_DB_HOST)',
         port: raw.samchukAttendanceDb?.port || 3306,
-        database: raw.samchukAttendanceDb?.database || 'samchuk_attendance',
+        database: resolvedDatabase,
         engine: raw.repositoryMode || 'MYSQL',
-        status: raw.samchukAttendanceDb?.configured ? 'CONFIGURED' : 'ACTIVE',
+        status: raw.samchukAttendanceDb?.configured ? 'CONFIGURED' : 'AWAITING_CONFIGURATION',
       },
       hosofficeDb: {
-        configured: Boolean(raw.hosofficeDb?.configured),
-        host: raw.hosofficeDb?.host || '10.2.0.201',
+        configured: hosConfigured,
+        configurationStatus: hosConfigStatus,
+        host: raw.hosofficeDb?.host || 'ยังไม่ได้ตั้งค่า (AWAITING_CONFIGURATION)',
         port: raw.hosofficeDb?.port || 3306,
         database: raw.hosofficeDb?.database || 'hosoffice',
-        mode: 'READ_ONLY_PERSONNEL_LIVE_SYNC',
+        sourceTable: raw.hosofficeDb?.sourceTable || 'hr_person',
+        mode: hosConfigured ? 'READ_ONLY_PERSONNEL_LIVE_SYNC' : 'AWAITING_CONFIGURATION',
+        statusMessage:
+          raw.hosofficeDb?.statusMessage ||
+          (hosConfigured
+            ? 'ตั้งค่าการเชื่อมต่อ HOSOffice จาก Environment Variables เรียบร้อยแล้ว'
+            : 'AWAITING_CONFIGURATION: ยังไม่ได้กำหนดค่าการเชื่อมต่อฐานข้อมูล HOSOffice ใน Environment Variables'),
         pushEnabled: false,
       },
     };
@@ -1080,6 +1160,40 @@ class ApiAttendanceAdapter {
       note: h.note,
     }));
   }
+
+  // ==========================================
+  // 10. Deployment Center (`/deployment/*` — ADMIN Only)
+  // ==========================================
+  public async fetchDeploymentStatus(): Promise<DeploymentCenterStatusPayload> {
+    return this.requestJson<DeploymentCenterStatusPayload>('/deployment/status', {
+      method: 'GET',
+    });
+  }
+
+  public async checkDeploymentUpdates(): Promise<DeploymentCenterStatusPayload> {
+    return this.requestJson<DeploymentCenterStatusPayload>('/deployment/check-updates', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  }
+
+  public async runDeploymentPreflight(): Promise<DeploymentCenterStatusPayload> {
+    return this.requestJson<DeploymentCenterStatusPayload>('/deployment/preflight', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  }
+
+  public async fetchDeploymentHistory(limit = 30): Promise<DeploymentHistoryItem[]> {
+    const data = await this.requestJson<{
+      success: boolean;
+      history: DeploymentHistoryItem[];
+    }>(`/deployment/history?limit=${encodeURIComponent(String(limit))}`, {
+      method: 'GET',
+    });
+    return data.history || [];
+  }
 }
 
 export const apiAttendanceAdapter = new ApiAttendanceAdapter();
+

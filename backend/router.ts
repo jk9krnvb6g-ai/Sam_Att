@@ -23,6 +23,7 @@ import { createDefaultSeededRepository } from './repositories/defaultRepositoryS
 import { AuthService } from './services/authService';
 import { ScannerAdapter } from './services/scannerAdapter';
 import { HosOfficeAdapter } from './services/hosofficeAdapter';
+import { DeploymentCenterService } from './services/deploymentCenterService';
 import { AuthenticatedUser, EngineHRReviewStatus } from './types';
 
 export { ProductionRepositoryConfigurationError };
@@ -991,10 +992,16 @@ export function createSamAttRouter(customRepository?: ISamAttRepository): Router
     adminOnly,
     asyncRoute(async (_req: Request, res: Response) => {
       const hosConfig = HosOfficeAdapter.getConnectionConfigStatus();
-      const samAttHost = process.env.SAM_ATT_DB_HOST || '';
-      const samAttUser = process.env.SAM_ATT_DB_USER || '';
+      const samAttHost = (process.env.SAM_ATT_DB_HOST || '').trim();
+      const samAttUser = (process.env.SAM_ATT_DB_USER || '').trim();
+      const samAttPort = Number(process.env.SAM_ATT_DB_PORT || 3306);
+      const samAttPassword = process.env.SAM_ATT_DB_PASSWORD || '';
+      const samAttDatabase =
+        process.env.SAM_ATT_DB_NAME?.trim() ||
+        repo.getDatabaseName() ||
+        'samchuk_attendance_v2';
       const samAttConfigured = Boolean(
-        samAttHost && samAttUser && process.env.SAM_ATT_DB_PASSWORD
+        samAttHost && samAttUser && samAttPassword.length > 0
       );
 
       res.json({
@@ -1005,17 +1012,313 @@ export function createSamAttRouter(customRepository?: ISamAttRepository): Router
           frontendPath: '/Sam_Att/',
           gatewayPort: 3002,
           gatewayPath: '/api/Sam_Att/',
-          isolatedDatabase: 'samchuk_attendance',
+          isolatedDatabase: samAttDatabase,
         },
         samchukAttendanceDb: {
           configured: samAttConfigured,
           host: samAttHost || 'ยังไม่ได้ตั้งค่า (Awaiting SAM_ATT_DB_HOST)',
-          port: Number(process.env.SAM_ATT_DB_PORT || 3306),
-          database: 'samchuk_attendance',
+          port: samAttPort,
+          database: samAttDatabase,
           user: samAttUser || 'ยังไม่ได้ตั้งค่า (Awaiting SAM_ATT_DB_USER)',
-          passwordMasked: '••••••••••••',
+          passwordMasked: samAttPassword.length > 0 ? '••••••••••••' : 'ยังไม่ได้ตั้งค่า',
         },
         hosofficeDb: hosConfig,
+      });
+    })
+  );
+
+  const handleTestConnectionsHealth = asyncRoute(async (_req: Request, res: Response) => {
+    const samAttDatabase =
+      process.env.SAM_ATT_DB_NAME?.trim() ||
+      repo.getDatabaseName() ||
+      'samchuk_attendance_v2';
+    const samAttHost = (process.env.SAM_ATT_DB_HOST || '').trim();
+    const samAttPort = Number(process.env.SAM_ATT_DB_PORT || 3306);
+    const samAttUser = (process.env.SAM_ATT_DB_USER || '').trim();
+    const samAttPassword = process.env.SAM_ATT_DB_PASSWORD || '';
+    const samAttConfigured = Boolean(
+      samAttHost && samAttUser && samAttPassword.length > 0
+    );
+
+    let samchukHealth: {
+      healthy: boolean;
+      mode: string;
+      database: string;
+      message: string;
+      error?: string;
+    };
+
+    try {
+      const check = await repo.checkHealth();
+      const isRealVerified = check.healthy && repo.mode === 'REAL';
+      samchukHealth = {
+        healthy: isRealVerified,
+        mode: check.mode,
+        database: check.database || samAttDatabase,
+        message: isRealVerified
+          ? check.message
+          : `ทำงานในโหมด ${check.mode} (${check.database || samAttDatabase}) — ไม่ใช่โหมด REAL MySQL Production`,
+        error: isRealVerified
+          ? undefined
+          : `Repository mode is ${check.mode} (configured=${samAttConfigured}) — Live MySQL connectivity is NOT VERIFIED`,
+      };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : 'MySQL connection check failed';
+      samchukHealth = {
+        healthy: false,
+        mode: repo.mode,
+        database: samAttDatabase,
+        message: `การเชื่อมต่อฐานข้อมูล ${samAttDatabase} ล้มเหลว: ${errMsg}`,
+        error: errMsg,
+      };
+    }
+
+    const hosofficeHealth = await HosOfficeAdapter.testDatabaseConnection();
+
+    res.json({
+      success: true,
+      ok: samchukHealth.healthy,
+      healthy: samchukHealth.healthy,
+      repositoryMode: repo.mode,
+      database: samchukHealth.database,
+      message: samchukHealth.message,
+      error: samchukHealth.error,
+      samchukAttendanceDb: {
+        configured: samAttConfigured,
+        healthy: samchukHealth.healthy,
+        host: samAttHost || 'ยังไม่ได้ตั้งค่า (Awaiting SAM_ATT_DB_HOST)',
+        port: samAttPort,
+        database: samchukHealth.database,
+        mode: samchukHealth.mode,
+        message: samchukHealth.message,
+        error: samchukHealth.error,
+      },
+      hosofficeDb: hosofficeHealth,
+    });
+  });
+
+  router.get('/settings/connections/health', adminOnly, handleTestConnectionsHealth);
+  router.post('/settings/connections/test', adminOnly, handleTestConnectionsHealth);
+
+  // ==========================================
+  // 11. Deployment Center (`ADMIN` Only — Phase 1 Read-Only & Audit Logged)
+  // ==========================================
+  router.get(
+    '/deployment/status',
+    adminOnly,
+    asyncRoute(async (_req: Request, res: Response) => {
+      const payload = await DeploymentCenterService.getFullStatusPayload(repo, {
+        checkUpdates: false,
+        runPreflight: false,
+      });
+      res.json(payload);
+    })
+  );
+
+  router.post(
+    '/deployment/check-updates',
+    adminOnly,
+    asyncRoute(async (req: Request, res: Response) => {
+      const user = (req as any).user as AuthenticatedUser;
+      const checkPayload = DeploymentCenterService.validateSafeRequestPayload(req.body);
+      if (!checkPayload.valid) {
+        return res.status(400).json({
+          success: false,
+          error: checkPayload.error,
+        });
+      }
+
+      const payload = await DeploymentCenterService.getFullStatusPayload(repo, {
+        checkUpdates: true,
+        runPreflight: false,
+      });
+
+      await repo.recordAuditLog({
+        actor: user.username,
+        actorName: user.fullName,
+        actorRole: user.role,
+        action: 'DEPLOYMENT_CHECK_UPDATES',
+        entityType: 'DeploymentCenter',
+        entityId: 'Sam_Att_V2',
+        summary: `ผู้ดูแลระบบ ${user.username} ตรวจสอบอัปเดตจาก GitHub (${payload.versionComparison.comparisonStatus})`,
+        metadata: {
+          currentCommitSha: payload.versionComparison.currentServer.commitSha,
+          latestGitHubCommitSha: payload.versionComparison.latestGitHub.commitSha,
+          comparisonStatus: payload.versionComparison.comparisonStatus,
+        },
+      });
+
+      res.json(payload);
+    })
+  );
+
+  router.post(
+    '/deployment/preflight',
+    adminOnly,
+    asyncRoute(async (req: Request, res: Response) => {
+      const user = (req as any).user as AuthenticatedUser;
+      const checkPayload = DeploymentCenterService.validateSafeRequestPayload(req.body);
+      if (!checkPayload.valid) {
+        return res.status(400).json({
+          success: false,
+          error: checkPayload.error,
+        });
+      }
+
+      const payload = await DeploymentCenterService.getFullStatusPayload(repo, {
+        checkUpdates: true,
+        runPreflight: true,
+      });
+
+      await repo.recordAuditLog({
+        actor: user.username,
+        actorName: user.fullName,
+        actorRole: user.role,
+        action: 'DEPLOYMENT_PREFLIGHT_CHECK',
+        entityType: 'DeploymentCenter',
+        entityId: 'Sam_Att_V2',
+        summary: `ผู้ดูแลระบบ ${user.username} รันการตรวจสอบความพร้อมก่อนอัปเดต (Preflight Check)`,
+        metadata: {
+          checklistSummary: payload.checklist.map((c) => ({
+            id: c.id,
+            status: c.status,
+          })),
+        },
+      });
+
+      res.json(payload);
+    })
+  );
+
+  router.get(
+    '/deployment/history',
+    adminOnly,
+    asyncRoute(async (_req: Request, res: Response) => {
+      const result = await DeploymentCenterService.getDeploymentHistory(repo);
+      res.json({
+        success: true,
+        ...result,
+      });
+    })
+  );
+
+  router.post(
+    '/deployment/approve',
+    adminOnly,
+    asyncRoute(async (req: Request, res: Response) => {
+      const user = (req as any).user as AuthenticatedUser;
+      const checkPayload = DeploymentCenterService.validateSafeRequestPayload(req.body);
+      if (!checkPayload.valid) {
+        return res.status(400).json({
+          success: false,
+          error: checkPayload.error,
+        });
+      }
+
+      const adminPassword =
+        typeof req.body?.adminPassword === 'string' ? req.body.adminPassword : '';
+      if (!adminPassword) {
+        return res.status(400).json({
+          success: false,
+          error: 'กรุณายืนยันรหัสผ่านของผู้ดูแลระบบ (ADMIN Re-Authentication) ก่อนอนุมัติการ Deploy',
+        });
+      }
+
+      const clientIp =
+        (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
+        req.ip ||
+        '127.0.0.1';
+      const reAuth = await AuthService.authenticateCredentials(
+        repo,
+        user.username,
+        adminPassword,
+        clientIp
+      );
+      if (!reAuth.success) {
+        return res.status(reAuth.statusCode).json({
+          success: false,
+          error: reAuth.error || 'การยืนยันตัวตนซ้ำไม่สำเร็จ (รหัสผ่านไม่ถูกต้อง)',
+        });
+      }
+
+      await repo.recordAuditLog({
+        actor: user.username,
+        actorName: user.fullName,
+        actorRole: user.role,
+        action: 'DEPLOYMENT_APPROVE_ATTEMPT',
+        entityType: 'DeploymentCenter',
+        entityId: 'Sam_Att_V2',
+        summary: `ผู้ดูแลระบบ ${user.username} ทดสอบคำขออนุมัติ Deploy (ถูกระงับตามมาตรการ Phase 1 Read-Only: รอติดตั้ง Deployment Agent)`,
+      });
+
+      return res.status(501).json({
+        success: false,
+        liveDeployExecuted: false,
+        agentAvailable: false,
+        phase: 'PHASE_1_READ_ONLY',
+        error:
+          'Phase 1 Read-Only Mode: ยังไม่เปิดใช้งานการสั่ง Deploy จริงจากหน้าเว็บจนกว่าจะติดตั้ง Backend Deployment Agent ที่ปลอดภัยบน FILESERVER ใน Phase 2',
+      });
+    })
+  );
+
+  router.post(
+    '/deployment/rollback',
+    adminOnly,
+    asyncRoute(async (req: Request, res: Response) => {
+      const user = (req as any).user as AuthenticatedUser;
+      const checkPayload = DeploymentCenterService.validateSafeRequestPayload(req.body);
+      if (!checkPayload.valid) {
+        return res.status(400).json({
+          success: false,
+          error: checkPayload.error,
+        });
+      }
+
+      const adminPassword =
+        typeof req.body?.adminPassword === 'string' ? req.body.adminPassword : '';
+      if (!adminPassword) {
+        return res.status(400).json({
+          success: false,
+          error: 'กรุณายืนยันรหัสผ่านของผู้ดูแลระบบ (ADMIN Re-Authentication) ก่อนสั่ง Rollback',
+        });
+      }
+
+      const clientIp =
+        (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
+        req.ip ||
+        '127.0.0.1';
+      const reAuth = await AuthService.authenticateCredentials(
+        repo,
+        user.username,
+        adminPassword,
+        clientIp
+      );
+      if (!reAuth.success) {
+        return res.status(reAuth.statusCode).json({
+          success: false,
+          error: reAuth.error || 'การยืนยันตัวตนซ้ำไม่สำเร็จ (รหัสผ่านไม่ถูกต้อง)',
+        });
+      }
+
+      await repo.recordAuditLog({
+        actor: user.username,
+        actorName: user.fullName,
+        actorRole: user.role,
+        action: 'DEPLOYMENT_ROLLBACK_ATTEMPT',
+        entityType: 'DeploymentCenter',
+        entityId: 'Sam_Att_V2',
+        summary: `ผู้ดูแลระบบ ${user.username} ทดสอบคำขอ Rollback (ถูกระงับตามมาตรการ Phase 1 Read-Only: รอติดตั้ง Deployment Agent)`,
+      });
+
+      return res.status(501).json({
+        success: false,
+        rollbackExecuted: false,
+        liveRollbackExecuted: false,
+        agentAvailable: false,
+        phase: 'PHASE_1_READ_ONLY',
+        error:
+          'Phase 1 Read-Only Mode: ยังไม่เปิดใช้งานการ Rollback อัตโนมัติจนกว่าจะติดตั้ง Backend Deployment Agent และมีเวอร์ชันสำรองที่ตรวจสอบได้ใน Phase 2',
       });
     })
   );

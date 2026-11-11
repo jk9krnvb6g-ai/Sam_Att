@@ -64,12 +64,16 @@ export const SystemLogsView: React.FC = () => {
       .then((settings) => {
         setConnSettings(settings);
         setSamchukDbStatus(
-          `เชื่อมต่อสำเร็จ (${settings.samchukDb.engine} — ${settings.samchukDb.status})`
+          settings.samchukDb.configured
+            ? `ตั้งค่าแล้ว (${settings.samchukDb.database} · ${settings.samchukDb.engine} — ${settings.samchukDb.status})`
+            : `ยังไม่ได้ตั้งค่า (${settings.samchukDb.database} — ${settings.samchukDb.status})`
         );
         setHosofficeDbStatus(
-          `พร้อมใช้งาน (${settings.hosofficeDb.mode} — Push: ${
-            settings.hosofficeDb.pushEnabled ? 'Enabled' : 'Preview Safe Mode'
-          })`
+          settings.hosofficeDb.configured
+            ? `ตั้งค่าแล้ว (${settings.hosofficeDb.mode} — Push: ${
+                settings.hosofficeDb.pushEnabled ? 'Enabled' : 'Preview Safe Mode'
+              })`
+            : settings.hosofficeDb.statusMessage || 'AWAITING_CONFIGURATION: ยังไม่ได้กำหนดค่าการเชื่อมต่อฐานข้อมูล HOSOffice'
         );
       })
       .catch(() => {
@@ -106,12 +110,24 @@ export const SystemLogsView: React.FC = () => {
   const handleTestHosofficeDb = async () => {
     setTestingDb('HOSOFFICE');
     try {
-      const settings = await apiAttendanceAdapter.fetchConnectionSettings();
+      const [health, settings] = await Promise.all([
+        apiAttendanceAdapter.checkHealth(),
+        apiAttendanceAdapter.fetchConnectionSettings(),
+      ]);
       setConnSettings(settings);
-      setHosofficeDbStatus(
-        `เชื่อมต่อ ${settings.hosofficeDb.database} (${settings.hosofficeDb.host}:${settings.hosofficeDb.port}) — โหมด ${settings.hosofficeDb.mode}`
-      );
-      setStatusFeedback(`ตรวจสอบการตั้งค่าฐานข้อมูล ${settings.hosofficeDb.database} สำเร็จ`);
+      const hosHealth = health.hosofficeDb;
+      if (hosHealth) {
+        setHosofficeDbStatus(hosHealth.message);
+        setStatusFeedback(hosHealth.message);
+      } else if (!settings.hosofficeDb.configured) {
+        setHosofficeDbStatus(settings.hosofficeDb.statusMessage);
+        setStatusFeedback(settings.hosofficeDb.statusMessage);
+      } else {
+        setHosofficeDbStatus(
+          `ตั้งค่า ${settings.hosofficeDb.database} (${settings.hosofficeDb.host}:${settings.hosofficeDb.port}) — โหมด ${settings.hosofficeDb.mode}`
+        );
+        setStatusFeedback(`ตรวจสอบการตั้งค่าฐานข้อมูล ${settings.hosofficeDb.database} สำเร็จ`);
+      }
       await mockAttendanceService.hydrateFromRealApi('ADMIN');
       setRefreshKey((k) => k + 1);
     } catch (err) {
@@ -136,9 +152,11 @@ export const SystemLogsView: React.FC = () => {
           ? `เชื่อมต่อฐานข้อมูล ${health.database} สำเร็จ (${health.engine} — ${health.status})`
           : `การเชื่อมต่อขัดข้อง: ${health.error || health.status}`
       );
-      setHosofficeDbStatus(
-        `เชื่อมต่อ ${settings.hosofficeDb.database} (${settings.hosofficeDb.host}:${settings.hosofficeDb.port}) — โหมด ${settings.hosofficeDb.mode}`
-      );
+      if (health.hosofficeDb) {
+        setHosofficeDbStatus(health.hosofficeDb.message);
+      } else {
+        setHosofficeDbStatus(settings.hosofficeDb.statusMessage);
+      }
       setStatusFeedback(
         `ตรวจสอบสถานะทั้ง 2 ฐานข้อมูล (${health.database} & ${settings.hosofficeDb.database}) เรียบร้อยแล้ว`
       );
@@ -209,8 +227,9 @@ export const SystemLogsView: React.FC = () => {
     return filteredAuditLogs.slice(start, start + auditPageSize);
   }, [filteredAuditLogs, auditPage, auditPageSize]);
 
-  const dbHost = connSettings?.samchukDb.host || '10.2.0.201';
+  const dbHost = connSettings?.samchukDb.host || 'ยังไม่ได้ตั้งค่า';
   const dbPort = connSettings?.samchukDb.port || 3306;
+  const samchukDbName = connSettings?.samchukDb.database || 'samchuk_attendance_v2';
 
   return (
     <div className="space-y-5 pb-8">
@@ -228,7 +247,7 @@ export const SystemLogsView: React.FC = () => {
             </span>
           </div>
           <p className="text-xs text-slate-500 mt-0.5">
-            ตรวจสอบสถานะการเชื่อมต่อทั้ง 2 ฐานข้อมูล (samchuk_attendance & hosoffice), สถาปัตยกรรม Central API Gateway, Sync Logs และ Audit Logs
+            ตรวจสอบสถานะการเชื่อมต่อทั้ง 2 ฐานข้อมูล ({samchukDbName} & {connSettings?.hosofficeDb.database || 'hosoffice'}), สถาปัตยกรรม Central API Gateway, Sync Logs และ Audit Logs
           </p>
         </div>
 
@@ -335,7 +354,7 @@ export const SystemLogsView: React.FC = () => {
 
           {/* Two Database Cards Side-by-Side */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-            {/* Database 1: samchuk_attendance */}
+            {/* Database 1: Sam_Att V2 Isolated DB */}
             <div className="bg-white border border-[#E9E5F2] rounded-2xl p-5 shadow-2xs flex flex-col justify-between space-y-4">
               <div className="space-y-4">
                 <div className="flex items-start justify-between gap-3">
@@ -345,7 +364,7 @@ export const SystemLogsView: React.FC = () => {
                     </div>
                     <div>
                       <h3 className="text-base font-bold text-slate-900">
-                        ฐานข้อมูลที่ 1: {connSettings?.samchukDb.database || 'samchuk_attendance'}
+                        ฐานข้อมูลที่ 1: {samchukDbName}
                       </h3>
                       <p className="text-xs text-slate-500">
                         ระบบบันทึกเวลา, ตารางกะ, ผังเวร, ข้อมูลสแกนดิบ (แยกอิสระจากระบบอื่น)
@@ -361,7 +380,7 @@ export const SystemLogsView: React.FC = () => {
                   <div className="flex items-center justify-between">
                     <span className="text-slate-500">ชื่อฐานข้อมูล (Schema):</span>
                     <span className="font-mono font-bold text-slate-900">
-                      {connSettings?.samchukDb.database || 'samchuk_attendance'}
+                      {samchukDbName}
                     </span>
                   </div>
                   <div className="flex items-center justify-between">
@@ -395,7 +414,7 @@ export const SystemLogsView: React.FC = () => {
                 <RefreshCw
                   className={`w-3.5 h-3.5 ${testingDb === 'SAMCHUK' ? 'animate-spin' : ''}`}
                 />
-                <span>ตรวจสอบการเชื่อมต่อ samchuk_attendance</span>
+                <span>ตรวจสอบการเชื่อมต่อ {samchukDbName}</span>
               </button>
             </div>
 

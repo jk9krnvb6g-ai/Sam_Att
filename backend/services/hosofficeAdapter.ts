@@ -15,6 +15,7 @@
  * 3. NEVER report a live Push as "SUCCESS" when running in Mock or Phase 2 Preview mode.
  */
 
+import mysql, { RowDataPacket } from 'mysql2/promise';
 import {
   EngineAttendanceRecord,
   EnginePersonnel,
@@ -85,7 +86,7 @@ export interface HosOfficePushPayloadItem {
 export interface HosOfficePushPreviewResult {
   canExecuteLivePush: boolean;
   phaseStatus: 'PHASE2_PREVIEW_ONLY_AWAITING_CONTRACT' | 'AWAITING_CONFIGURATION';
-  configurationStatus: 'AWAITING_CONFIGURATION';
+  configurationStatus: 'CONFIGURED' | 'AWAITING_CONFIGURATION';
   message: string;
   validCount: number;
   invalidCount: number;
@@ -105,17 +106,20 @@ export class HosOfficeAdapter {
     host: string;
     port: number;
     database: string;
+    sourceTable: string;
     user: string;
     passwordMasked: string;
     statusMessage: string;
   } {
-    const host = process.env.HOSOFFICE_DB_HOST || '';
+    const host = (process.env.HOSOFFICE_DB_HOST || '').trim();
     const port = Number(process.env.HOSOFFICE_DB_PORT || 3306);
-    const database = process.env.HOSOFFICE_DB_NAME || 'hosoffice';
-    const user = process.env.HOSOFFICE_DB_USER || '';
+    const database = (process.env.HOSOFFICE_DB_NAME || 'hosoffice').trim() || 'hosoffice';
+    const sourceTable =
+      (process.env.HOSOFFICE_HR_PERSON_TABLE || 'hr_person').trim() || 'hr_person';
+    const user = (process.env.HOSOFFICE_DB_USER || '').trim();
     const password = process.env.HOSOFFICE_DB_PASSWORD || '';
 
-    const configured = Boolean(host && user && password);
+    const configured = Boolean(host && user && password.length > 0);
 
     return {
       configured,
@@ -123,12 +127,83 @@ export class HosOfficeAdapter {
       host: host || 'ยังไม่ได้ตั้งค่า (AWAITING_CONFIGURATION)',
       port,
       database,
+      sourceTable,
       user: user || 'ยังไม่ได้ตั้งค่า (AWAITING_CONFIGURATION)',
-      passwordMasked: password ? '••••••••••••' : 'ยังไม่ได้ตั้งค่า',
+      passwordMasked: password.length > 0 ? '••••••••••••' : 'ยังไม่ได้ตั้งค่า',
       statusMessage: configured
-        ? 'พบค่าตั้งต้นการเชื่อมต่อ HOSOffice ใน Environment Variables'
-        : 'AWAITING_CONFIGURATION: รอข้อมูลการเชื่อมต่อและ Schema จริงของฐานข้อมูล HOSOffice จากเซิร์ฟเวอร์โรงพยาบาลสามชุก',
+        ? `ตั้งค่าการเชื่อมต่อ HOSOffice (${host}:${port}/${database}) จาก Environment Variables เรียบร้อยแล้ว`
+        : 'AWAITING_CONFIGURATION: ยังไม่ได้กำหนดค่า HOSOFFICE_DB_HOST, HOSOFFICE_DB_USER หรือ HOSOFFICE_DB_PASSWORD ใน Environment Variables',
     };
+  }
+
+  /**
+   * Perform a real MySQL connectivity test (`SELECT 1`) against HOSOffice when configured.
+   * If not configured, honestly reports `AWAITING_CONFIGURATION` without faking connectivity.
+   */
+  public static async testDatabaseConnection(): Promise<{
+    configured: boolean;
+    connected: boolean;
+    configurationStatus: 'CONFIGURED' | 'AWAITING_CONFIGURATION';
+    host: string;
+    port: number;
+    database: string;
+    sourceTable: string;
+    message: string;
+    error?: string;
+  }> {
+    const config = this.getConnectionConfigStatus();
+    if (!config.configured) {
+      return {
+        configured: false,
+        connected: false,
+        configurationStatus: 'AWAITING_CONFIGURATION',
+        host: config.host,
+        port: config.port,
+        database: config.database,
+        sourceTable: config.sourceTable,
+        message: config.statusMessage,
+      };
+    }
+
+    let conn: mysql.Connection | null = null;
+    try {
+      conn = await mysql.createConnection({
+        host: (process.env.HOSOFFICE_DB_HOST || '').trim(),
+        port: config.port,
+        user: (process.env.HOSOFFICE_DB_USER || '').trim(),
+        password: process.env.HOSOFFICE_DB_PASSWORD || '',
+        database: config.database,
+        connectTimeout: 5000,
+      });
+      await conn.execute('SELECT 1 AS ok');
+      return {
+        configured: true,
+        connected: true,
+        configurationStatus: 'CONFIGURED',
+        host: config.host,
+        port: config.port,
+        database: config.database,
+        sourceTable: config.sourceTable,
+        message: `เชื่อมต่อฐานข้อมูล HOSOffice (${config.host}:${config.port}/${config.database}) สำเร็จ`,
+      };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : 'Unknown MySQL connection error';
+      return {
+        configured: true,
+        connected: false,
+        configurationStatus: 'CONFIGURED',
+        host: config.host,
+        port: config.port,
+        database: config.database,
+        sourceTable: config.sourceTable,
+        message: `ตั้งค่า HOSOffice แล้ว แต่ไม่สามารถเชื่อมต่อฐานข้อมูล (${config.host}:${config.port}/${config.database}): ${errMsg}`,
+        error: errMsg,
+      };
+    } finally {
+      if (conn) {
+        await conn.end().catch(() => {});
+      }
+    }
   }
 
   /**
@@ -276,7 +351,7 @@ export class HosOfficeAdapter {
         status: 'AWAITING_REAL_CREDENTIALS',
         configurationStatus: 'AWAITING_CONFIGURATION',
         message:
-          'AWAITING_CONFIGURATION: ยังไม่ได้เชื่อมต่อฐานข้อมูล HOSOffice จริง (รอข้อมูล Host/Credentials และ Schema ตาราง hr_person จริงจากโรงพยาบาลสามชุก) — ระบบไม่สร้างผลการ Sync สำเร็จปลอมตามข้อกำหนด §6',
+          'AWAITING_CONFIGURATION: ยังไม่ได้เชื่อมต่อฐานข้อมูล HOSOffice จริง (รอการตั้งค่า HOSOFFICE_DB_HOST / HOSOFFICE_DB_USER / HOSOFFICE_DB_PASSWORD ใน Environment Variables) — ระบบไม่สร้างผลการ Sync สำเร็จปลอมตามข้อกำหนด §6',
         totalRead: 0,
         insertedCount: 0,
         updatedCount: 0,
@@ -285,19 +360,57 @@ export class HosOfficeAdapter {
       };
     }
 
-    return {
-      connected: false,
-      mode: 'AWAITING_REAL_CREDENTIALS',
-      status: 'AWAITING_REAL_CREDENTIALS',
-      configurationStatus: 'AWAITING_CONFIGURATION',
-      message:
-        'AWAITING_CONFIGURATION: พบการตั้งค่าเบื้องต้น แต่ยังรอการเปิดสิทธิ์เชื่อมต่อเครือข่ายภายในโรงพยาบาลสามชุก (10.2.0.201:3306) เพื่ออ่านตาราง hr_person จริง',
-      totalRead: 0,
-      insertedCount: 0,
-      updatedCount: 0,
-      fingleIdChangedCount: 0,
-      mappingIssues: [],
-    };
+    const safeTable = config.sourceTable.replace(/[^a-zA-Z0-9_]/g, '') || 'hr_person';
+    let conn: mysql.Connection | null = null;
+    try {
+      conn = await mysql.createConnection({
+        host: (process.env.HOSOFFICE_DB_HOST || '').trim(),
+        port: config.port,
+        user: (process.env.HOSOFFICE_DB_USER || '').trim(),
+        password: process.env.HOSOFFICE_DB_PASSWORD || '',
+        database: config.database,
+        connectTimeout: 8000,
+      });
+
+      const [rows] = await conn.execute<RowDataPacket[]>(`SELECT * FROM \`${safeTable}\``);
+      const rawRows = rows as unknown as RawHosOfficePersonRow[];
+      const { validPersonnel, mappingIssues } = this.mapAndValidateHosOfficeRows(rawRows);
+
+      const upsertRes = await params.repository.withTransaction((repo) =>
+        repo.upsertPersonnelFromHosOffice(validPersonnel, syncDateStr, actor)
+      );
+
+      return {
+        connected: true,
+        mode: 'LIVE_MYSQL',
+        status: mappingIssues.length > 0 ? 'PARTIAL_WITH_ISSUES' : 'SUCCESS',
+        configurationStatus: 'CONFIGURED',
+        message: `ซิงค์ข้อมูลบุคลากรจากฐานข้อมูล HOSOffice (${config.database}.${safeTable}) สำเร็จ: อ่าน ${rawRows.length}, เพิ่มใหม่ ${upsertRes.insertedCount}, อัปเดต ${upsertRes.updatedCount}, เปลี่ยน FINGLE_ID ${upsertRes.fingleIdChangedCount}, รายการต้องตรวจสอบ ${mappingIssues.length}`,
+        totalRead: rawRows.length,
+        insertedCount: upsertRes.insertedCount,
+        updatedCount: upsertRes.updatedCount,
+        fingleIdChangedCount: upsertRes.fingleIdChangedCount,
+        mappingIssues,
+      };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : 'Unknown MySQL error';
+      return {
+        connected: false,
+        mode: 'LIVE_MYSQL',
+        status: 'FAILED',
+        configurationStatus: 'CONFIGURED',
+        message: `ไม่สามารถอ่านตาราง ${config.database}.${safeTable} จากฐานข้อมูล HOSOffice (${config.host}:${config.port}): ${errMsg}`,
+        totalRead: 0,
+        insertedCount: 0,
+        updatedCount: 0,
+        fingleIdChangedCount: 0,
+        mappingIssues: [],
+      };
+    } finally {
+      if (conn) {
+        await conn.end().catch(() => {});
+      }
+    }
   }
 
   /**
@@ -327,7 +440,7 @@ export class HosOfficeAdapter {
       if (!rec) {
         validationErrors.push({
           attendanceId: attId,
-          reason: 'ไม่พบรายการ Attendance ในฐานข้อมูล samchuk_attendance',
+          reason: `ไม่พบรายการ Attendance ในฐานข้อมูล ${params.repository.getDatabaseName()}`,
         });
         continue;
       }
@@ -379,6 +492,8 @@ export class HosOfficeAdapter {
 
       previewPayloads.push(payloadItem);
 
+      const hosConfig = this.getConnectionConfigStatus();
+
       const historyEntry: RepositoryPushHistory = {
         id: `PUSH_PREV_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
         attendanceId: rec.id,
@@ -394,7 +509,7 @@ export class HosOfficeAdapter {
         pushedAt: nowIso,
         responseStatus: 'DRY_RUN_PREVIEW',
         responseSummary:
-          'ตรวจสอบความถูกต้องและสร้าง Preview Payload สำเร็จ (AWAITING_CONFIGURATION / Phase 2: รอยืนยัน Contract และสิทธิ์เขียนข้อมูลจริงจาก HOSOffice — ยังไม่มีการส่งข้อมูลเข้า Production จริง)',
+          `ตรวจสอบความถูกต้องและสร้าง Preview Payload สำเร็จ (${hosConfig.configurationStatus} / Phase 2: รอยืนยัน Contract และสิทธิ์เขียนข้อมูลจริงจาก HOSOffice — ยังไม่มีการส่งข้อมูลเข้า Production จริง)`,
         payloadJson: JSON.stringify(payloadItem),
       };
 
@@ -402,12 +517,14 @@ export class HosOfficeAdapter {
       recordedPreviewHistory.push(historyEntry);
     }
 
+    const hosConfig = this.getConnectionConfigStatus();
+
     return {
       canExecuteLivePush: false,
       phaseStatus: 'PHASE2_PREVIEW_ONLY_AWAITING_CONTRACT',
-      configurationStatus: 'AWAITING_CONFIGURATION',
+      configurationStatus: hosConfig.configurationStatus,
       message:
-        'AWAITING_CONFIGURATION: Phase 2 จัดเตรียม Data Mapping, Validation และ Preview Payload เรียบร้อยแล้ว (ยังไม่ได้เขียนข้อมูลจริงลง HOSOffice จนกว่าจะตรวจสอบ Contract และสิทธิ์กับโรงพยาบาลสามชุกตามข้อกำหนด §6)',
+        `${hosConfig.configurationStatus}: Phase 2 จัดเตรียม Data Mapping, Validation และ Preview Payload เรียบร้อยแล้ว (ยังไม่ได้เขียนข้อมูลจริงลง HOSOffice จนกว่าจะตรวจสอบ Contract และสิทธิ์กับโรงพยาบาลสามชุกตามข้อกำหนด §6)`,
       validCount: previewPayloads.length,
       invalidCount: validationErrors.length,
       validationErrors,

@@ -95,11 +95,16 @@ export const SettingsView: React.FC = () => {
   const handleTestHosOffice = async () => {
     setHosTestResult('กำลังตรวจสอบสถานะการเชื่อมต่อ HOSOffice...');
     try {
-      const settings = await apiAttendanceAdapter.fetchConnectionSettings();
+      const [health, settings] = await Promise.all([
+        apiAttendanceAdapter.checkHealth(),
+        apiAttendanceAdapter.fetchConnectionSettings(),
+      ]);
       setConnSettings(settings);
-      setHosTestResult(
-        `ตรวจสอบการตั้งค่า HOSOffice สำเร็จ (${settings.hosofficeDb.host}:${settings.hosofficeDb.port} / ${settings.hosofficeDb.database}): โหมด ${settings.hosofficeDb.mode}`
-      );
+      if (health.hosofficeDb) {
+        setHosTestResult(health.hosofficeDb.message);
+      } else {
+        setHosTestResult(settings.hosofficeDb.statusMessage);
+      }
     } catch (err) {
       setHosTestResult(
         `ไม่สามารถตรวจสอบการตั้งค่า HOSOffice ได้: ${err instanceof Error ? err.message : 'Unknown error'}`
@@ -109,12 +114,12 @@ export const SettingsView: React.FC = () => {
 
   const samchukHostPort = connSettings
     ? `${connSettings.samchukDb.host}:${connSettings.samchukDb.port}`
-    : '10.2.0.201:3306';
-  const samchukDbName = connSettings?.samchukDb.database || 'samchuk_attendance';
+    : 'ยังไม่ได้ตั้งค่า';
+  const samchukDbName = connSettings?.samchukDb.database || 'samchuk_attendance_v2';
 
   const hosHostPort = connSettings
     ? `${connSettings.hosofficeDb.host}:${connSettings.hosofficeDb.port}`
-    : '10.2.0.201:3306';
+    : 'ยังไม่ได้ตั้งค่า (AWAITING_CONFIGURATION)';
   const hosDbName = connSettings?.hosofficeDb.database || 'hosoffice';
 
   return (

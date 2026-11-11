@@ -212,6 +212,14 @@ export class SamAttRepository implements ISamAttRepository {
     this.rateLimits = new Map(parsed.rateLimitEntries || []);
   }
 
+  public getDatabaseName(): string {
+    const envDb = process.env.SAM_ATT_DB_NAME?.trim();
+    if (envDb) return envDb;
+    return this.mode === 'TEST'
+      ? `samchuk_attendance_test (${this.persistenceFilePath || 'memory'})`
+      : 'samchuk_attendance_mock';
+  }
+
   public async checkHealth(): Promise<{
     healthy: boolean;
     mode: RepositoryMode;
@@ -221,10 +229,7 @@ export class SamAttRepository implements ISamAttRepository {
     return {
       healthy: true,
       mode: this.mode,
-      database:
-        this.mode === 'TEST'
-          ? `samchuk_attendance_test (${this.persistenceFilePath || 'memory'})`
-          : 'samchuk_attendance_mock',
+      database: this.getDatabaseName(),
       message: `Repository active in ${this.mode} mode`,
     };
   }

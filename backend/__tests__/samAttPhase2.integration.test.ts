@@ -1645,4 +1645,460 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
       }
     }
   });
+
+  it('Scenario 20: Database Hub (`/settings/connections` & `/settings/connections/health`) Dynamic `SAM_ATT_DB_NAME`, Real MySQL Health Check, HOSOffice Environment Status & Secret Masking', async () => {
+    const origSecret = process.env.SAM_ATT_JWT_SECRET;
+    const origSamDbHost = process.env.SAM_ATT_DB_HOST;
+    const origSamDbPort = process.env.SAM_ATT_DB_PORT;
+    const origSamDbName = process.env.SAM_ATT_DB_NAME;
+    const origSamDbUser = process.env.SAM_ATT_DB_USER;
+    const origSamDbPass = process.env.SAM_ATT_DB_PASSWORD;
+    const origHosHost = process.env.HOSOFFICE_DB_HOST;
+    const origHosPort = process.env.HOSOFFICE_DB_PORT;
+    const origHosName = process.env.HOSOFFICE_DB_NAME;
+    const origHosUser = process.env.HOSOFFICE_DB_USER;
+    const origHosPass = process.env.HOSOFFICE_DB_PASSWORD;
+    const origHosTable = process.env.HOSOFFICE_HR_PERSON_TABLE;
+
+    process.env.SAM_ATT_JWT_SECRET =
+      'samchuk_hospital_database_hub_verification_secret_min_32_chars';
+
+    const executedHealthQueries: string[] = [];
+    let simulateMySqlDown = false;
+
+    const fakeRealPool: SqlConnectionPool = {
+      async execute<T = any>(sql: string): Promise<[T, any]> {
+        const norm = sql.trim();
+        executedHealthQueries.push(norm);
+        if (simulateMySqlDown) {
+          throw new DatabaseUnavailableError(
+            'ECONNREFUSED 10.2.0.201:3306 — MySQL connection failed during health check'
+          );
+        }
+        if (norm.startsWith('SELECT 1')) {
+          return [[{ ok: 1 }] as unknown as T, []];
+        }
+        if (norm.includes('FROM revoked_sessions')) {
+          return [[] as unknown as T, []];
+        }
+        if (norm.includes('FROM users')) {
+          return [
+            [
+              {
+                id: 'USR_ADMIN',
+                username: 'admin',
+                password_hash: AuthService.hashPassword('admin_secret_123'),
+                full_name: 'ผู้ดูแลระบบ',
+                role: 'ADMIN',
+                person_id: null,
+                department: 'IT',
+                position: 'Admin',
+                active: 1,
+              },
+            ] as unknown as T,
+            [],
+          ];
+        }
+        return [[] as unknown as T, []];
+      },
+      async getConnection(): Promise<SqlQueryableConnection> {
+        throw new Error('Not needed for health check');
+      },
+      async end() {},
+    };
+
+    try {
+      // 1. Configure Sam_Att V2 Production Environment (`SAM_ATT_DB_NAME=samchuk_attendance_v2`) and leave HOSOffice unconfigured
+      process.env.SAM_ATT_DB_HOST = '127.0.0.1';
+      process.env.SAM_ATT_DB_PORT = '3306';
+      process.env.SAM_ATT_DB_NAME = 'samchuk_attendance_v2';
+      process.env.SAM_ATT_DB_USER = 'sam_att_user';
+      process.env.SAM_ATT_DB_PASSWORD = 'super_secret_sam_att_password_do_not_leak';
+
+      delete process.env.HOSOFFICE_DB_HOST;
+      delete process.env.HOSOFFICE_DB_USER;
+      delete process.env.HOSOFFICE_DB_PASSWORD;
+
+      const realRepo = new MySqlSamAttRepository(fakeRealPool);
+      assert.equal(realRepo.getDatabaseName(), 'samchuk_attendance_v2');
+
+      const app = express();
+      app.use('/api/Sam_Att', createSamAttRouter(realRepo));
+
+      const adminToken = AuthService.issueSignedToken(
+        {
+          id: 'USR_ADMIN',
+          username: 'admin',
+          passwordHash: '',
+          fullName: 'ผู้ดูแลระบบ',
+          role: 'ADMIN',
+          personId: null,
+          department: 'IT',
+          position: 'Admin',
+          active: true,
+        },
+        3600,
+        'REAL'
+      );
+
+      // Verify GET /api/Sam_Att/settings/connections reports `samchuk_attendance_v2` in both `architecture.isolatedDatabase` and `samchukAttendanceDb.database`
+      const connRes = await invokeGatewayRoute(app, {
+        method: 'GET',
+        url: '/api/Sam_Att/settings/connections',
+        headers: { Authorization: `Bearer ${adminToken}` },
+      });
+
+      assert.equal(connRes.status, 200);
+      assert.equal(connRes.body.success, true);
+      assert.equal(connRes.body.repositoryMode, 'REAL');
+      assert.equal(connRes.body.architecture.isolatedDatabase, 'samchuk_attendance_v2');
+      assert.equal(connRes.body.samchukAttendanceDb.database, 'samchuk_attendance_v2');
+      assert.equal(
+        connRes.body.architecture.isolatedDatabase,
+        connRes.body.samchukAttendanceDb.database,
+        'architecture.isolatedDatabase and samchukAttendanceDb.database must match'
+      );
+      assert.equal(
+        connRes.body.samchukAttendanceDb.database,
+        realRepo.getDatabaseName(),
+        'Database Hub must report the exact database name used by the Repository'
+      );
+      assert.equal(connRes.body.samchukAttendanceDb.configured, true);
+      assert.equal(connRes.body.samchukAttendanceDb.host, '127.0.0.1');
+      assert.equal(connRes.body.samchukAttendanceDb.user, 'sam_att_user');
+      assert.equal(connRes.body.samchukAttendanceDb.passwordMasked, '••••••••••••');
+      assert.equal((connRes.body.samchukAttendanceDb as any).password, undefined);
+      assert.ok(
+        !JSON.stringify(connRes.body).includes('super_secret_sam_att_password_do_not_leak'),
+        'API response must NEVER leak raw database password'
+      );
+
+      // Verify HOSOffice reports AWAITING_CONFIGURATION honestly when not configured in env
+      assert.equal(connRes.body.hosofficeDb.configured, false);
+      assert.equal(connRes.body.hosofficeDb.configurationStatus, 'AWAITING_CONFIGURATION');
+      assert.equal(connRes.body.hosofficeDb.passwordMasked, 'ยังไม่ได้ตั้งค่า');
+
+      // 2. Verify custom SAM_ATT_DB_NAME dynamically updates Database Hub response
+      process.env.SAM_ATT_DB_NAME = 'samchuk_attendance_custom_env';
+      const customConnRes = await invokeGatewayRoute(app, {
+        method: 'GET',
+        url: '/api/Sam_Att/settings/connections',
+        headers: { Authorization: `Bearer ${adminToken}` },
+      });
+      assert.equal(customConnRes.status, 200);
+      assert.equal(
+        customConnRes.body.architecture.isolatedDatabase,
+        'samchuk_attendance_custom_env'
+      );
+      assert.equal(
+        customConnRes.body.samchukAttendanceDb.database,
+        'samchuk_attendance_custom_env'
+      );
+      assert.equal(realRepo.getDatabaseName(), 'samchuk_attendance_custom_env');
+
+      // Restore SAM_ATT_DB_NAME to samchuk_attendance_v2
+      process.env.SAM_ATT_DB_NAME = 'samchuk_attendance_v2';
+
+      // 3. Verify GET /api/Sam_Att/settings/connections/health executes real `SELECT 1 AS ok` against MySQL
+      const countBefore = executedHealthQueries.filter((q) => q.startsWith('SELECT 1')).length;
+      const healthRes = await invokeGatewayRoute(app, {
+        method: 'GET',
+        url: '/api/Sam_Att/settings/connections/health',
+        headers: { Authorization: `Bearer ${adminToken}` },
+      });
+      const countAfter = executedHealthQueries.filter((q) => q.startsWith('SELECT 1')).length;
+      assert.equal(healthRes.status, 200);
+      assert.equal(healthRes.body.ok, true);
+      assert.equal(healthRes.body.healthy, true);
+      assert.equal(healthRes.body.database, 'samchuk_attendance_v2');
+      assert.equal(healthRes.body.samchukAttendanceDb.database, 'samchuk_attendance_v2');
+      assert.equal(healthRes.body.samchukAttendanceDb.healthy, true);
+      assert.ok(countAfter > countBefore, 'Health check endpoint must execute real SELECT 1 query');
+      assert.equal(healthRes.body.hosofficeDb.configured, false);
+      assert.equal(healthRes.body.hosofficeDb.connected, false);
+      assert.equal(healthRes.body.hosofficeDb.configurationStatus, 'AWAITING_CONFIGURATION');
+
+      // 4. Verify health check reports healthy: false when MySQL connection fails (never fakes success)
+      simulateMySqlDown = true;
+      const failedHealthRes = await invokeGatewayRoute(app, {
+        method: 'GET',
+        url: '/api/Sam_Att/settings/connections/health',
+        headers: { Authorization: `Bearer ${adminToken}` },
+      });
+      // Note: When MySQL is down for auth middleware, it returns 503 SAM_ATT_MYSQL_UNAVAILABLE (Fail Closed)
+      assert.equal(failedHealthRes.status, 503);
+      simulateMySqlDown = false;
+
+      // 5. Verify HOSOffice environment configuration is detected when HOSOFFICE_DB_* env vars are set
+      process.env.HOSOFFICE_DB_HOST = '10.2.0.201';
+      process.env.HOSOFFICE_DB_PORT = '3306';
+      process.env.HOSOFFICE_DB_NAME = 'hosoffice';
+      process.env.HOSOFFICE_DB_USER = 'hos_reader';
+      process.env.HOSOFFICE_DB_PASSWORD = 'super_secret_hosoffice_password_do_not_leak';
+      process.env.HOSOFFICE_HR_PERSON_TABLE = 'hr_person';
+
+      const hosConfiguredRes = await invokeGatewayRoute(app, {
+        method: 'GET',
+        url: '/api/Sam_Att/settings/connections',
+        headers: { Authorization: `Bearer ${adminToken}` },
+      });
+      assert.equal(hosConfiguredRes.status, 200);
+      assert.equal(hosConfiguredRes.body.hosofficeDb.configured, true);
+      assert.equal(hosConfiguredRes.body.hosofficeDb.configurationStatus, 'CONFIGURED');
+      assert.equal(hosConfiguredRes.body.hosofficeDb.host, '10.2.0.201');
+      assert.equal(hosConfiguredRes.body.hosofficeDb.database, 'hosoffice');
+      assert.equal(hosConfiguredRes.body.hosofficeDb.sourceTable, 'hr_person');
+      assert.equal(hosConfiguredRes.body.hosofficeDb.user, 'hos_reader');
+      assert.equal(hosConfiguredRes.body.hosofficeDb.passwordMasked, '••••••••••••');
+      assert.ok(
+        !JSON.stringify(hosConfiguredRes.body).includes(
+          'super_secret_hosoffice_password_do_not_leak'
+        ),
+        'API response must NEVER leak HOSOffice database password'
+      );
+    } finally {
+      if (origSecret !== undefined) process.env.SAM_ATT_JWT_SECRET = origSecret;
+      else delete process.env.SAM_ATT_JWT_SECRET;
+      if (origSamDbHost !== undefined) process.env.SAM_ATT_DB_HOST = origSamDbHost;
+      else delete process.env.SAM_ATT_DB_HOST;
+      if (origSamDbPort !== undefined) process.env.SAM_ATT_DB_PORT = origSamDbPort;
+      else delete process.env.SAM_ATT_DB_PORT;
+      if (origSamDbName !== undefined) process.env.SAM_ATT_DB_NAME = origSamDbName;
+      else delete process.env.SAM_ATT_DB_NAME;
+      if (origSamDbUser !== undefined) process.env.SAM_ATT_DB_USER = origSamDbUser;
+      else delete process.env.SAM_ATT_DB_USER;
+      if (origSamDbPass !== undefined) process.env.SAM_ATT_DB_PASSWORD = origSamDbPass;
+      else delete process.env.SAM_ATT_DB_PASSWORD;
+      if (origHosHost !== undefined) process.env.HOSOFFICE_DB_HOST = origHosHost;
+      else delete process.env.HOSOFFICE_DB_HOST;
+      if (origHosPort !== undefined) process.env.HOSOFFICE_DB_PORT = origHosPort;
+      else delete process.env.HOSOFFICE_DB_PORT;
+      if (origHosName !== undefined) process.env.HOSOFFICE_DB_NAME = origHosName;
+      else delete process.env.HOSOFFICE_DB_NAME;
+      if (origHosUser !== undefined) process.env.HOSOFFICE_DB_USER = origHosUser;
+      else delete process.env.HOSOFFICE_DB_USER;
+      if (origHosPass !== undefined) process.env.HOSOFFICE_DB_PASSWORD = origHosPass;
+      else delete process.env.HOSOFFICE_DB_PASSWORD;
+      if (origHosTable !== undefined) process.env.HOSOFFICE_HR_PERSON_TABLE = origHosTable;
+      else delete process.env.HOSOFFICE_HR_PERSON_TABLE;
+    }
+  });
+
+  it('Scenario 21: Sam_Att V2 Deployment Center — ADMIN-Only RBAC, 8-Item Preflight Check, Command Injection Rejection, Phase 1 Lock & Production Build No-Demo-Bypass Verification', async () => {
+    const origSecret = process.env.SAM_ATT_JWT_SECRET;
+    process.env.SAM_ATT_JWT_SECRET =
+      'samchuk_hospital_deployment_center_verification_secret_min_32_chars';
+
+    try {
+      const { app } = createTestEnvironment();
+
+      // Obtain real tokens for GENERAL_USER, RESPONSIBLE_STAFF, and ADMIN
+      const genLogin = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/auth/login',
+        body: { username: 'nurse_kanda', password: 'user_secret_123' },
+      });
+      assert.equal(genLogin.status, 200);
+      const genToken = genLogin.body.token as string;
+
+      const staffLogin = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/auth/login',
+        body: { username: 'staff_test', password: 'staff_secret_123' },
+      });
+      assert.equal(staffLogin.status, 200);
+      const staffToken = staffLogin.body.token as string;
+
+      const adminLogin = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/auth/login',
+        body: { username: 'admin_test', password: 'admin_secret_123' },
+      });
+      assert.equal(adminLogin.status, 200);
+      const adminToken = adminLogin.body.token as string;
+
+      // 1. Unauthenticated or fake Demo Admin requests MUST be rejected with HTTP 401
+      const unauthRes = await invokeGatewayRoute(app, {
+        method: 'GET',
+        url: '/api/Sam_Att/deployment/status',
+      });
+      assert.equal(unauthRes.status, 401);
+
+      const fakeDemoHeaderRes = await invokeGatewayRoute(app, {
+        method: 'GET',
+        url: '/api/Sam_Att/deployment/status',
+        headers: {
+          Authorization: 'Bearer DEMO_PREVIEW_ADMIN_ONLY',
+          'x-demo-admin': 'true',
+          'x-mock-role': 'ADMIN',
+        },
+      });
+      assert.equal(
+        fakeDemoHeaderRes.status,
+        401,
+        'Backend must NEVER allow Demo Admin header/token bypass'
+      );
+
+      // 2. GENERAL_USER and RESPONSIBLE_STAFF MUST be blocked with HTTP 403 on all /deployment/* endpoints
+      const protectedEndpoints: Array<{ method: 'GET' | 'POST'; url: string }> = [
+        { method: 'GET', url: '/api/Sam_Att/deployment/status' },
+        { method: 'POST', url: '/api/Sam_Att/deployment/check-updates' },
+        { method: 'POST', url: '/api/Sam_Att/deployment/preflight' },
+        { method: 'GET', url: '/api/Sam_Att/deployment/history' },
+        { method: 'POST', url: '/api/Sam_Att/deployment/approve' },
+        { method: 'POST', url: '/api/Sam_Att/deployment/rollback' },
+      ];
+
+      for (const ep of protectedEndpoints) {
+        const genRes = await invokeGatewayRoute(app, {
+          method: ep.method,
+          url: ep.url,
+          headers: { Authorization: `Bearer ${genToken}` },
+          body: ep.method === 'POST' ? {} : undefined,
+        });
+        assert.equal(
+          genRes.status,
+          403,
+          `GENERAL_USER must be blocked with 403 on ${ep.method} ${ep.url}`
+        );
+
+        const staffRes = await invokeGatewayRoute(app, {
+          method: ep.method,
+          url: ep.url,
+          headers: { Authorization: `Bearer ${staffToken}` },
+          body: ep.method === 'POST' ? {} : undefined,
+        });
+        assert.equal(
+          staffRes.status,
+          403,
+          `RESPONSIBLE_STAFF must be blocked with 403 on ${ep.method} ${ep.url}`
+        );
+      }
+
+      // 3. ADMIN can access GET /api/Sam_Att/deployment/status
+      const statusRes = await invokeGatewayRoute(app, {
+        method: 'GET',
+        url: '/api/Sam_Att/deployment/status',
+        headers: { Authorization: `Bearer ${adminToken}` },
+      });
+      assert.equal(statusRes.status, 200);
+      assert.equal(statusRes.body.success, true);
+      assert.equal(statusRes.body.phase, 'PHASE_1_READ_ONLY');
+      assert.equal(statusRes.body.systemStatus.samAttFrontendPort, 3001);
+      assert.equal(statusRes.body.systemStatus.samAttFrontendPath, '/Sam_Att/');
+      assert.equal(statusRes.body.systemStatus.backendGatewayPort, 3002);
+      assert.equal(statusRes.body.systemStatus.backendGatewayPath, '/api/Sam_Att/');
+      assert.equal(
+        statusRes.body.systemStatus.githubRepositoryUrl,
+        'https://github.com/jk9krnvb6g-ai/Sam_Att'
+      );
+
+      // Must NOT fabricate fake versions like v2.0.0 or v2.0.1
+      assert.notEqual(statusRes.body.currentVersion.version, 'v2.0.0');
+      assert.notEqual(statusRes.body.currentVersion.version, 'v2.0.1');
+      assert.equal(statusRes.body.checklist.length, 8, 'Pre-Deployment Checklist must have 8 items');
+      assert.equal(statusRes.body.deploymentAgent.phase2AgentAvailable, false);
+      assert.equal(statusRes.body.deploymentAgent.approveEnabled, false);
+      assert.equal(statusRes.body.deploymentAgent.rollbackEnabled, false);
+
+      // 4. ADMIN can run POST /api/Sam_Att/deployment/preflight and Audit Log is recorded
+      const preflightRes = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/preflight',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: {},
+      });
+      assert.equal(preflightRes.status, 200);
+      assert.equal(preflightRes.body.success, true);
+      assert.equal(preflightRes.body.checklist.length, 8);
+
+      const historyRes = await invokeGatewayRoute(app, {
+        method: 'GET',
+        url: '/api/Sam_Att/deployment/history',
+        headers: { Authorization: `Bearer ${adminToken}` },
+      });
+      assert.equal(historyRes.status, 200);
+      assert.equal(historyRes.body.success, true);
+      assert.ok(
+        Array.isArray(historyRes.body.history) && historyRes.body.history.length >= 1,
+        'Deployment history must include recorded preflight check audit entry'
+      );
+
+      // 5. Reject any request payload attempting to pass shell commands, PowerShell scripts, Git URLs, or file paths (HTTP 400)
+      const forbiddenPayloads = [
+        { command: 'powershell -Command Get-Process' },
+        { powershell: 'Invoke-Expression' },
+        { script: 'deploy.ps1' },
+        { gitUrl: 'https://evil.example.com/repo.git' },
+        { filePath: 'C:\\Windows\\System32\\cmd.exe' },
+      ];
+
+      for (const badBody of forbiddenPayloads) {
+        const badRes = await invokeGatewayRoute(app, {
+          method: 'POST',
+          url: '/api/Sam_Att/deployment/preflight',
+          headers: { Authorization: `Bearer ${adminToken}` },
+          body: badBody,
+        });
+        assert.equal(
+          badRes.status,
+          400,
+          `Payload ${JSON.stringify(badBody)} must be rejected with HTTP 400`
+        );
+      }
+
+      // 6. Approve & Rollback require password re-authentication and enforce Phase 1 Read-Only Lock (HTTP 501)
+      const approveWrongPass = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/approve',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: { adminPassword: 'wrong_password' },
+      });
+      assert.equal(approveWrongPass.status, 401);
+
+      const approveLocked = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/approve',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: { adminPassword: 'admin_secret_123' },
+      });
+      assert.equal(approveLocked.status, 501);
+      assert.equal(approveLocked.body.liveDeployExecuted, false);
+
+      const rollbackLocked = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/rollback',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: { adminPassword: 'admin_secret_123' },
+      });
+      assert.equal(rollbackLocked.status, 501);
+      assert.equal(rollbackLocked.body.liveRollbackExecuted, false);
+
+      // 7. Verify Production Build bundle (`dist/assets`) does NOT contain Demo Admin authentication bypass
+      const distAssetsDir = path.resolve(process.cwd(), 'dist', 'assets');
+      if (fs.existsSync(distAssetsDir)) {
+        const jsFiles = fs
+          .readdirSync(distAssetsDir)
+          .filter((f) => f.endsWith('.js'));
+        for (const file of jsFiles) {
+          const bundleContent = fs.readFileSync(path.join(distAssetsDir, file), 'utf8');
+          assert.equal(
+            bundleContent.includes('DEMO_PREVIEW_ADMIN_ONLY'),
+            false,
+            `Production bundle ${file} must NOT contain Demo Admin bypass identifier DEMO_PREVIEW_ADMIN_ONLY`
+          );
+          assert.equal(
+            bundleContent.includes('demo_admin_preview'),
+            false,
+            `Production bundle ${file} must NOT contain demo_admin_preview account`
+          );
+        }
+      }
+    } finally {
+      if (origSecret !== undefined) process.env.SAM_ATT_JWT_SECRET = origSecret;
+      else delete process.env.SAM_ATT_JWT_SECRET;
+    }
+  });
 });
+
+

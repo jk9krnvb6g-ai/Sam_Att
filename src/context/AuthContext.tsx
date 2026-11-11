@@ -1,10 +1,14 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
 import { UserAccount } from '../types/attendance';
 import { apiAttendanceAdapter, BackendAuthenticatedUser } from '../services/apiAttendanceAdapter';
+import { getDemoAdminUser } from '../config/demoModeConfig';
 
 interface AuthContextType {
   currentUser: UserAccount | null;
   isLoadingAuth: boolean;
+  isDemoMode: boolean;
+  enterDemoMode: () => void;
+  exitDemoMode: () => void;
   login: (username: string, password: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => Promise<void>;
 }
@@ -29,6 +33,7 @@ function mapBackendUserToFrontendUser(u: BackendAuthenticatedUser): UserAccount 
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
   const [isLoadingAuth, setIsLoadingAuth] = useState<boolean>(true);
+  const [isDemoMode, setIsDemoMode] = useState<boolean>(false);
 
   const clearAuthSession = useCallback(() => {
     apiAttendanceAdapter.setAuthToken(null);
@@ -37,7 +42,26 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     } catch {
       // Ignore storage error
     }
+    setIsDemoMode(false);
     setCurrentUser(null);
+  }, []);
+
+  const enterDemoMode = useCallback(() => {
+    if (import.meta.env.DEV && !import.meta.env.PROD) {
+      const demoUser = getDemoAdminUser();
+      if (demoUser) {
+        apiAttendanceAdapter.setAuthToken(null);
+        setIsDemoMode(true);
+        setCurrentUser(demoUser);
+      }
+    }
+  }, []);
+
+  const exitDemoMode = useCallback(() => {
+    if (import.meta.env.DEV && !import.meta.env.PROD) {
+      setIsDemoMode(false);
+      setCurrentUser(null);
+    }
   }, []);
 
   // Validate stored Bearer token on startup via GET /api/Sam_Att/auth/me
@@ -48,6 +72,13 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       const token = apiAttendanceAdapter.getAuthToken();
       if (!token) {
         clearAuthSession();
+        if (import.meta.env.DEV && !import.meta.env.PROD) {
+          const demoUser = getDemoAdminUser();
+          if (demoUser && isMounted) {
+            setIsDemoMode(true);
+            setCurrentUser(demoUser);
+          }
+        }
         if (isMounted) setIsLoadingAuth(false);
         return;
       }
@@ -56,6 +87,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         const backendUser = await apiAttendanceAdapter.fetchCurrentUser();
         if (isMounted) {
           const mappedUser = mapBackendUserToFrontendUser(backendUser);
+          setIsDemoMode(false);
           setCurrentUser(mappedUser);
           try {
             localStorage.setItem(USER_SESSION_STORAGE_KEY, JSON.stringify(mappedUser));
@@ -66,6 +98,13 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       } catch {
         if (isMounted) {
           clearAuthSession();
+          if (import.meta.env.DEV && !import.meta.env.PROD) {
+            const demoUser = getDemoAdminUser();
+            if (demoUser) {
+              setIsDemoMode(true);
+              setCurrentUser(demoUser);
+            }
+          }
         }
       } finally {
         if (isMounted) {
@@ -110,6 +149,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
 
     const mappedUser = mapBackendUserToFrontendUser(res.user);
+    setIsDemoMode(false);
     setCurrentUser(mappedUser);
     try {
       localStorage.setItem(USER_SESSION_STORAGE_KEY, JSON.stringify(mappedUser));
@@ -120,12 +160,26 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   const logout = async (): Promise<void> => {
+    if (isDemoMode) {
+      exitDemoMode();
+      return;
+    }
     await apiAttendanceAdapter.logout();
     clearAuthSession();
   };
 
   return (
-    <AuthContext.Provider value={{ currentUser, isLoadingAuth, login, logout }}>
+    <AuthContext.Provider
+      value={{
+        currentUser,
+        isLoadingAuth,
+        isDemoMode,
+        enterDemoMode,
+        exitDemoMode,
+        login,
+        logout,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );

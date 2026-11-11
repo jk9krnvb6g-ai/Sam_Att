@@ -68,7 +68,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onToggleMobileSidebar }) => {
             <span className="text-slate-300">|</span>
             <span className="inline-flex items-center gap-1 font-mono-data text-[11px] text-slate-600">
               <Database className="w-3.5 h-3.5 text-purple-600" />
-              DB: samchuk_attendance
+              DB: samchuk_attendance_v2
             </span>
           </div>
 

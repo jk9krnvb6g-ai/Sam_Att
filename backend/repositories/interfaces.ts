@@ -91,6 +91,11 @@ export interface ISamAttRepository {
   readonly mode: RepositoryMode;
 
   /**
+   * Return the active database name configured for this repository (e.g. from SAM_ATT_DB_NAME).
+   */
+  getDatabaseName(): string;
+
+  /**
    * Check database health & connectivity.
    * In REAL mode, executes `SELECT 1` against MySQL and throws if unreachable.
    */

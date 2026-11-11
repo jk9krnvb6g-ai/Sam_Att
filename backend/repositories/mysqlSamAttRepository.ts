@@ -90,24 +90,25 @@ export class MySqlSamAttRepository implements ISamAttRepository {
   constructor(
     poolOrConfig?: SqlConnectionPool | MySqlConnectionConfig,
     boundTxConnection: SqlQueryableConnection | null = null,
-    databaseName = 'samchuk_attendance'
+    databaseName?: string
   ) {
     this.boundTxConnection = boundTxConnection;
-    this.databaseName = databaseName;
+    const envDbName = process.env.SAM_ATT_DB_NAME?.trim() || 'samchuk_attendance_v2';
+    this.databaseName = databaseName?.trim() || envDbName;
 
     if (poolOrConfig && 'getConnection' in poolOrConfig) {
       this.pool = poolOrConfig;
     } else {
       const cfg: MySqlConnectionConfig = poolOrConfig || {
-        host: process.env.SAM_ATT_DB_HOST || '',
+        host: (process.env.SAM_ATT_DB_HOST || '').trim(),
         port: Number(process.env.SAM_ATT_DB_PORT || 3306),
-        user: process.env.SAM_ATT_DB_USER || '',
+        user: (process.env.SAM_ATT_DB_USER || '').trim(),
         password: process.env.SAM_ATT_DB_PASSWORD || '',
-        database: process.env.SAM_ATT_DB_NAME || 'samchuk_attendance',
+        database: envDbName,
         connectionLimit: Number(process.env.SAM_ATT_DB_CONNECTION_LIMIT || 10),
       };
 
-      this.databaseName = cfg.database;
+      this.databaseName = cfg.database?.trim() || envDbName;
 
       if (!cfg.host || !cfg.user) {
         const unconfiguredErr = () =>
@@ -181,6 +182,11 @@ export class MySqlSamAttRepository implements ISamAttRepository {
     return result;
   }
 
+  public getDatabaseName(): string {
+    const envDb = process.env.SAM_ATT_DB_NAME?.trim();
+    return envDb || this.databaseName || 'samchuk_attendance_v2';
+  }
+
   /**
    * Check real MySQL connectivity (`SELECT 1`).
    */
@@ -190,12 +196,13 @@ export class MySqlSamAttRepository implements ISamAttRepository {
     database: string;
     message: string;
   }> {
+    const activeDb = this.getDatabaseName();
     await this.queryRows('SELECT 1 AS ok', []);
     return {
       healthy: true,
       mode: 'REAL',
-      database: this.databaseName,
-      message: `เชื่อมต่อฐานข้อมูล MySQL (${this.databaseName}) สำเร็จ`,
+      database: activeDb,
+      message: `เชื่อมต่อฐานข้อมูล MySQL (${activeDb}) สำเร็จ`,
     };
   }
 
