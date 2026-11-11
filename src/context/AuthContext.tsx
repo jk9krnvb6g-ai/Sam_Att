@@ -1,53 +1,131 @@
-import React, { createContext, useContext, useState, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
 import { UserAccount } from '../types/attendance';
-import { MOCK_USERS } from '../mock/mockData';
+import { apiAttendanceAdapter, BackendAuthenticatedUser } from '../services/apiAttendanceAdapter';
 
 interface AuthContextType {
   currentUser: UserAccount | null;
-  login: (username: string) => boolean;
-  logout: () => void;
-  switchUser: (userId: string) => void;
-  availableUsers: UserAccount[];
+  isLoadingAuth: boolean;
+  login: (username: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  logout: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+const USER_SESSION_STORAGE_KEY = 'sam_att_current_user';
+
+function mapBackendUserToFrontendUser(u: BackendAuthenticatedUser): UserAccount {
+  return {
+    id: u.userId || u.id || u.username,
+    username: u.username,
+    fullName: u.fullName,
+    role: u.role,
+    personId: u.personId ?? null,
+    department: u.department || '',
+    position: u.position || '',
+    active: true,
+  };
+}
+
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  // Default logged in as ADMIN for immediate evaluation; can switch or logout anytime
-  const [currentUser, setCurrentUser] = useState<UserAccount | null>(MOCK_USERS[0]);
+  const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
+  const [isLoadingAuth, setIsLoadingAuth] = useState<boolean>(true);
 
-  const login = (username: string): boolean => {
-    const found = MOCK_USERS.find(
-      (u) => u.username.toLowerCase() === username.toLowerCase() && u.active
-    );
-    if (found) {
-      setCurrentUser(found);
-      return true;
+  const clearAuthSession = useCallback(() => {
+    apiAttendanceAdapter.setAuthToken(null);
+    try {
+      localStorage.removeItem(USER_SESSION_STORAGE_KEY);
+    } catch {
+      // Ignore storage error
     }
-    return false;
-  };
-
-  const logout = () => {
     setCurrentUser(null);
+  }, []);
+
+  // Validate stored Bearer token on startup via GET /api/Sam_Att/auth/me
+  useEffect(() => {
+    let isMounted = true;
+
+    const validateStoredSession = async () => {
+      const token = apiAttendanceAdapter.getAuthToken();
+      if (!token) {
+        clearAuthSession();
+        if (isMounted) setIsLoadingAuth(false);
+        return;
+      }
+
+      try {
+        const backendUser = await apiAttendanceAdapter.fetchCurrentUser();
+        if (isMounted) {
+          const mappedUser = mapBackendUserToFrontendUser(backendUser);
+          setCurrentUser(mappedUser);
+          try {
+            localStorage.setItem(USER_SESSION_STORAGE_KEY, JSON.stringify(mappedUser));
+          } catch {
+            // Ignore storage error
+          }
+        }
+      } catch {
+        if (isMounted) {
+          clearAuthSession();
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoadingAuth(false);
+        }
+      }
+    };
+
+    void validateStoredSession();
+
+    const handleUnauthorized = () => {
+      if (isMounted) {
+        clearAuthSession();
+      }
+    };
+
+    window.addEventListener('sam-att-auth-unauthorized', handleUnauthorized);
+    return () => {
+      isMounted = false;
+      window.removeEventListener('sam-att-auth-unauthorized', handleUnauthorized);
+    };
+  }, [clearAuthSession]);
+
+  const login = async (
+    username: string,
+    password: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    const trimmedUsername = username.trim();
+    if (!trimmedUsername || !password) {
+      return {
+        success: false,
+        error: 'กรุณาระบุชื่อผู้ใช้งาน (Username) และรหัสผ่าน (Password)',
+      };
+    }
+
+    const res = await apiAttendanceAdapter.login(trimmedUsername, password);
+    if (!res.success || !res.user || !res.token) {
+      return {
+        success: false,
+        error: res.error || 'ชื่อผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง',
+      };
+    }
+
+    const mappedUser = mapBackendUserToFrontendUser(res.user);
+    setCurrentUser(mappedUser);
+    try {
+      localStorage.setItem(USER_SESSION_STORAGE_KEY, JSON.stringify(mappedUser));
+    } catch {
+      // Ignore storage error
+    }
+    return { success: true };
   };
 
-  const switchUser = (userId: string) => {
-    const found = MOCK_USERS.find((u) => u.id === userId && u.active);
-    if (found) {
-      setCurrentUser(found);
-    }
+  const logout = async (): Promise<void> => {
+    await apiAttendanceAdapter.logout();
+    clearAuthSession();
   };
 
   return (
-    <AuthContext.Provider
-      value={{
-        currentUser,
-        login,
-        logout,
-        switchUser,
-        availableUsers: MOCK_USERS,
-      }}
-    >
+    <AuthContext.Provider value={{ currentUser, isLoadingAuth, login, logout }}>
       {children}
     </AuthContext.Provider>
   );

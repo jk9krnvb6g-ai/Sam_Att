@@ -50,13 +50,6 @@ type DateScopeMode = 'TODAY' | 'MONTH' | 'YEAR' | 'CUSTOM';
 type PersonnelRankTab = 'ON_TIME' | 'LATE_FREQ' | 'LATE_MINS' | 'INCOMPLETE';
 type PageSizeOption = 10 | 25 | 50 | 100 | 'ALL';
 
-const SCANNER_DEVICES = [
-  { machineNo: 1, name: 'เครื่องสแกน 1 — อาคารผู้ป่วยนอก (OPD ชั้น 1)', ip: '192.168.10.201' },
-  { machineNo: 2, name: 'เครื่องสแกน 2 — อาคารอุบัติเหตุ-ฉุกเฉิน (ER)', ip: '192.168.10.202' },
-  { machineNo: 3, name: 'เครื่องสแกน 3 — อาคารผู้ป่วยใน (IPD ชั้น 2)', ip: '192.168.10.203' },
-  { machineNo: 4, name: 'เครื่องสแกน 4 — อาคารอำนวยการ / บริหารทั่วไป', ip: '192.168.10.204' },
-];
-
 function getTodayBangkokDateStr(): string {
   try {
     return new Intl.DateTimeFormat('en-CA', {
@@ -155,32 +148,30 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
       const summaryWorkDate = dateMode === 'TODAY' ? selectedDate : dateScope.to;
       const [
         summaryRes,
-        personnelRes,
-        attendanceRes,
-        scansRes,
+        personnelList,
+        attendanceList,
+        scansList,
         pushRes,
         logsRes,
       ] = await Promise.all([
         apiAttendanceAdapter.fetchDashboardSummary(summaryWorkDate),
-        apiAttendanceAdapter.fetchPersonnel({ pageSize: 500 }),
-        apiAttendanceAdapter.fetchAttendance({
+        apiAttendanceAdapter.fetchAllPersonnel(),
+        apiAttendanceAdapter.fetchAllAttendance({
           fromDate: dateScope.from,
           toDate: dateScope.to,
-          pageSize: 500,
         }),
-        apiAttendanceAdapter.fetchRawScans({
+        apiAttendanceAdapter.fetchAllRawScans({
           fromDate: dateScope.from,
           toDate: dateScope.to,
-          pageSize: 500,
         }),
         apiAttendanceAdapter.fetchPushHistory(),
         apiAttendanceAdapter.fetchSystemLogs(100),
       ]);
 
       setDashboardSummary(summaryRes);
-      setAllPersonnel(personnelRes.personnel || []);
-      setRawAttendance(attendanceRes.items || []);
-      setRawScansList(scansRes.items || []);
+      setAllPersonnel(personnelList || []);
+      setRawAttendance(attendanceList || []);
+      setRawScansList(scansList || []);
       setPushHistory(pushRes || []);
       setAuditLogs(logsRes || []);
       setLastUpdatedAt(
@@ -222,7 +213,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
     return rawAttendance.filter((a) => a.groupName === selectedGroupFilter);
   }, [rawAttendance, selectedGroupFilter]);
 
-  // Derived Records for KPI Cards
+  // Derived Records for KPI Cards (uses authoritative /dashboard/summary when viewing hospital-wide TODAY)
   const kpiBuckets = useMemo(() => {
     const normalRecs = scopedAttendance.filter((a) => a.status === 'NORMAL');
     const lateRecs = scopedAttendance.filter((a) => a.status === 'LATE');
@@ -236,18 +227,32 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
     const pushedRecs = scopedAttendance.filter((a) => a.isPushedToHosOffice);
     const pendingPushRecs = scopedAttendance.filter((a) => !a.isPushedToHosOffice);
 
-    const totalShifts = scopedAttendance.length;
+    const useBackendSummary =
+      dateMode === 'TODAY' &&
+      selectedGroupFilter === 'ALL' &&
+      dashboardSummary?.workDate === selectedDate;
+
+    const totalPersonnel = useBackendSummary
+      ? dashboardSummary.totalPersonnel
+      : scopedPersonnel.length;
+    const totalShifts = useBackendSummary
+      ? dashboardSummary.totalShiftsToday
+      : scopedAttendance.length;
+    const totalLateMinutes = useBackendSummary
+      ? dashboardSummary.totalLateMinutes
+      : lateRecs.reduce((sum, r) => sum + r.lateMinutes, 0);
+
     const pct = (count: number) =>
       totalShifts > 0 ? Math.round((count / totalShifts) * 1000) / 10 : 0;
 
     return {
-      totalPersonnel: scopedPersonnel.length,
+      totalPersonnel,
       totalShifts,
       normalRecs,
       normalPct: pct(normalRecs.length),
       lateRecs,
       latePct: pct(lateRecs.length),
-      totalLateMinutes: lateRecs.reduce((sum, r) => sum + r.lateMinutes, 0),
+      totalLateMinutes,
       missingCheckoutRecs,
       missingCheckoutPct: pct(missingCheckoutRecs.length),
       noScanRecs,
@@ -256,9 +261,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
       pushedRecs,
       pendingPushRecs,
     };
-  }, [scopedPersonnel, scopedAttendance]);
+  }, [scopedPersonnel, scopedAttendance, dateMode, selectedGroupFilter, dashboardSummary, selectedDate]);
 
-  // Scanner Device Usage Stats derived from real rawScansList
+  // Scanner Device Usage Stats derived strictly from real rawScansList
   const scannerStats: ScannerUsageStat[] = useMemo(() => {
     const fingleMap = new Map<number, Personnel>();
     allPersonnel.forEach((p) => {
@@ -266,9 +271,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
     });
 
     const totalScans = rawScansList.length;
+    const distinctMachines = Array.from(
+      new Set(rawScansList.map((s) => s.machineNo))
+    ).sort((a, b) => a - b);
 
-    return SCANNER_DEVICES.map((dev) => {
-      const devScans = rawScansList.filter((s) => s.machineNo === dev.machineNo);
+    return distinctMachines.map((machineNo) => {
+      const devScans = rawScansList.filter((s) => s.machineNo === machineNo);
       const inCount = devScans.filter((s) => s.inOutMode === 0).length;
       const outCount = devScans.filter((s) => s.inOutMode !== 0).length;
       const mappedCount = devScans.filter((s) => fingleMap.has(s.enrollNumber)).length;
@@ -276,9 +284,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
       const sharePct = totalScans > 0 ? Math.round((devScans.length / totalScans) * 1000) / 10 : 0;
 
       return {
-        machineNo: dev.machineNo,
-        name: dev.name,
-        ip: dev.ip,
+        machineNo,
+        name: `เครื่องสแกนหมายเลข #${machineNo}`,
+        ip: '-',
         totalScans: devScans.length,
         inCount,
         outCount,

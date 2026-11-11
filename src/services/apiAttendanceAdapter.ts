@@ -38,10 +38,16 @@ export interface BackendAuthenticatedUser {
 export interface DashboardSummaryResponse {
   success: boolean;
   workDate: string;
+  totalPersonnel: number;
+  totalShiftsToday: number;
   totalActivePersonnel: number;
   assignedShiftsToday: number;
   normalCount: number;
   lateCount: number;
+  distinctLatePeople: number;
+  totalLateOccurrences: number;
+  totalLateMinutes: number;
+  avgLateMinutesPerLateShift: number;
   missingCheckoutCount: number;
   noScanCount: number;
   pendingReviewCount: number;
@@ -231,18 +237,30 @@ class ApiAttendanceAdapter {
       this.fetchConnectionSettings(),
       this.fetchShifts(),
     ]);
-    const healthy = Boolean(connSettings.success && Array.isArray(shifts));
+    const isRealMySql =
+      connSettings.repositoryMode === 'REAL' && connSettings.samchukDb.configured;
+    const gatewayReachable = Boolean(connSettings.success && Array.isArray(shifts));
+
     return {
-      success: healthy,
-      ok: healthy,
-      healthy,
-      repositoryMode: connSettings.repositoryMode || 'REAL',
-      engine: connSettings.samchukDb.engine || 'MYSQL',
-      status: healthy ? `CONNECTED (${shifts.length} shifts read)` : 'UNAVAILABLE',
+      success: gatewayReachable,
+      ok: gatewayReachable && isRealMySql,
+      healthy: gatewayReachable && isRealMySql,
+      repositoryMode: connSettings.repositoryMode || 'UNKNOWN',
+      engine: connSettings.samchukDb.engine || connSettings.repositoryMode || 'UNKNOWN',
+      status: !gatewayReachable
+        ? 'GATEWAY_UNREACHABLE'
+        : isRealMySql
+        ? `CONNECTED_REAL_MYSQL (${shifts.length} shifts)`
+        : `NON_PRODUCTION_MODE (${connSettings.repositoryMode} / DB Configured: ${connSettings.samchukDb.configured})`,
       database: connSettings.samchukDb.database || 'samchuk_attendance',
-      message: healthy
-        ? `เชื่อมต่อ Central API Gateway (/api/Sam_Att) และอ่านข้อมูลจาก ${connSettings.samchukDb.database} สำเร็จ (${shifts.length} กะเวลา)`
-        : 'ไม่สามารถเชื่อมต่อฐานข้อมูลผ่าน Central API Gateway ได้',
+      message: !gatewayReachable
+        ? 'ไม่สามารถติดต่อ Central API Gateway (/api/Sam_Att) ได้'
+        : isRealMySql
+        ? `เชื่อมต่อฐานข้อมูลจริง ${connSettings.samchukDb.database} (${connSettings.samchukDb.host}:${connSettings.samchukDb.port}) ผ่าน Central API Gateway สำเร็จ (อ่านกติกากะ ${shifts.length} รายการ)`
+        : `ติดต่อ API สำเร็จในโหมด ${connSettings.repositoryMode} (ยังไม่ได้เชื่อมต่อไปยัง MySQL จริงบน ${connSettings.samchukDb.host}:${connSettings.samchukDb.port})`,
+      error: !isRealMySql
+        ? `Repository mode is ${connSettings.repositoryMode} (configured=${connSettings.samchukDb.configured}) — Live MySQL connectivity is NOT VERIFIED`
+        : undefined,
     };
   }
 
@@ -430,14 +448,111 @@ class ApiAttendanceAdapter {
     };
   }
 
+  public async fetchAllMyAttendance(params?: {
+    fromDate?: string;
+    toDate?: string;
+    maxPages?: number;
+  }): Promise<AttendanceRecord[]> {
+    const pageSize = 200;
+    const maxPages = params?.maxPages ?? 50;
+    const all: AttendanceRecord[] = [];
+
+    for (let page = 1; page <= maxPages; page++) {
+      const res = await this.fetchMyAttendance({
+        fromDate: params?.fromDate,
+        toDate: params?.toDate,
+        page,
+        pageSize,
+      });
+      all.push(...res.records);
+      if (all.length >= res.total || res.records.length < pageSize) {
+        break;
+      }
+    }
+    return all;
+  }
+
+  public async fetchAllMyRawScans(params?: {
+    fromDate?: string;
+    toDate?: string;
+    maxPages?: number;
+  }): Promise<RawScanEvent[]> {
+    const pageSize = 200;
+    const maxPages = params?.maxPages ?? 50;
+    const all: RawScanEvent[] = [];
+
+    for (let page = 1; page <= maxPages; page++) {
+      const res = await this.fetchMyRawScans({
+        fromDate: params?.fromDate,
+        toDate: params?.toDate,
+        page,
+        pageSize,
+      });
+      all.push(...res.scans);
+      if (all.length >= res.total || res.scans.length < pageSize) {
+        break;
+      }
+    }
+    return all;
+  }
+
   // ==========================================
   // 4. Dashboard Summary (`/dashboard/summary`)
   // ==========================================
   public async fetchDashboardSummary(workDate: string): Promise<DashboardSummaryResponse> {
-    return this.requestJson<DashboardSummaryResponse>(
-      `/dashboard/summary?workDate=${encodeURIComponent(workDate)}`,
-      { method: 'GET' }
-    );
+    const raw = await this.requestJson<{
+      success: boolean;
+      summary?: {
+        workDate: string;
+        totalPersonnel: number;
+        totalShiftsToday: number;
+        normalCount: number;
+        distinctLatePeople: number;
+        totalLateOccurrences: number;
+        noScanCount: number;
+        missingCheckoutCount: number;
+        pendingReviewCount: number;
+        totalLateMinutes: number;
+        avgLateMinutesPerLateShift: number;
+      };
+      workDate?: string;
+      totalPersonnel?: number;
+      totalShiftsToday?: number;
+      normalCount?: number;
+      distinctLatePeople?: number;
+      totalLateOccurrences?: number;
+      noScanCount?: number;
+      missingCheckoutCount?: number;
+      pendingReviewCount?: number;
+      totalLateMinutes?: number;
+      avgLateMinutesPerLateShift?: number;
+    }>(`/dashboard/summary?workDate=${encodeURIComponent(workDate)}`, { method: 'GET' });
+
+    const s = raw.summary || raw;
+    const totalPersonnel = Number(s.totalPersonnel ?? 0);
+    const totalShiftsToday = Number(s.totalShiftsToday ?? 0);
+    const totalLateOccurrences = Number(s.totalLateOccurrences ?? 0);
+
+    return {
+      success: Boolean(raw.success),
+      workDate: s.workDate || workDate,
+      totalPersonnel,
+      totalShiftsToday,
+      totalActivePersonnel: totalPersonnel,
+      assignedShiftsToday: totalShiftsToday,
+      normalCount: Number(s.normalCount ?? 0),
+      lateCount: totalLateOccurrences,
+      distinctLatePeople: Number(s.distinctLatePeople ?? 0),
+      totalLateOccurrences,
+      totalLateMinutes: Number(s.totalLateMinutes ?? 0),
+      avgLateMinutesPerLateShift: Number(s.avgLateMinutesPerLateShift ?? 0),
+      missingCheckoutCount: Number(s.missingCheckoutCount ?? 0),
+      noScanCount: Number(s.noScanCount ?? 0),
+      pendingReviewCount: Number(s.pendingReviewCount ?? 0),
+      unmappedRawScansCount: 0,
+      disputedMappingsCount: 0,
+      rawScansTotalCount: 0,
+    };
   }
 
   // ==========================================
@@ -470,6 +585,32 @@ class ApiAttendanceAdapter {
       total: data.total || 0,
       personnel: data.personnel || [],
     };
+  }
+
+  public async fetchAllPersonnel(params?: {
+    search?: string;
+    department?: string;
+    personnelType?: string;
+    maxPages?: number;
+  }): Promise<Personnel[]> {
+    const pageSize = 500;
+    const maxPages = params?.maxPages ?? 50;
+    const all: Personnel[] = [];
+
+    for (let page = 1; page <= maxPages; page++) {
+      const res = await this.fetchPersonnel({
+        search: params?.search,
+        department: params?.department,
+        personnelType: params?.personnelType,
+        page,
+        pageSize,
+      });
+      all.push(...res.personnel);
+      if (all.length >= res.total || res.personnel.length < pageSize) {
+        break;
+      }
+    }
+    return all;
   }
 
   public async fetchPersonnelMappingIssues() {
@@ -676,6 +817,76 @@ class ApiAttendanceAdapter {
       total: data.total || 0,
       items: data.items || [],
     };
+  }
+
+  public async fetchAllRawScans(params?: {
+    fromDate?: string;
+    toDate?: string;
+    machineNo?: number;
+    enrollNumber?: number;
+    personId?: string;
+    mappingStatus?: string;
+    maxPages?: number;
+  }): Promise<RawScanEvent[]> {
+    const pageSize = 500;
+    const maxPages = params?.maxPages ?? 100;
+    const all: RawScanEvent[] = [];
+
+    for (let page = 1; page <= maxPages; page++) {
+      const res = await this.fetchRawScans({
+        fromDate: params?.fromDate,
+        toDate: params?.toDate,
+        machineNo: params?.machineNo,
+        enrollNumber: params?.enrollNumber,
+        personId: params?.personId,
+        mappingStatus: params?.mappingStatus,
+        page,
+        pageSize,
+      });
+      all.push(...res.items);
+      if (all.length >= res.total || res.items.length < pageSize) {
+        break;
+      }
+    }
+    return all;
+  }
+
+  public async fetchAllAttendance(params?: {
+    fromDate?: string;
+    toDate?: string;
+    department?: string;
+    personnelType?: string;
+    shiftId?: string;
+    status?: string;
+    hrReviewStatus?: string;
+    personId?: string;
+    search?: string;
+    maxPages?: number;
+  }): Promise<AttendanceRecord[]> {
+    const pageSize = 500;
+    const maxPages = params?.maxPages ?? 100;
+    const all: AttendanceRecord[] = [];
+
+    for (let page = 1; page <= maxPages; page++) {
+      const res = await this.fetchAttendance({
+        fromDate: params?.fromDate,
+        toDate: params?.toDate,
+        department: params?.department,
+        personnelType: params?.personnelType,
+        shiftId: params?.shiftId,
+        status: params?.status,
+        hrReviewStatus: params?.hrReviewStatus,
+        personId: params?.personId,
+        search: params?.search,
+        page,
+        pageSize,
+      });
+      all.push(...res.items);
+      if (all.length >= res.total || res.items.length < pageSize) {
+        break;
+      }
+    }
+    return all;
   }
 
   public async fetchAttendanceReview(params?: {

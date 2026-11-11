@@ -28,12 +28,6 @@ import {
   NoScanReasonCode,
   UserRole,
 } from '../types/attendance';
-import {
-  MOCK_SCANNERS,
-  MOCK_SYNC_SCHEDULES,
-  MOCK_SHIFTS,
-  MOCK_PERSONNEL_TYPE_RULES,
-} from '../mock/mockData';
 import { ScannerAdapter } from '../../backend/services/scannerAdapter';
 import { AttendanceCalculator } from '../../backend/services/attendanceCalculator';
 import { apiAttendanceAdapter } from './apiAttendanceAdapter';
@@ -47,19 +41,14 @@ export function isPastWorkDate(workDate: string): boolean {
 class MockAttendanceService {
   private attendance: AttendanceRecord[] = [];
   private rawScans: RawScanEvent[] = [];
-  private scanners: ScannerDevice[] = [...MOCK_SCANNERS].map((s) => ({
-    ...s,
-    lastSyncAt: null,
-    lastEventAt: null,
-    lastError: null,
-  }));
-  private syncSchedules: SyncScheduleSlot[] = [...MOCK_SYNC_SCHEDULES];
+  private scanners: ScannerDevice[] = [];
+  private syncSchedules: SyncScheduleSlot[] = [];
   private syncRuns: SyncRunLog[] = [];
   private auditLogs: AuditLogEntry[] = [];
   private pushHistory: PushHistory[] = [];
   private personnel: Personnel[] = [];
-  private shifts: Shift[] = [...MOCK_SHIFTS];
-  private personnelTypeRules: PersonnelTypeScheduleRule[] = [...MOCK_PERSONNEL_TYPE_RULES];
+  private shifts: Shift[] = [];
+  private personnelTypeRules: PersonnelTypeScheduleRule[] = [];
   private assignments: ShiftAssignment[] = [];
   private scheduledDayOffs: Array<{ personId: string; workDate: string; note: string }> = [];
   private shiftConfigDeactivationLogs: ShiftConfigDeactivationLog[] = [];
@@ -85,10 +74,14 @@ class MockAttendanceService {
   public clearState(): void {
     this.attendance = [];
     this.rawScans = [];
+    this.scanners = [];
+    this.syncSchedules = [];
     this.syncRuns = [];
     this.auditLogs = [];
     this.pushHistory = [];
     this.personnel = [];
+    this.shifts = [];
+    this.personnelTypeRules = [];
     this.assignments = [];
     this.cancellationLogs = [];
     this.lastApiError = null;
@@ -97,8 +90,8 @@ class MockAttendanceService {
 
   /**
    * Hydrate runtime data strictly from the real Backend API (`/api/Sam_Att/*`).
-   * - For `GENERAL_USER`, strictly calls ONLY `/api/Sam_Att/me/*` endpoints.
-   * - For `ADMIN` and `RESPONSIBLE_STAFF`, loads hospital-wide data from `/api/Sam_Att/*`.
+   * - For `GENERAL_USER`, strictly calls ONLY `/api/Sam_Att/me/*` endpoints with full pagination.
+   * - For `ADMIN` and `RESPONSIBLE_STAFF`, loads all pages from `/api/Sam_Att/*`.
    * - Never falls back to Mock Data if `/api/Sam_Att/*` returns an error or is unreachable.
    */
   public async hydrateFromRealApi(role?: UserRole): Promise<void> {
@@ -106,19 +99,20 @@ class MockAttendanceService {
     this.lastApiError = null;
     try {
       if (role === 'GENERAL_USER') {
-        const [myShiftsRes, myAttRes, myScansRes] = await Promise.all([
+        const [myShiftsRes, myAttRecords, myRawScans] = await Promise.all([
           apiAttendanceAdapter.fetchMyShifts(),
-          apiAttendanceAdapter.fetchMyAttendance({ pageSize: 200 }),
-          apiAttendanceAdapter.fetchMyRawScans({ pageSize: 200 }),
+          apiAttendanceAdapter.fetchAllMyAttendance(),
+          apiAttendanceAdapter.fetchAllMyRawScans(),
         ]);
 
         this.personnel = myShiftsRes.person ? [myShiftsRes.person] : [];
         this.assignments = myShiftsRes.assignments || [];
-        if (myShiftsRes.shifts && myShiftsRes.shifts.length > 0) {
-          this.shifts = myShiftsRes.shifts;
-        }
-        this.attendance = myAttRes.records || [];
-        this.rawScans = myScansRes.scans || [];
+        this.shifts = myShiftsRes.shifts || [];
+        this.attendance = myAttRecords || [];
+        this.rawScans = myRawScans || [];
+        this.scanners = [];
+        this.syncSchedules = [];
+        this.personnelTypeRules = [];
         this.cancellationLogs = [];
         this.pushHistory = [];
         this.auditLogs = [];
@@ -127,31 +121,76 @@ class MockAttendanceService {
       }
 
       const [
-        personnelRes,
+        personnelList,
         shiftsRes,
         assignmentsRes,
-        attendanceRes,
-        rawScansRes,
+        attendanceList,
+        rawScansList,
         pushBatchesRes,
         logsRes,
       ] = await Promise.all([
-        apiAttendanceAdapter.fetchPersonnel({ pageSize: 500 }),
+        apiAttendanceAdapter.fetchAllPersonnel(),
         apiAttendanceAdapter.fetchShifts(),
         apiAttendanceAdapter.fetchShiftAssignments(),
-        apiAttendanceAdapter.fetchAttendance({ pageSize: 500 }),
-        apiAttendanceAdapter.fetchRawScans({ pageSize: 500 }),
+        apiAttendanceAdapter.fetchAllAttendance(),
+        apiAttendanceAdapter.fetchAllRawScans(),
         apiAttendanceAdapter.fetchPushHistory(),
         apiAttendanceAdapter.fetchSystemLogs(200),
       ]);
 
-      this.personnel = personnelRes.personnel || [];
-      if (shiftsRes.length > 0) {
-        this.shifts = shiftsRes;
-      }
+      this.personnel = personnelList || [];
+      this.shifts = shiftsRes || [];
       this.assignments = assignmentsRes || [];
-      this.attendance = attendanceRes.items || [];
-      this.rawScans = rawScansRes.items || [];
+      this.attendance = attendanceList || [];
+      this.rawScans = rawScansList || [];
       this.auditLogs = logsRes || [];
+
+      // Derive personnelTypeRules from real personnel types and real shifts loaded from Backend
+      const allShiftIds = this.shifts.map((s) => s.id);
+      const morningShift = this.shifts.find((s) => s.category === 'MORNING') || this.shifts[0];
+      const afternoonShift =
+        this.shifts.find((s) => s.category === 'AFTERNOON') || this.shifts[0];
+      const nightShift = this.shifts.find((s) => s.category === 'NIGHT') || this.shifts[0];
+      const otherShiftIds = this.shifts
+        .filter(
+          (s) =>
+            s.id !== morningShift?.id &&
+            s.id !== afternoonShift?.id &&
+            s.id !== nightShift?.id
+        )
+        .map((s) => s.id);
+
+      const distinctTypes = Array.from(
+        new Set(this.personnel.map((p) => p.personnelType).filter(Boolean))
+      );
+      this.personnelTypeRules = distinctTypes.map((typeName, idx) => ({
+        id: `PTR_${idx + 1}`,
+        code: `TYPE_${idx + 1}`,
+        name: typeName,
+        description: `ประเภทบุคลากรจากข้อมูลจริง (${typeName})`,
+        badgeChar: typeName.trim().charAt(0) || 'บ',
+        hasMorning: Boolean(morningShift),
+        morningShiftId: morningShift?.id,
+        morningStart: morningShift?.startTime || '08:00',
+        morningEnd: morningShift?.endTime || '16:00',
+        morningLateCutoff: morningShift?.startTime || '08:00',
+        morningGraceMinutes: morningShift?.graceMinutes ?? 15,
+        hasAfternoon: Boolean(afternoonShift),
+        afternoonShiftId: afternoonShift?.id,
+        afternoonStart: afternoonShift?.startTime || '16:00',
+        afternoonEnd: afternoonShift?.endTime || '24:00',
+        afternoonLateCutoff: afternoonShift?.startTime || '16:00',
+        afternoonGraceMinutes: afternoonShift?.graceMinutes ?? 15,
+        hasNight: Boolean(nightShift),
+        nightShiftId: nightShift?.id,
+        nightStart: nightShift?.startTime || '00:00',
+        nightEnd: nightShift?.endTime || '08:00',
+        nightCrossMidnight: Boolean(nightShift?.crossMidnight),
+        nightGraceMinutes: nightShift?.graceMinutes ?? 15,
+        otherShiftIds,
+        shiftIds: allShiftIds,
+        active: true,
+      }));
 
       this.pushHistory = (pushBatchesRes || []).map((b) => ({
         id: b.id,
@@ -169,13 +208,26 @@ class MockAttendanceService {
         responseSummary: b.note,
       }));
 
-      // Derive scanner lastSyncAt / lastEventAt from real rawScans
-      this.scanners.forEach((sc) => {
-        const machineScans = this.rawScans.filter((r) => r.machineNo === sc.machineNo);
-        if (machineScans.length > 0) {
-          sc.lastEventAt = machineScans[0].scanDateTime;
-          sc.lastSyncAt = machineScans[0].importedAt;
-        }
+      // Derive scanner devices strictly from real rawScans machineNo values
+      const distinctMachineNos = Array.from(
+        new Set(this.rawScans.map((r) => r.machineNo))
+      ).sort((a, b) => a - b);
+      this.scanners = distinctMachineNos.map((machineNo) => {
+        const machineScans = this.rawScans.filter((r) => r.machineNo === machineNo);
+        return {
+          id: `SC_${machineNo}`,
+          machineNo,
+          name: `เครื่องสแกนหมายเลข #${machineNo}`,
+          ip: '-',
+          port: 4370,
+          location: `จุดติดตั้งเครื่องสแกน #${machineNo}`,
+          enabled: true,
+          autoSyncEnabled: true,
+          lastSyncAt: machineScans[0]?.importedAt || null,
+          lastEventAt: machineScans[0]?.scanDateTime || null,
+          lastError: null,
+          status: 'ONLINE',
+        };
       });
 
       this.notifyHydrated();
@@ -183,10 +235,14 @@ class MockAttendanceService {
       // Never populate mock data on API failure; expose accurate error state
       this.attendance = [];
       this.rawScans = [];
+      this.scanners = [];
+      this.syncSchedules = [];
       this.syncRuns = [];
       this.auditLogs = [];
       this.pushHistory = [];
       this.personnel = [];
+      this.shifts = [];
+      this.personnelTypeRules = [];
       this.assignments = [];
       this.cancellationLogs = [];
       this.lastApiError =
@@ -1371,14 +1427,7 @@ class MockAttendanceService {
   }
 
   public resetPersonnelTypeRulesToDefault(): PersonnelTypeScheduleRule[] {
-    this.personnelTypeRules = [...MOCK_PERSONNEL_TYPE_RULES];
-    this.shifts = [...MOCK_SHIFTS];
-    this.recordAuditLog({
-      action: 'MANAGE_SHIFT_MATRIX',
-      entityType: 'PersonnelTypeScheduleRule',
-      entityId: 'RESET_DEFAULT',
-      summary: 'คืนค่าเริ่มต้นตารางกติกากะตามประเภทบุคลากรทั้งหมด 6 ประเภท',
-    });
+    void this.hydrateFromRealApi('ADMIN');
     return [...this.personnelTypeRules];
   }
 

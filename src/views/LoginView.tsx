@@ -1,25 +1,28 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { Fingerprint, Lock, UserCheck, Shield, Server, Database } from 'lucide-react';
+import { Fingerprint, Lock, UserCheck, Shield, Server, Database, AlertCircle, Loader2 } from 'lucide-react';
 
 export const LoginView: React.FC = () => {
-  const { login, availableUsers } = useAuth();
-  const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('••••••••');
+  const { login } = useAuth();
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
-    const ok = login(username.trim());
-    if (!ok) {
-      setError('ไม่พบชื่อผู้ใช้งานนี้ในระบบ กรุณาตรวจสอบอีกครั้ง');
+    setIsSubmitting(true);
+    try {
+      const result = await login(username, password);
+      if (!result.success) {
+        setError(result.error || 'ชื่อผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง กรุณาตรวจสอบอีกครั้ง');
+      } else {
+        setPassword('');
+      }
+    } finally {
+      setIsSubmitting(false);
     }
-  };
-
-  const handleQuickLogin = (uname: string) => {
-    setUsername(uname);
-    login(uname);
   };
 
   return (
@@ -62,7 +65,7 @@ export const LoginView: React.FC = () => {
 
         {/* Form */}
         <div className="p-6 space-y-5">
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={handleSubmit} className="space-y-4" autoComplete="off">
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1.5">
                 ชื่อผู้ใช้งาน (Username)
@@ -73,8 +76,9 @@ export const LoginView: React.FC = () => {
                   type="text"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
+                  disabled={isSubmitting}
                   className="w-full pl-10 pr-3.5 py-2.5 text-sm rounded-xl border border-[#E9E5F2] bg-[#F8F7FC] focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-purple-500/30 focus:border-purple-600 transition-all"
-                  placeholder="เช่น admin, staff_patcharee, dr_sudarat"
+                  placeholder="กรอกชื่อผู้ใช้งาน (Username)"
                   required
                 />
               </div>
@@ -90,63 +94,36 @@ export const LoginView: React.FC = () => {
                   type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
+                  disabled={isSubmitting}
                   className="w-full pl-10 pr-3.5 py-2.5 text-sm rounded-xl border border-[#E9E5F2] bg-[#F8F7FC] focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-purple-500/30 focus:border-purple-600 transition-all"
+                  placeholder="กรอกรหัสผ่าน"
                   required
                 />
               </div>
             </div>
 
             {error && (
-              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-medium">
-                {error}
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-medium flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
+                <span>{error}</span>
               </div>
             )}
 
             <button
               type="submit"
-              className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-[#8B5CF6] to-[#6D28D9] hover:from-[#7C3AED] hover:to-[#5B21B6] text-white font-semibold text-sm shadow-sm transition-all cursor-pointer"
+              disabled={isSubmitting}
+              className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-[#8B5CF6] to-[#6D28D9] hover:from-[#7C3AED] hover:to-[#5B21B6] disabled:opacity-60 text-white font-semibold text-sm shadow-sm transition-all cursor-pointer flex items-center justify-center gap-2"
             >
-              เข้าสู่ระบบ (Sign In)
+              {isSubmitting ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>กำลังยืนยันตัวตนผ่าน Central API Gateway...</span>
+                </>
+              ) : (
+                <span>เข้าสู่ระบบ (Sign In)</span>
+              )}
             </button>
           </form>
-
-          {/* Quick Demo Role Login */}
-          <div className="pt-4 border-t border-[#E9E5F2]">
-            <p className="text-xs font-semibold text-slate-500 mb-2.5">
-              ทดสอบเข้าสู่ระบบด่วนตามบทบาท (3 Roles ตามข้อกำหนด):
-            </p>
-            <div className="space-y-2">
-              {availableUsers.map((u) => (
-                <button
-                  key={u.id}
-                  type="button"
-                  onClick={() => handleQuickLogin(u.username)}
-                  className="w-full text-left p-2.5 rounded-xl border border-[#E9E5F2] hover:border-purple-300 hover:bg-purple-50/50 transition-all flex items-center justify-between group cursor-pointer"
-                >
-                  <div>
-                    <div className="text-xs font-semibold text-slate-800 group-hover:text-purple-950">
-                      {u.fullName}
-                    </div>
-                    <div className="text-[11px] text-slate-500 font-mono-data">
-                      username: <strong className="text-slate-700">{u.username}</strong>
-                      {u.personId && ` · PERSON_ID: ${u.personId}`}
-                    </div>
-                  </div>
-                  <span
-                    className={`text-[10px] font-semibold px-2 py-0.5 rounded-md border ${
-                      u.role === 'ADMIN'
-                        ? 'bg-purple-100 text-purple-800 border-purple-200'
-                        : u.role === 'RESPONSIBLE_STAFF'
-                        ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
-                        : 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                    }`}
-                  >
-                    {u.role}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
         </div>
       </div>
     </div>

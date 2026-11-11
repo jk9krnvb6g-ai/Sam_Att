@@ -16,10 +16,10 @@ import { ReportsView } from './views/ReportsView';
 import { SystemLogsView } from './views/SystemLogsView';
 import { SettingsView } from './views/SettingsView';
 import { mockAttendanceService } from './services/mockAttendanceService';
-import { AlertTriangle, RefreshCw } from 'lucide-react';
+import { AlertTriangle, Loader2, RefreshCw } from 'lucide-react';
 
 const MainShell: React.FC = () => {
-  const { currentUser } = useAuth();
+  const { currentUser, isLoadingAuth } = useAuth();
   const [activeNav, setActiveNav] = useState<NavItemKey>('dashboard');
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [dataVersion, setDataVersion] = useState(0);
@@ -45,6 +45,20 @@ const MainShell: React.FC = () => {
     window.addEventListener('sam-att-data-hydrated', handleHydrated);
     return () => window.removeEventListener('sam-att-data-hydrated', handleHydrated);
   }, []);
+
+  if (isLoadingAuth) {
+    return (
+      <div className="min-h-screen bg-[#F8F7FC] flex flex-col items-center justify-center p-6 text-slate-600">
+        <Loader2 className="w-8 h-8 text-purple-600 animate-spin mb-3" />
+        <p className="text-sm font-semibold text-slate-800">
+          กำลังตรวจสอบสถานะการเข้าสู่ระบบ (Session Validation)...
+        </p>
+        <p className="text-xs text-slate-500 mt-1 font-mono-data">
+          GET /api/Sam_Att/auth/me
+        </p>
+      </div>
+    );
+  }
 
   if (!currentUser) {
     return <LoginView />;

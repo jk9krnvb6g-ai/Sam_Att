@@ -10,7 +10,7 @@ import {
 import { Database, Server, Lock, ShieldCheck, RefreshCw } from 'lucide-react';
 
 export const SettingsView: React.FC = () => {
-  const { availableUsers } = useAuth();
+  const { currentUser } = useAuth();
   const [connSettings, setConnSettings] = useState<ConnectionSettingsResponse | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [dbTestResult, setDbTestResult] = useState<string | null>(null);
@@ -41,11 +41,11 @@ export const SettingsView: React.FC = () => {
   };
 
   useEffect(() => {
-    loadSettingsData();
+    void loadSettingsData();
   }, []);
 
   const sortedUsers = useMemo(() => {
-    const list = [...availableUsers];
+    const list = currentUser ? [currentUser] : [];
     list.sort((a, b) => {
       const strA = String((a as unknown as Record<string, unknown>)[sortKey] ?? '');
       const strB = String((b as unknown as Record<string, unknown>)[sortKey] ?? '');
@@ -54,7 +54,7 @@ export const SettingsView: React.FC = () => {
         : strB.localeCompare(strA, 'th');
     });
     return list;
-  }, [availableUsers, sortKey, sortDirection]);
+  }, [currentUser, sortKey, sortDirection]);
 
   const pagedUsers = useMemo(() => {
     if (pageSize === 'ALL') return sortedUsers;
