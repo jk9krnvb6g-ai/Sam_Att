@@ -41,6 +41,7 @@ import {
 } from '../repositories/mysqlSamAttRepository';
 import { createDefaultSeededRepository } from '../repositories/defaultRepositorySeed';
 import { AuthService } from '../services/authService';
+import { DeploymentCenterService } from '../services/deploymentCenterService';
 import { createSamAttRouter } from '../router';
 
 /**
@@ -1884,12 +1885,22 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
     }
   });
 
-  it('Scenario 21: Sam_Att V2 Deployment Center — ADMIN-Only RBAC, 8-Item Preflight Check, Command Injection Rejection, Phase 1 Lock & Production Build No-Demo-Bypass Verification', async () => {
+  it('Scenario 21: Sam_Att V2 Deployment Center — Zero False PASS Policy (All 8 Preflight Checks), Real MySQL DB Check, ADMIN-Only RBAC, Command Injection Rejection, Phase 1 Lock & Production Build No-Demo-Bypass Verification (§3, §4, §5, §6)', async () => {
     const origSecret = process.env.SAM_ATT_JWT_SECRET;
+    const origTestStatus = process.env.SAM_ATT_LAST_TEST_STATUS;
+    const origBackupVerified = process.env.SAM_ATT_BACKUP_VERIFIED;
+    const origProcurementVerified = process.env.SAM_ATT_PROCUREMENT_HEALTH_VERIFIED;
+    const origGitHubSha = process.env.SAM_ATT_GITHUB_LATEST_SHA;
+    const origDbHost = process.env.SAM_ATT_DB_HOST;
+    const origDbName = process.env.SAM_ATT_DB_NAME;
+    const origDbUser = process.env.SAM_ATT_DB_USER;
+    const origDbPass = process.env.SAM_ATT_DB_PASSWORD;
+
     process.env.SAM_ATT_JWT_SECRET =
       'samchuk_hospital_deployment_center_verification_secret_min_32_chars';
 
     try {
+      DeploymentCenterService.resetStateForTests();
       const { app } = createTestEnvironment();
 
       // Obtain real tokens for GENERAL_USER, RESPONSIBLE_STAFF, and ADMIN
@@ -1917,7 +1928,7 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
       assert.equal(adminLogin.status, 200);
       const adminToken = adminLogin.body.token as string;
 
-      // 1. Unauthenticated or fake Demo Admin requests MUST be rejected with HTTP 401
+      // Test Case #9 (Part A): Unauthenticated or fake Demo Admin requests MUST be rejected with HTTP 401
       const unauthRes = await invokeGatewayRoute(app, {
         method: 'GET',
         url: '/api/Sam_Att/deployment/status',
@@ -1939,7 +1950,7 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
         'Backend must NEVER allow Demo Admin header/token bypass'
       );
 
-      // 2. GENERAL_USER and RESPONSIBLE_STAFF MUST be blocked with HTTP 403 on all /deployment/* endpoints
+      // Test Case #8: GENERAL_USER and RESPONSIBLE_STAFF MUST be blocked with HTTP 403 on all /deployment/* endpoints
       const protectedEndpoints: Array<{ method: 'GET' | 'POST'; url: string }> = [
         { method: 'GET', url: '/api/Sam_Att/deployment/status' },
         { method: 'POST', url: '/api/Sam_Att/deployment/check-updates' },
@@ -1975,7 +1986,7 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
         );
       }
 
-      // 3. ADMIN can access GET /api/Sam_Att/deployment/status
+      // Test Case #1: ไม่มีหลักฐานตรวจสอบ → ต้องไม่เป็น PASS (Initial status before Preflight has 0 PASS items)
       const statusRes = await invokeGatewayRoute(app, {
         method: 'GET',
         url: '/api/Sam_Att/deployment/status',
@@ -1984,24 +1995,28 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
       assert.equal(statusRes.status, 200);
       assert.equal(statusRes.body.success, true);
       assert.equal(statusRes.body.phase, 'PHASE_1_READ_ONLY');
-      assert.equal(statusRes.body.systemStatus.samAttFrontendPort, 3001);
-      assert.equal(statusRes.body.systemStatus.samAttFrontendPath, '/Sam_Att/');
-      assert.equal(statusRes.body.systemStatus.backendGatewayPort, 3002);
-      assert.equal(statusRes.body.systemStatus.backendGatewayPath, '/api/Sam_Att/');
-      assert.equal(
-        statusRes.body.systemStatus.githubRepositoryUrl,
-        'https://github.com/jk9krnvb6g-ai/Sam_Att'
-      );
+      assert.equal(statusRes.body.checklist.length, 8);
+      for (const item of statusRes.body.checklist) {
+        assert.notEqual(
+          item.status,
+          'PASS',
+          `Initial unverified check ${item.id} must NOT be PASS before Preflight Check runs`
+        );
+        assert.equal(item.status, 'NOT_CHECKED');
+      }
+      assert.equal(statusRes.body.deploymentReadiness.readyToDeploy, false);
 
       // Must NOT fabricate fake versions like v2.0.0 or v2.0.1
       assert.notEqual(statusRes.body.currentVersion.version, 'v2.0.0');
       assert.notEqual(statusRes.body.currentVersion.version, 'v2.0.1');
-      assert.equal(statusRes.body.checklist.length, 8, 'Pre-Deployment Checklist must have 8 items');
-      assert.equal(statusRes.body.deploymentAgent.phase2AgentAvailable, false);
-      assert.equal(statusRes.body.deploymentAgent.approveEnabled, false);
-      assert.equal(statusRes.body.deploymentAgent.rollbackEnabled, false);
 
-      // 4. ADMIN can run POST /api/Sam_Att/deployment/preflight and Audit Log is recorded
+      // Test Cases #2, #3, #4, #5:
+      // Set environment variables claiming PASS without real evidence + verify dist/index.html existence alone does NOT yield PASS
+      process.env.SAM_ATT_LAST_TEST_STATUS = 'PASS';
+      process.env.SAM_ATT_BACKUP_VERIFIED = 'true';
+      process.env.SAM_ATT_PROCUREMENT_HEALTH_VERIFIED = 'true';
+      process.env.SAM_ATT_GITHUB_LATEST_SHA = '03c0d17500000000000000000000000000000000';
+
       const preflightRes = await invokeGatewayRoute(app, {
         method: 'POST',
         url: '/api/Sam_Att/deployment/preflight',
@@ -2011,20 +2026,151 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
       assert.equal(preflightRes.status, 200);
       assert.equal(preflightRes.body.success, true);
       assert.equal(preflightRes.body.checklist.length, 8);
+      assert.equal(preflightRes.body.deploymentReadiness.readyToDeploy, false);
 
-      const historyRes = await invokeGatewayRoute(app, {
-        method: 'GET',
-        url: '/api/Sam_Att/deployment/history',
-        headers: { Authorization: `Bearer ${adminToken}` },
-      });
-      assert.equal(historyRes.status, 200);
-      assert.equal(historyRes.body.success, true);
-      assert.ok(
-        Array.isArray(historyRes.body.history) && historyRes.body.history.length >= 1,
-        'Deployment history must include recorded preflight check audit entry'
+      const byId = new Map<string, any>(
+        preflightRes.body.checklist.map((c: any) => [c.id, c])
       );
 
-      // 5. Reject any request payload attempting to pass shell commands, PowerShell scripts, Git URLs, or file paths (HTTP 400)
+      // Check 2 (Dependencies): Having package.json & node_modules alone without Build/Test verification evidence -> NOT_CHECKED (never PASS)
+      assert.notEqual(
+        byId.get('dependencies')?.status,
+        'PASS',
+        'Check 2 (Dependencies) must NOT be PASS merely from package.json and node_modules existence'
+      );
+      assert.equal(byId.get('dependencies')?.status, 'NOT_CHECKED');
+
+      // Test Case #4 — Check 3 (Production Build): Having dist/index.html without Build Evidence -> NOT_CHECKED (never PASS)
+      assert.ok(
+        fs.existsSync(path.resolve(process.cwd(), 'dist', 'index.html')),
+        'dist/index.html exists on disk during test'
+      );
+      assert.notEqual(
+        byId.get('build')?.status,
+        'PASS',
+        'Check 3 (Production Build) must NOT be PASS merely because dist/index.html exists'
+      );
+      assert.equal(byId.get('build')?.status, 'NOT_CHECKED');
+
+      // Test Case #5 — Check 4 (Automated Tests): SAM_ATT_LAST_TEST_STATUS=PASS without traceable evidence -> NOT_CHECKED (never PASS)
+      assert.notEqual(
+        byId.get('automated_tests')?.status,
+        'PASS',
+        'Check 4 (Automated Tests) must NOT be PASS from SAM_ATT_LAST_TEST_STATUS=PASS alone'
+      );
+      assert.equal(byId.get('automated_tests')?.status, 'NOT_CHECKED');
+
+      // Test Case #5 — Check 5 (Backup): SAM_ATT_BACKUP_VERIFIED=true without Backup Agent/evidence -> NOT_CHECKED (never PASS)
+      assert.notEqual(
+        byId.get('backup')?.status,
+        'PASS',
+        'Check 5 (Backup) must NOT be PASS from SAM_ATT_BACKUP_VERIFIED=true alone'
+      );
+      assert.equal(byId.get('backup')?.status, 'NOT_CHECKED');
+
+      // Check 6 (Database Configuration in TEST mode): Must NOT be PASS when repository mode is TEST
+      assert.notEqual(
+        byId.get('database_config')?.status,
+        'PASS',
+        'Check 6 (Database Configuration) must NOT be PASS when repository is in TEST mode'
+      );
+
+      // Test Case #2 — Check 7 (Central API Gateway): Gateway Health unverified -> NOT_CHECKED (never hardcoded PASS)
+      assert.equal(
+        byId.get('central_gateway')?.status,
+        'NOT_CHECKED',
+        'Check 7 (Central API Gateway) must be NOT_CHECKED when Gateway Health is not verified externally'
+      );
+
+      // Test Case #3 — Check 8 (Procurement Health Check): SAM_ATT_PROCUREMENT_HEALTH_VERIFIED=true without verified endpoint -> NOT_CHECKED
+      assert.equal(
+        byId.get('procurement_health')?.status,
+        'NOT_CHECKED',
+        'Check 8 (Procurement Health) must be NOT_CHECKED when Procurement Health is not verified'
+      );
+
+      // Test Case #6 & #7 — Check 6 (Database Configuration) with REAL MySQL Repository:
+      // Case #6: REAL mode + healthy connection + database === 'samchuk_attendance_v2' -> PASS
+      // Case #7: REAL mode + database unreachable -> FAIL
+      let simulateDbDownForPreflight = false;
+      const fakeRealPoolForPreflight: SqlConnectionPool = {
+        async execute<T = any>(sql: string): Promise<[T, any]> {
+          const norm = sql.trim();
+          if (norm.startsWith('SELECT 1')) {
+            if (simulateDbDownForPreflight) {
+              throw new DatabaseUnavailableError(
+                'ECONNREFUSED 10.2.0.201:3306 — MySQL connection failed'
+              );
+            }
+            return [[{ ok: 1 }] as unknown as T, []];
+          }
+          if (norm.includes('FROM revoked_sessions')) {
+            return [[] as unknown as T, []];
+          }
+          if (norm.startsWith('INSERT INTO audit_logs')) {
+            return [{ affectedRows: 1 } as unknown as T, []];
+          }
+          if (norm.includes('FROM audit_logs')) {
+            return [[] as unknown as T, []];
+          }
+          return [[] as unknown as T, []];
+        },
+        async getConnection(): Promise<SqlQueryableConnection> {
+          throw new Error('Not needed');
+        },
+        async end() {},
+      };
+
+      process.env.SAM_ATT_DB_HOST = '127.0.0.1';
+      process.env.SAM_ATT_DB_NAME = 'samchuk_attendance_v2';
+      process.env.SAM_ATT_DB_USER = 'sam_att_prod';
+      process.env.SAM_ATT_DB_PASSWORD = 'secret_db_password_not_exposed';
+
+      const realRepoForPreflight = new MySqlSamAttRepository(fakeRealPoolForPreflight);
+      const realChecklistPass = await DeploymentCenterService.evaluateChecklist(
+        realRepoForPreflight,
+        true
+      );
+      const dbItemPass = realChecklistPass.find((i) => i.id === 'database_config');
+      assert.ok(dbItemPass);
+      assert.equal(
+        dbItemPass.status,
+        'PASS',
+        'Test Case #6: REAL MySQL connected + database name samchuk_attendance_v2 must be PASS'
+      );
+      assert.ok(
+        !dbItemPass.detail.includes('secret_db_password_not_exposed'),
+        'Database check detail must NEVER leak password'
+      );
+
+      // Wrong database name in REAL mode -> FAIL
+      process.env.SAM_ATT_DB_NAME = 'samchuk_attendance';
+      const realChecklistWrongDb = await DeploymentCenterService.evaluateChecklist(
+        realRepoForPreflight,
+        true
+      );
+      const dbItemWrongName = realChecklistWrongDb.find((i) => i.id === 'database_config');
+      assert.equal(
+        dbItemWrongName?.status,
+        'FAIL',
+        'Database name mismatch (samchuk_attendance !== samchuk_attendance_v2) must be FAIL'
+      );
+
+      // Test Case #7: Database unreachable -> FAIL
+      process.env.SAM_ATT_DB_NAME = 'samchuk_attendance_v2';
+      simulateDbDownForPreflight = true;
+      const realChecklistFail = await DeploymentCenterService.evaluateChecklist(
+        realRepoForPreflight,
+        true
+      );
+      const dbItemFail = realChecklistFail.find((i) => i.id === 'database_config');
+      assert.equal(
+        dbItemFail?.status,
+        'FAIL',
+        'Test Case #7: Unreachable MySQL database must report FAIL'
+      );
+
+      // Command Injection / Payload Security Rejection (HTTP 400)
       const forbiddenPayloads = [
         { command: 'powershell -Command Get-Process' },
         { powershell: 'Invoke-Expression' },
@@ -2047,7 +2193,7 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
         );
       }
 
-      // 6. Approve & Rollback require password re-authentication and enforce Phase 1 Read-Only Lock (HTTP 501)
+      // Test Case #10: Approve Deploy & Rollback remain locked (HTTP 501) and require password re-authentication
       const approveWrongPass = await invokeGatewayRoute(app, {
         method: 'POST',
         url: '/api/Sam_Att/deployment/approve',
@@ -2074,7 +2220,7 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
       assert.equal(rollbackLocked.status, 501);
       assert.equal(rollbackLocked.body.liveRollbackExecuted, false);
 
-      // 7. Verify Production Build bundle (`dist/assets`) does NOT contain Demo Admin authentication bypass
+      // Test Case #9 (Part B): Verify Production Build bundle (`dist/assets`) does NOT contain Demo Admin authentication bypass
       const distAssetsDir = path.resolve(process.cwd(), 'dist', 'assets');
       if (fs.existsSync(distAssetsDir)) {
         const jsFiles = fs
@@ -2095,10 +2241,30 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
         }
       }
     } finally {
+      DeploymentCenterService.resetStateForTests();
       if (origSecret !== undefined) process.env.SAM_ATT_JWT_SECRET = origSecret;
       else delete process.env.SAM_ATT_JWT_SECRET;
+      if (origTestStatus !== undefined) process.env.SAM_ATT_LAST_TEST_STATUS = origTestStatus;
+      else delete process.env.SAM_ATT_LAST_TEST_STATUS;
+      if (origBackupVerified !== undefined)
+        process.env.SAM_ATT_BACKUP_VERIFIED = origBackupVerified;
+      else delete process.env.SAM_ATT_BACKUP_VERIFIED;
+      if (origProcurementVerified !== undefined)
+        process.env.SAM_ATT_PROCUREMENT_HEALTH_VERIFIED = origProcurementVerified;
+      else delete process.env.SAM_ATT_PROCUREMENT_HEALTH_VERIFIED;
+      if (origGitHubSha !== undefined) process.env.SAM_ATT_GITHUB_LATEST_SHA = origGitHubSha;
+      else delete process.env.SAM_ATT_GITHUB_LATEST_SHA;
+      if (origDbHost !== undefined) process.env.SAM_ATT_DB_HOST = origDbHost;
+      else delete process.env.SAM_ATT_DB_HOST;
+      if (origDbName !== undefined) process.env.SAM_ATT_DB_NAME = origDbName;
+      else delete process.env.SAM_ATT_DB_NAME;
+      if (origDbUser !== undefined) process.env.SAM_ATT_DB_USER = origDbUser;
+      else delete process.env.SAM_ATT_DB_USER;
+      if (origDbPass !== undefined) process.env.SAM_ATT_DB_PASSWORD = origDbPass;
+      else delete process.env.SAM_ATT_DB_PASSWORD;
     }
   });
 });
+
 
 

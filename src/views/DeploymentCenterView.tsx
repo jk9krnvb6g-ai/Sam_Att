@@ -27,6 +27,7 @@ import {
   ExternalLink,
   Loader2,
   Info,
+  HelpCircle,
 } from 'lucide-react';
 
 export const DeploymentCenterView: React.FC = () => {
@@ -41,7 +42,7 @@ export const DeploymentCenterView: React.FC = () => {
   const loadDeploymentCenterData = useCallback(async () => {
     setErrorMessage(null);
 
-    // Rule 8.7: Never call Production APIs when in Development Preview Demo Mode
+    // Never call Production APIs when in Development Preview Demo Mode
     if (isDemoMode && import.meta.env.DEV && !import.meta.env.PROD) {
       const demoData = getDemoDeploymentCenterPayload();
       setPayload(demoData);
@@ -83,7 +84,7 @@ export const DeploymentCenterView: React.FC = () => {
           });
         }
         setActionFeedback(
-          'DEMO DATA: จำลองการตรวจสอบอัปเดตจาก GitHub เรียบร้อยแล้ว (ไม่ได้เรียก Production API จริง)'
+          'DEMO DATA: โหมดพรีวิวไม่ส่งคำขอไปยังเซิร์ฟเวอร์จริงและไม่สร้างผลลัพธ์ปลอม (สถานะยังคงเป็น NOT_AVAILABLE / NOT_CHECKED ตามจริง)'
         );
         return;
       }
@@ -91,7 +92,7 @@ export const DeploymentCenterView: React.FC = () => {
       const updated = await apiAttendanceAdapter.checkDeploymentUpdates();
       setPayload(updated);
       setActionFeedback(
-        `ตรวจสอบอัปเดตจาก GitHub สำเร็จ (${updated.versionComparison.statusLabel}) และบันทึก Audit Log เรียบร้อยแล้ว`
+        `ดำเนินการตรวจสอบอัปเดตจาก GitHub API แล้ว: ${updated.versionComparison.statusLabel} (บันทึก Audit Log เรียบร้อยแล้ว)`
       );
     } catch (err) {
       setErrorMessage(
@@ -117,7 +118,7 @@ export const DeploymentCenterView: React.FC = () => {
           });
         }
         setActionFeedback(
-          'DEMO DATA: จำลองการตรวจสอบความพร้อมก่อนอัปเดต (Preflight Check 8 รายการ) เรียบร้อยแล้ว'
+          'DEMO DATA: โหมดพรีวิวไม่เรียก Production API และไม่แสดง PASS จำลองเมื่อไม่มีหลักฐานการตรวจสอบจริง'
         );
         return;
       }
@@ -125,8 +126,13 @@ export const DeploymentCenterView: React.FC = () => {
       const updated = await apiAttendanceAdapter.runDeploymentPreflight();
       setPayload(updated);
       const passedCount = updated.checklist.filter((c) => c.status === 'PASS').length;
+      const failedCount = updated.checklist.filter((c) => c.status === 'FAIL').length;
+      const warningCount = updated.checklist.filter((c) => c.status === 'WARNING').length;
+      const notCheckedCount = updated.checklist.filter(
+        (c) => c.status === 'NOT_CHECKED' || c.status === 'NOT_AVAILABLE'
+      ).length;
       setActionFeedback(
-        `ตรวจสอบความพร้อม (Preflight Check) เสร็จสิ้น: ผ่าน ${passedCount}/${updated.checklist.length} รายการ และบันทึก Audit Log เรียบร้อยแล้ว`
+        `ตรวจสอบความพร้อม (Preflight Check) เสร็จสิ้นตามหลักฐานจริง: PASS ${passedCount} | FAIL ${failedCount} | WARNING ${warningCount} | NOT CHECKED ${notCheckedCount} (ยังไม่พร้อม Deploy)`
       );
     } catch (err) {
       setErrorMessage(
@@ -180,6 +186,13 @@ export const DeploymentCenterView: React.FC = () => {
             WARNING
           </span>
         );
+      case 'NOT_AVAILABLE':
+        return (
+          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md text-[11px] font-bold font-mono-data bg-slate-100 text-slate-700 border border-slate-300">
+            <HelpCircle className="w-3.5 h-3.5 text-slate-500" />
+            NOT AVAILABLE
+          </span>
+        );
       case 'NOT_CHECKED':
       default:
         return (
@@ -218,6 +231,21 @@ export const DeploymentCenterView: React.FC = () => {
   };
 
   const isDemoPayload = Boolean(payload?.isDemoData || isDemoMode);
+  const passedCount = payload ? payload.checklist.filter((i) => i.status === 'PASS').length : 0;
+  const failedCount = payload ? payload.checklist.filter((i) => i.status === 'FAIL').length : 0;
+  const warningCount = payload ? payload.checklist.filter((i) => i.status === 'WARNING').length : 0;
+  const notCheckedCount = payload
+    ? payload.checklist.filter(
+        (i) => i.status === 'NOT_CHECKED' || i.status === 'NOT_AVAILABLE'
+      ).length
+    : 0;
+  const isReadyToDeploy = Boolean(
+    payload &&
+      payload.deploymentReadiness?.readyToDeploy &&
+      passedCount === payload.checklist.length &&
+      failedCount === 0 &&
+      notCheckedCount === 0
+  );
 
   return (
     <div className="space-y-6">
@@ -250,18 +278,18 @@ export const DeploymentCenterView: React.FC = () => {
                 <span className="font-mono-data text-slate-800">
                   https://github.com/jk9krnvb6g-ai/Sam_Att
                 </span>
-                ) บน FILESERVER ของโรงพยาบาลสามชุก โดยไม่กระทบระบบ Procurement และ Cash_Cheque
+                ) บน FILESERVER ของโรงพยาบาลสามชุก โดยแสดงผลตามหลักฐานการตรวจสอบจริงเท่านั้น (Zero False PASS)
               </p>
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 text-xs">
             <div className="px-3 py-1.5 rounded-xl bg-[#F8F7FC] border border-[#E9E5F2] text-slate-700 font-mono-data">
-              ตรวจสอบล่าสุด:{' '}
+              เวลาตรวจสอบล่าสุด:{' '}
               <span className="font-semibold text-slate-900">
                 {payload?.checkedAt
                   ? new Date(payload.checkedAt).toLocaleString('th-TH')
-                  : '-'}
+                  : 'ยังไม่ได้ตรวจสอบ'}
               </span>
             </div>
             <button
@@ -278,8 +306,8 @@ export const DeploymentCenterView: React.FC = () => {
 
         {/* Feedback / Error banners */}
         {actionFeedback && (
-          <div className="mt-4 p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs flex items-start gap-2.5">
-            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+          <div className="mt-4 p-3.5 rounded-xl bg-violet-50 border border-violet-200 text-violet-950 text-xs flex items-start gap-2.5">
+            <Info className="w-4 h-4 text-violet-700 shrink-0 mt-0.5" />
             <div className="font-medium">{actionFeedback}</div>
           </div>
         )}
@@ -418,8 +446,18 @@ export const DeploymentCenterView: React.FC = () => {
                   <span className="text-xs font-semibold text-slate-600">
                     สถานะระบบ Sam_Att V2
                   </span>
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold font-mono-data bg-emerald-50 text-emerald-700 border border-emerald-200">
-                    <CheckCircle2 className="w-3 h-3" />
+                  <span
+                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold font-mono-data ${
+                      payload.systemStatus.samAttStatus === 'ONLINE'
+                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                        : 'bg-amber-50 text-amber-800 border border-amber-200'
+                    }`}
+                  >
+                    {payload.systemStatus.samAttStatus === 'ONLINE' ? (
+                      <CheckCircle2 className="w-3 h-3" />
+                    ) : (
+                      <AlertTriangle className="w-3 h-3" />
+                    )}
                     {payload.systemStatus.samAttStatus}
                   </span>
                 </div>
@@ -428,7 +466,7 @@ export const DeploymentCenterView: React.FC = () => {
                   {payload.systemStatus.samAttFrontendPath}
                 </div>
                 <div className="text-[11px] text-slate-500">
-                  Frontend Web Application พร้อมให้บริการ
+                  Frontend Web Application
                 </div>
               </div>
 
@@ -475,7 +513,7 @@ export const DeploymentCenterView: React.FC = () => {
                     className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold font-mono-data ${
                       payload.systemStatus.githubConnectionStatus === 'CONNECTED'
                         ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                        : 'bg-amber-50 text-amber-800 border border-amber-200'
+                        : 'bg-slate-100 text-slate-700 border border-slate-200'
                     }`}
                   >
                     <GitBranch className="w-3 h-3" />
@@ -505,7 +543,7 @@ export const DeploymentCenterView: React.FC = () => {
                   {payload.systemStatus.lastDeployedAt}
                 </div>
                 <div className="text-[11px] text-slate-500">
-                  อ้างอิงจาก Build Metadata / ประวัติ Audit Log
+                  อ้างอิงจาก Build Metadata จริงเท่านั้น
                 </div>
               </div>
             </div>
@@ -644,9 +682,9 @@ export const DeploymentCenterView: React.FC = () => {
             </div>
           </div>
 
-          {/* SECTION C: Pre-Deployment Checklist (8 Required Items) */}
+          {/* SECTION C: Pre-Deployment Checklist (8 Required Items — Evidence-Based) */}
           <div className="bg-white border border-[#E9E5F2] rounded-2xl p-5 shadow-2xs space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
               <div className="flex items-center gap-2">
                 <ShieldCheck className="w-4 h-4 text-violet-600" />
                 <h2 className="text-sm font-bold text-slate-900">
@@ -654,19 +692,54 @@ export const DeploymentCenterView: React.FC = () => {
                 </h2>
               </div>
 
-              <div className="flex items-center gap-2 text-xs">
+              {/* Distinct count badges separating PASS, FAIL, WARNING, and NOT_CHECKED (§4) */}
+              <div className="flex flex-wrap items-center gap-2 text-xs font-mono-data">
                 {isDemoPayload && (
-                  <span className="text-[11px] font-mono-data font-bold px-2 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300">
+                  <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300">
                     DEMO DATA
                   </span>
                 )}
-                <span className="font-mono-data text-slate-600">
-                  ผ่าน{' '}
-                  <strong className="text-emerald-700">
-                    {payload.checklist.filter((i) => i.status === 'PASS').length}
-                  </strong>{' '}
-                  / {payload.checklist.length} รายการ
+                <span className="px-2.5 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold">
+                  PASS: {passedCount}
                 </span>
+                <span className="px-2.5 py-0.5 rounded-md bg-rose-50 text-rose-700 border border-rose-200 font-bold">
+                  FAIL: {failedCount}
+                </span>
+                <span className="px-2.5 py-0.5 rounded-md bg-amber-50 text-amber-800 border border-amber-200 font-bold">
+                  WARNING: {warningCount}
+                </span>
+                <span className="px-2.5 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200 font-bold">
+                  NOT CHECKED: {notCheckedCount}
+                </span>
+              </div>
+            </div>
+
+            {/* Readiness Banner: Never claims "พร้อม Deploy" when items are NOT_CHECKED, WARNING, or FAIL (§4) */}
+            <div
+              className={`p-3.5 rounded-xl border text-xs flex items-start gap-2.5 ${
+                failedCount > 0
+                  ? 'bg-rose-50 border-rose-200 text-rose-900'
+                  : !isReadyToDeploy
+                  ? 'bg-amber-50 border-amber-200 text-amber-950'
+                  : 'bg-emerald-50 border-emerald-200 text-emerald-900'
+              }`}
+            >
+              {failedCount > 0 ? (
+                <XCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+              ) : (
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              )}
+              <div>
+                <div className="font-bold">
+                  สถานะความพร้อมโดยรวม:{' '}
+                  {isReadyToDeploy
+                    ? 'ผ่านการตรวจสอบครบทุกรายการ'
+                    : 'ยังไม่พร้อมสำหรับการ Deploy (Not Ready for Deployment)'}
+                </div>
+                <div className="mt-0.5 text-[11px] leading-relaxed">
+                  {payload.deploymentReadiness?.readinessMessage ||
+                    `พบรายการที่ผ่านการยืนยันหลักฐานจริง ${passedCount}/${payload.checklist.length} รายการ (NOT CHECKED ${notCheckedCount} รายการ, WARNING ${warningCount} รายการ, FAIL ${failedCount} รายการ) — ระบบจะแสดง PASS เฉพาะเมื่อมีหลักฐานการตรวจสอบจริงเท่านั้น`}
+                </div>
               </div>
             </div>
 
@@ -674,7 +747,7 @@ export const DeploymentCenterView: React.FC = () => {
               {payload.checklist.map((item) => (
                 <div
                   key={item.id}
-                  className="p-3.5 rounded-xl border border-[#E9E5F2] bg-[#F8F7FC]/50 flex flex-col justify-between gap-2"
+                  className="p-3.5 rounded-xl border border-[#E9E5F2] bg-[#F8F7FC]/50 flex flex-col justify-between gap-2.5"
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex items-start gap-2.5 min-w-0">
@@ -691,8 +764,19 @@ export const DeploymentCenterView: React.FC = () => {
                     <div className="shrink-0">{renderChecklistBadge(item.status)}</div>
                   </div>
 
-                  <div className="pt-2 border-t border-slate-200/70 flex items-center justify-between gap-2 text-[11px]">
-                    <span className="text-slate-700 font-mono-data">{item.detail}</span>
+                  <div className="pt-2 border-t border-slate-200/70 space-y-1 text-[11px]">
+                    <div className="text-slate-700 font-mono-data leading-relaxed">
+                      {item.detail}
+                    </div>
+                    <div className="text-slate-500 font-mono-data flex items-center gap-1">
+                      <Clock className="w-3 h-3 text-slate-400 shrink-0" />
+                      <span>
+                        เวลาตรวจสอบล่าสุด:{' '}
+                        {item.checkedAt
+                          ? new Date(item.checkedAt).toLocaleString('th-TH')
+                          : 'ยังไม่ได้ตรวจสอบ (NOT CHECKED)'}
+                      </span>
+                    </div>
                   </div>
                 </div>
               ))}
@@ -767,13 +851,9 @@ export const DeploymentCenterView: React.FC = () => {
               </div>
               <p className="text-[11px] leading-relaxed">
                 ระบบได้เตรียม Interface <code className="font-mono-data text-violet-800">IDeploymentAgent</code>{' '}
-                สำหรับเชื่อมต่อกับ Windows Service / Scheduled Task บน FILESERVER ในอนาคต (
-                <code className="font-mono-data">checkUpdates()</code>,{' '}
-                <code className="font-mono-data">runPreflightCheck()</code>,{' '}
-                <code className="font-mono-data">executeApprovedDeploy()</code>,{' '}
-                <code className="font-mono-data">executeRollback()</code>,{' '}
-                <code className="font-mono-data">getDeploymentHistory()</code>) โดยไม่เปิด TCP Port
-                เพิ่ม และไม่อนุญาตให้ส่งคำสั่ง Shell หรือ PowerShell จากหน้าเว็บโดยเด็ดขาด
+                สำหรับเชื่อมต่อกับ Windows Service / Scheduled Task บน FILESERVER ในอนาคต
+                โดยไม่เปิด TCP Port เพิ่ม และไม่อนุญาตให้ส่งคำสั่ง Shell หรือ PowerShell
+                จากหน้าเว็บโดยเด็ดขาด
               </p>
             </div>
           </div>

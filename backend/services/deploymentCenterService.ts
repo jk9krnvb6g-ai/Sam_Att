@@ -1,12 +1,17 @@
 /**
- * Sam_Att V2 — Deployment Center Service & Future Deployment Agent Interface (Phase 1)
+ * Sam_Att V2 — Deployment Center Service & Future Deployment Agent Interface (Phase 1 Read-Only)
  *
- * SECURITY & ARCHITECTURE GUARANTEES (§3, §4, §5, §6):
+ * SECURITY & EVIDENCE-BASED PREFLIGHT GUARANTEES (§1, §3, §4, §5):
  * 1. Read-Only in Phase 1: Does NOT execute OS commands, PowerShell scripts, or git CLI from web requests.
- * 2. Strictly rejects any request attempting to pass shell commands, scripts, arbitrary Git URLs, or file paths.
- * 3. Never fabricates fake version numbers (e.g. v2.0.0 / v2.0.1) as real server or GitHub data;
+ * 2. Zero False PASS Policy:
+ *    - Never returns `PASS` from hardcoded values, assumptions, mere file existence (`package.json`,
+ *      `node_modules`, `dist/index.html`), or unverified environment variables (`SAM_ATT_LAST_TEST_STATUS=PASS`,
+ *      `SAM_ATT_BACKUP_VERIFIED=true`, `SAM_ATT_PROCUREMENT_HEALTH_VERIFIED=true`, `SAM_ATT_GITHUB_LATEST_SHA`).
+ *    - Every `PASS` requires live, traceable verification evidence.
+ *    - Checks that cannot be verified in Phase 1 Read-Only honestly report `NOT_CHECKED` with the exact reason.
+ * 3. Strictly rejects any request attempting to pass shell commands, scripts, arbitrary Git URLs, or file paths.
+ * 4. Never fabricates fake version numbers (e.g. v2.0.0 / v2.0.1) as real server or GitHub data;
  *    returns `NOT CONFIGURED` or `NOT AVAILABLE` when real metadata or GitHub connectivity is unavailable.
- * 4. Evaluates Pre-Deployment Checklist items from real runtime/repository checks (never hardcodes all PASS).
  * 5. Defines the `IDeploymentAgent` contract for Phase 2 Windows IPC integration without opening any new TCP port.
  */
 
@@ -17,8 +22,14 @@ import { ISamAttRepository } from '../repositories/interfaces';
 export const AUTHORITATIVE_GITHUB_REPO_URL = 'https://github.com/jk9krnvb6g-ai/Sam_Att';
 export const AUTHORITATIVE_GITHUB_COMMITS_API =
   'https://api.github.com/repos/jk9krnvb6g-ai/Sam_Att/commits/main';
+export const AUTHORITATIVE_PRODUCTION_DATABASE_NAME = 'samchuk_attendance_v2';
 
-export type ChecklistItemStatus = 'PASS' | 'FAIL' | 'WARNING' | 'NOT_CHECKED';
+export type ChecklistItemStatus =
+  | 'PASS'
+  | 'FAIL'
+  | 'WARNING'
+  | 'NOT_CHECKED'
+  | 'NOT_AVAILABLE';
 
 export interface DeploymentChecklistItem {
   id:
@@ -43,7 +54,12 @@ export interface VersionInfo {
   commitSha: string;
   date: string;
   available: boolean;
-  source: 'ENVIRONMENT_METADATA' | 'GITHUB_API' | 'NOT_CONFIGURED' | 'NOT_AVAILABLE' | 'DEMO_DATA';
+  source:
+    | 'ENVIRONMENT_METADATA'
+    | 'GITHUB_API'
+    | 'NOT_CONFIGURED'
+    | 'NOT_AVAILABLE'
+    | 'DEMO_DATA';
 }
 
 export interface DeploymentHistoryRecord {
@@ -63,6 +79,17 @@ export interface DeploymentHistoryRecord {
   isDemoData?: boolean;
 }
 
+export interface DeploymentReadinessSummary {
+  readyToDeploy: boolean;
+  passedCount: number;
+  failedCount: number;
+  warningCount: number;
+  notCheckedCount: number;
+  totalCount: number;
+  readinessStatus: 'NOT_READY' | 'CHECKS_INCOMPLETE' | 'FAILED_CHECKS';
+  readinessMessage: string;
+}
+
 export interface DeploymentCenterStatusPayload {
   success: boolean;
   phase: 'PHASE_1_READ_ONLY';
@@ -79,7 +106,7 @@ export interface DeploymentCenterStatusPayload {
     backendGatewayPath: string;
     databaseName: string;
     databaseHealthy: boolean;
-    githubConnectionStatus: 'CONNECTED' | 'NOT_CONFIGURED' | 'NOT_AVAILABLE';
+    githubConnectionStatus: 'CONNECTED' | 'NOT_CONFIGURED' | 'NOT_AVAILABLE' | 'NOT_CHECKED';
     githubRepositoryUrl: string;
     lastDeployedAt: string;
     isolatedDatabase: string;
@@ -112,6 +139,7 @@ export interface DeploymentCenterStatusPayload {
     comparisonMessage: string;
   };
   checklist: DeploymentChecklistItem[];
+  deploymentReadiness: DeploymentReadinessSummary;
   deploymentAgent: {
     phase2AgentAvailable: boolean;
     approveEnabled: boolean;
@@ -181,6 +209,8 @@ const FORBIDDEN_PAYLOAD_KEYS = [
   'workingDir',
 ];
 
+const HEX_COMMIT_SHA_REGEX = /^[0-9a-f]{40}$/i;
+
 export class DeploymentCenterService {
   private static cachedGitHubVersion: VersionInfo | null = null;
   private static lastPreflightChecklist: DeploymentChecklistItem[] | null = null;
@@ -191,7 +221,7 @@ export class DeploymentCenterService {
   }
 
   /**
-   * Security Guard (§3): Reject any payload attempting to pass OS commands, scripts, URLs, or file paths.
+   * Security Guard (§3 & §5): Reject any payload attempting to pass OS commands, scripts, URLs, or file paths.
    */
   public static validateSafeRequestPayload(body: unknown): {
     valid: boolean;
@@ -205,7 +235,7 @@ export class DeploymentCenterService {
       if (FORBIDDEN_PAYLOAD_KEYS.includes(key)) {
         return {
           valid: false,
-          error: `Security Violation: ไม่อนุญาตให้ส่งพารามิเตอร์ "${key}" (ห้ามส่งคำสั่ง Shell, PowerShell Script, Git URL หรือ File Path จาก Browser ตามข้อกำหนดความปลอดภัย §3)`,
+          error: `Security Violation: ไม่อนุญาตให้ส่งพารามิเตอร์ "${key}" (ห้ามส่งคำสั่ง Shell, PowerShell Script, Git URL หรือ File Path จาก Browser ตามข้อกำหนดความปลอดภัย)`,
         };
       }
     }
@@ -213,8 +243,8 @@ export class DeploymentCenterService {
   }
 
   /**
-   * Read Current Server Version from explicit build/deployment environment metadata only.
-   * Never invents fake version numbers like v2.0.0 or v2.0.1 (§2.B & §6).
+   * Read Current Server Version from explicit build/deployment metadata only.
+   * Never invents fake version numbers like v2.0.0 or v2.0.1.
    */
   public static getCurrentServerVersion(): VersionInfo {
     const envVersion = (process.env.SAM_ATT_DEPLOYED_VERSION || '').trim();
@@ -226,7 +256,7 @@ export class DeploymentCenterService {
         version: envVersion || `commit-${envCommit.slice(0, 8)}`,
         commitSha: envCommit || 'NOT AVAILABLE',
         date: envDate || 'NOT AVAILABLE',
-        available: Boolean(envCommit),
+        available: Boolean(envCommit && HEX_COMMIT_SHA_REGEX.test(envCommit)),
         source: 'ENVIRONMENT_METADATA',
       };
     }
@@ -241,42 +271,29 @@ export class DeploymentCenterService {
   }
 
   /**
-   * Read Latest GitHub Version from explicit environment metadata or read-only GitHub REST API.
-   * Never fabricates a version or commit SHA if GitHub is unreachable (§2.B & §6).
+   * Check 1 Evidence Helper: Fetch Latest GitHub Version strictly from the real GitHub REST API.
+   * - Never trusts `SAM_ATT_GITHUB_LATEST_SHA` environment variable to fake a PASS.
+   * - Never fabricates a version or commit SHA if GitHub API is unreachable or fails.
    */
   public static async fetchLatestGitHubVersion(forceRefresh = false): Promise<{
-    githubStatus: 'CONNECTED' | 'NOT_CONFIGURED' | 'NOT_AVAILABLE';
+    githubStatus: 'CONNECTED' | 'NOT_CONFIGURED' | 'NOT_AVAILABLE' | 'NOT_CHECKED';
     versionInfo: VersionInfo;
+    errorDetail?: string;
   }> {
-    const envLatestSha = (process.env.SAM_ATT_GITHUB_LATEST_SHA || '').trim();
-    const envLatestVersion = (process.env.SAM_ATT_GITHUB_LATEST_VERSION || '').trim();
-    const envLatestDate = (process.env.SAM_ATT_GITHUB_LATEST_COMMIT_DATE || '').trim();
-
-    if (envLatestSha) {
-      const info: VersionInfo = {
-        version: envLatestVersion || `main@${envLatestSha.slice(0, 8)}`,
-        commitSha: envLatestSha,
-        date: envLatestDate || 'NOT AVAILABLE',
-        available: true,
-        source: 'ENVIRONMENT_METADATA',
-      };
-      this.cachedGitHubVersion = info;
-      return {
-        githubStatus: 'CONNECTED',
-        versionInfo: info,
-      };
-    }
-
     if (!forceRefresh && this.cachedGitHubVersion) {
       return {
-        githubStatus: this.cachedGitHubVersion.available ? 'CONNECTED' : 'NOT_AVAILABLE',
+        githubStatus:
+          this.cachedGitHubVersion.available &&
+          this.cachedGitHubVersion.source === 'GITHUB_API'
+            ? 'CONNECTED'
+            : 'NOT_AVAILABLE',
         versionInfo: this.cachedGitHubVersion,
       };
     }
 
     if (!forceRefresh) {
       return {
-        githubStatus: 'NOT_CONFIGURED',
+        githubStatus: 'NOT_CHECKED',
         versionInfo: {
           version: 'NOT CHECKED',
           commitSha: 'NOT AVAILABLE',
@@ -287,7 +304,7 @@ export class DeploymentCenterService {
       };
     }
 
-    // Read-only fetch to GitHub Commits API (with 5-second timeout)
+    // Read-only fetch to real GitHub Commits API (with 5-second timeout)
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 5000);
 
@@ -313,6 +330,7 @@ export class DeploymentCenterService {
         return {
           githubStatus: 'NOT_AVAILABLE',
           versionInfo: unavailable,
+          errorDetail: `GitHub API ตอบกลับด้วยสถานะ HTTP ${res.status}`,
         };
       }
 
@@ -328,7 +346,7 @@ export class DeploymentCenterService {
         ? rawDate.replace('T', ' ').slice(0, 19)
         : 'NOT AVAILABLE';
 
-      if (!sha) {
+      if (!HEX_COMMIT_SHA_REGEX.test(sha)) {
         const unavailable: VersionInfo = {
           version: 'NOT AVAILABLE',
           commitSha: 'NOT AVAILABLE',
@@ -340,6 +358,7 @@ export class DeploymentCenterService {
         return {
           githubStatus: 'NOT_AVAILABLE',
           versionInfo: unavailable,
+          errorDetail: 'GitHub API ไม่ได้ส่งค่า Commit SHA 40 หลักที่ถูกต้องกลับมา',
         };
       }
 
@@ -355,7 +374,7 @@ export class DeploymentCenterService {
         githubStatus: 'CONNECTED',
         versionInfo: connectedInfo,
       };
-    } catch {
+    } catch (err) {
       const unavailable: VersionInfo = {
         version: 'NOT AVAILABLE',
         commitSha: 'NOT AVAILABLE',
@@ -367,6 +386,10 @@ export class DeploymentCenterService {
       return {
         githubStatus: 'NOT_AVAILABLE',
         versionInfo: unavailable,
+        errorDetail:
+          err instanceof Error
+            ? err.message
+            : 'ไม่สามารถเชื่อมต่อ GitHub API ได้',
       };
     } finally {
       clearTimeout(timeoutId);
@@ -374,7 +397,7 @@ export class DeploymentCenterService {
   }
 
   /**
-   * Compare Current Server Version vs Latest GitHub Version honestly (§2.B).
+   * Compare Current Server Version vs Latest GitHub Version honestly.
    */
   public static compareVersions(current: VersionInfo, latest: VersionInfo): {
     comparisonStatus: 'UP_TO_DATE' | 'UPDATE_AVAILABLE' | 'NOT_AVAILABLE';
@@ -384,7 +407,7 @@ export class DeploymentCenterService {
       return {
         comparisonStatus: 'NOT_AVAILABLE',
         comparisonMessage:
-          'NOT AVAILABLE — ยังไม่มีข้อมูล Commit SHA ครบทั้งสองฝั่งสำหรับเปรียบเทียบเวอร์ชันอัตโนมัติ (กรุณากด "ตรวจสอบอัปเดต" หรือกำหนดค่า SAM_ATT_DEPLOYED_COMMIT_SHA)',
+          'NOT AVAILABLE — ยังไม่มีข้อมูล Commit SHA ที่ยืนยันได้ครบทั้งสองฝั่งสำหรับเปรียบเทียบเวอร์ชันอัตโนมัติ (กรุณากด "ตรวจสอบอัปเดต" และตั้งค่า SAM_ATT_DEPLOYED_COMMIT_SHA จากระบบติดตั้งจริง)',
       };
     }
 
@@ -409,8 +432,55 @@ export class DeploymentCenterService {
   }
 
   /**
-   * Build the initial or evaluated 8-item Pre-Deployment Checklist (§2.C).
-   * Never hardcodes all items as PASS!
+   * Compute overall deployment readiness summary from the 8 checklist items (§4).
+   * Never reports readyToDeploy = true unless all 8 items are genuinely PASS AND Phase 2 Agent is active.
+   */
+  public static computeReadinessSummary(
+    checklist: DeploymentChecklistItem[]
+  ): DeploymentReadinessSummary {
+    const passedCount = checklist.filter((i) => i.status === 'PASS').length;
+    const failedCount = checklist.filter((i) => i.status === 'FAIL').length;
+    const warningCount = checklist.filter((i) => i.status === 'WARNING').length;
+    const notCheckedCount = checklist.filter(
+      (i) => i.status === 'NOT_CHECKED' || i.status === 'NOT_AVAILABLE'
+    ).length;
+    const totalCount = checklist.length;
+
+    if (failedCount > 0) {
+      return {
+        readyToDeploy: false,
+        passedCount,
+        failedCount,
+        warningCount,
+        notCheckedCount,
+        totalCount,
+        readinessStatus: 'FAILED_CHECKS',
+        readinessMessage: `ยังไม่พร้อม Deploy — พบรายการที่ไม่ผ่านการตรวจสอบ (${failedCount} รายการ FAIL, ${notCheckedCount} รายการ NOT CHECKED)`,
+      };
+    }
+
+    return {
+      readyToDeploy: false,
+      passedCount,
+      failedCount,
+      warningCount,
+      notCheckedCount,
+      totalCount,
+      readinessStatus: notCheckedCount > 0 ? 'CHECKS_INCOMPLETE' : 'NOT_READY',
+      readinessMessage:
+        notCheckedCount > 0 || warningCount > 0
+          ? `ยังไม่พร้อม Deploy — มีรายการที่ยังไม่ได้ตรวจสอบหรือไม่มีหลักฐานยืนยัน (${notCheckedCount} รายการ NOT CHECKED, ${warningCount} รายการ WARNING)`
+          : 'Phase 1 Read-Only Mode — ระบบปิดการสั่ง Deploy จากหน้าเว็บจนกว่าจะมี Phase 2 Deployment Agent',
+    };
+  }
+
+  /**
+   * Evaluate the 8-item Pre-Deployment Checklist strictly from real evidence (§1 & §3).
+   * Zero False PASS Policy:
+   * - Never hardcodes PASS.
+   * - Never returns PASS from mere file existence (`package.json`, `node_modules`, `dist/index.html`).
+   * - Never returns PASS from unverified environment variables (`SAM_ATT_LAST_TEST_STATUS=PASS`,
+   *   `SAM_ATT_BACKUP_VERIFIED=true`, `SAM_ATT_PROCUREMENT_HEALTH_VERIFIED=true`).
    */
   public static async evaluateChecklist(
     repo: ISamAttRepository,
@@ -420,11 +490,11 @@ export class DeploymentCenterService {
       return this.lastPreflightChecklist;
     }
 
-    const nowStr = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    const nowStr = new Date().toISOString();
     const dbName =
       process.env.SAM_ATT_DB_NAME?.trim() ||
       repo.getDatabaseName() ||
-      'samchuk_attendance_v2';
+      AUTHORITATIVE_PRODUCTION_DATABASE_NAME;
 
     if (!executeLivePreflight) {
       return [
@@ -432,176 +502,219 @@ export class DeploymentCenterService {
           id: 'github_source',
           stepNumber: 1,
           label: '1. GitHub Source ตรวจสอบผ่าน',
-          description: `ตรวจสอบการเข้าถึง Repository ${AUTHORITATIVE_GITHUB_REPO_URL}`,
-          status: this.cachedGitHubVersion?.available ? 'PASS' : 'NOT_CHECKED',
-          detail: this.cachedGitHubVersion?.available
-            ? `ตรวจสอบ Commit ล่าสุดสำเร็จ (${this.cachedGitHubVersion.commitSha.slice(0, 8)})`
-            : 'NOT CHECKED — กรุณากดปุ่ม "ตรวจสอบความพร้อม (Preflight Check)" หรือ "ตรวจสอบอัปเดต"',
+          description: `ตรวจสอบการเข้าถึง Repository ${AUTHORITATIVE_GITHUB_REPO_URL} และ Commit SHA จาก GitHub API จริง`,
+          status: 'NOT_CHECKED',
+          detail:
+            'NOT_CHECKED — ยังไม่ได้เรียกตรวจสอบ GitHub API จริง (กรุณากดปุ่ม "ตรวจสอบความพร้อม (Preflight Check)")',
           checkedAt: null,
         },
         {
           id: 'dependencies',
           stepNumber: 2,
           label: '2. Dependencies พร้อม',
-          description: 'ตรวจสอบไฟล์ package.json และโมดูลที่จำเป็นของระบบ',
+          description: 'ตรวจสอบความถูกต้องของ Dependencies จากหลักฐานกระบวนการ Build/Test ที่เชื่อถือได้',
           status: 'NOT_CHECKED',
-          detail: 'NOT CHECKED — รอการสั่งตรวจ Preflight Check',
+          detail:
+            'NOT_CHECKED — ยังไม่ได้ตรวจสอบหลักฐานความถูกต้องของ Dependencies (การมี package.json และ node_modules เพียงอย่างเดียวไม่เพียงพอ)',
           checkedAt: null,
         },
         {
           id: 'build',
           stepNumber: 3,
           label: '3. Build ผ่าน',
-          description: 'ตรวจสอบความพร้อมของชุดไฟล์ Frontend Build (dist/)',
+          description: 'ตรวจสอบหลักฐานว่า Production Build สำเร็จและ Artifact ตรงกับ Commit SHA ที่ตรวจสอบ',
           status: 'NOT_CHECKED',
-          detail: 'NOT CHECKED — รอการสั่งตรวจ Preflight Check',
+          detail:
+            'NOT_CHECKED — ยังไม่ได้ตรวจสอบหลักฐาน Production Build ที่ผูกกับ Commit SHA (ห้ามสรุป PASS จากการมีไฟล์ dist/index.html เพียงอย่างเดียว)',
           checkedAt: null,
         },
         {
           id: 'automated_tests',
           stepNumber: 4,
           label: '4. Automated Tests ผ่าน',
-          description: 'ผลรันชุดทดสอบ Attendance Engine และ Security Integration Tests',
+          description: 'ตรวจสอบหลักฐานผลการรัน Automated Tests ที่ผูกกับ Commit SHA และเวลาที่ตรวจสอบ',
           status: 'NOT_CHECKED',
-          detail: 'NOT CHECKED — รอการตรวจสอบจากขั้นตอน CI / Deployment Agent',
+          detail:
+            'NOT_CHECKED — ยังไม่มีหลักฐานผลทดสอบที่ตรวจสอบย้อนกลับได้ (ไม่เชื่อถือค่า Environment Variable เพียงอย่างเดียว)',
           checkedAt: null,
         },
         {
           id: 'backup',
           stepNumber: 5,
           label: '5. Backup พร้อม',
-          description: 'ตรวจสอบชุดสำรองเวอร์ชันปัจจุบันก่อนอัปเดต',
+          description: 'ตรวจสอบชุดสำรองเวอร์ชันปัจจุบันพร้อมหลักฐานความสมบูรณ์ก่อนอัปเดต',
           status: 'NOT_CHECKED',
-          detail: 'NOT CHECKED — Phase 2 Backup Agent ยังไม่ได้เปิดใช้งาน',
+          detail:
+            'NOT_CHECKED — ยังไม่มีระบบ Backup Agent และยังไม่มีหลักฐานตรวจสอบความสมบูรณ์ของ Backup จริง',
           checkedAt: null,
         },
         {
           id: 'database_config',
           stepNumber: 6,
           label: '6. Database Configuration ถูกต้อง',
-          description: `ตรวจสอบการตั้งค่าและเชื่อมต่อฐานข้อมูล ${dbName}`,
+          description: `ตรวจสอบการตั้งค่าและเชื่อมต่อฐานข้อมูล MySQL จริง (${AUTHORITATIVE_PRODUCTION_DATABASE_NAME})`,
           status: 'NOT_CHECKED',
-          detail: 'NOT CHECKED — รอการสั่งตรวจ Preflight Check',
+          detail: 'NOT_CHECKED — รอการสั่งตรวจ Preflight Check เพื่อทดสอบเชื่อมต่อฐานข้อมูลจริง',
           checkedAt: null,
         },
         {
           id: 'central_gateway',
           stepNumber: 7,
           label: '7. Central API Gateway พร้อม',
-          description: 'ตรวจสอบการ Mount เส้นทาง /api/Sam_Att/ บนพอร์ต 3002',
-          status: 'PASS',
-          detail: 'Central API Gateway Mount (/api/Sam_Att/ พอร์ต 3002) ตอบสนองปกติ',
-          checkedAt: nowStr,
+          description: 'ตรวจสอบหลักฐานการทำงานของเส้นทาง /api/Sam_Att/ บน Central API Gateway พอร์ต 3002',
+          status: 'NOT_CHECKED',
+          detail:
+            'NOT_CHECKED — ยังไม่มีกลไกตรวจสอบเส้นทาง /api/Sam_Att/ จาก Central API Gateway พอร์ต 3002 ที่มีหลักฐานยืนยันได้จริง (ไม่สรุป PASS เพียงเพราะมี Router หรือกำหนดค่าพอร์ต)',
+          checkedAt: null,
         },
         {
           id: 'procurement_health',
           stepNumber: 8,
           label: '8. Procurement Health Check ผ่าน',
-          description: 'ตรวจสอบว่าระบบ Procurement บน Central API Gateway ไม่ได้รับผลกระทบ',
+          description: 'ตรวจสอบผล Health Check จริงของระบบ Procurement บน Central API Gateway',
           status: 'NOT_CHECKED',
-          detail: 'NOT CHECKED — รอการตรวจสอบผ่าน Deployment Agent ก่อนและหลัง Deploy',
+          detail:
+            'NOT_CHECKED — ยังไม่มี Endpoint หรือกลไกตรวจสอบสถานะระบบ Procurement ที่ได้รับการยืนยัน (ไม่เชื่อถือค่า Environment Variable เพียงอย่างเดียว)',
           checkedAt: null,
         },
       ];
     }
 
-    // Live Read-Only Preflight Evaluation
-    // 1. GitHub Source
-    const ghCheck = await this.fetchLatestGitHubVersion(true);
-    const githubStatus: ChecklistItemStatus = ghCheck.versionInfo.available
-      ? 'PASS'
-      : 'WARNING';
-    const githubDetail = ghCheck.versionInfo.available
-      ? `เชื่อมต่อ GitHub สำเร็จ ล่าสุด Commit ${ghCheck.versionInfo.commitSha.slice(0, 8)}`
-      : 'ไม่สามารถดึงข้อมูล Commit จาก GitHub API ได้ในขณะนี้ (เครือข่ายอาจจำกัดการออกอินเทอร์เน็ตภายนอก)';
+    // =========================================================================
+    // Live Read-Only Preflight Evaluation (Evidence-Based Only — Zero False PASS)
+    // =========================================================================
 
-    // 2. Dependencies (check package.json & node_modules presence read-only)
+    // Check 1 — GitHub Source (§3 Check 1):
+    // Must verify GitHub Repository and Commit SHA from the real GitHub API.
+    // If calling GitHub API fails, MUST NOT display PASS.
+    const ghCheck = await this.fetchLatestGitHubVersion(true);
+    const isGitHubVerifiedFromApi =
+      ghCheck.githubStatus === 'CONNECTED' &&
+      ghCheck.versionInfo.available &&
+      ghCheck.versionInfo.source === 'GITHUB_API' &&
+      HEX_COMMIT_SHA_REGEX.test(ghCheck.versionInfo.commitSha);
+
+    const githubStatus: ChecklistItemStatus = isGitHubVerifiedFromApi ? 'PASS' : 'FAIL';
+    const githubDetail = isGitHubVerifiedFromApi
+      ? `PASS — ตรวจสอบจาก GitHub API จริงสำเร็จ (${AUTHORITATIVE_GITHUB_REPO_URL}) ล่าสุด Commit SHA: ${ghCheck.versionInfo.commitSha} เมื่อ ${ghCheck.versionInfo.date}`
+      : `FAIL — ไม่สามารถยืนยัน Commit SHA จาก GitHub API จริงได้ (${
+          ghCheck.errorDetail || 'GitHub API unreachable'
+        }) ห้ามสรุป PASS เมื่อเรียก GitHub API ไม่สำเร็จ`;
+
+    // Check 2 — Dependencies (§3 Check 2):
+    // Finding package.json and node_modules alone is NOT sufficient to return PASS.
+    // Without verifiable evidence from a trusted Build/Test process, return NOT_CHECKED (or FAIL if files are missing).
     const pkgJsonExists = fs.existsSync(path.resolve(process.cwd(), 'package.json'));
     const nodeModulesExists = fs.existsSync(path.resolve(process.cwd(), 'node_modules'));
     const depStatus: ChecklistItemStatus =
-      pkgJsonExists && nodeModulesExists ? 'PASS' : pkgJsonExists ? 'WARNING' : 'FAIL';
+      !pkgJsonExists || !nodeModulesExists ? 'FAIL' : 'NOT_CHECKED';
     const depDetail =
-      depStatus === 'PASS'
-        ? 'ตรวจพบ package.json และ node_modules พร้อมใช้งาน'
-        : 'ไม่พบ node_modules หรือ package.json ที่สมบูรณ์';
+      depStatus === 'FAIL'
+        ? 'FAIL — ไม่พบไฟล์ package.json หรือโฟลเดอร์ node_modules บนเซิร์ฟเวอร์'
+        : 'NOT_CHECKED — พบไฟล์ package.json และ node_modules บนดิสก์ แต่การมีไฟล์เพียงอย่างเดียวไม่เพียงพอที่จะยืนยันว่า Dependencies ถูกต้องครบถ้วน (ต้องรอผลตรวจสอบที่มีหลักฐานจากกระบวนการ Build/Test ของ Deployment Agent ใน Phase 2)';
 
-    // 3. Build artifact check (dist/index.html)
+    // Check 3 — Production Build (§3 Check 3):
+    // Must NEVER return PASS merely because dist/index.html exists on disk.
+    // Requires verifiable Build Evidence proving the build succeeded AND matches the verified Commit SHA.
     const distIndexExists = fs.existsSync(path.resolve(process.cwd(), 'dist', 'index.html'));
-    const buildStatus: ChecklistItemStatus = distIndexExists ? 'PASS' : 'WARNING';
+    const buildStatus: ChecklistItemStatus = 'NOT_CHECKED';
     const buildDetail = distIndexExists
-      ? 'พบชุดไฟล์ Production Build (dist/index.html) พร้อมเสิร์ฟที่ /Sam_Att/'
-      : 'WARNING — ยังไม่พบโฟลเดอร์ dist/index.html บนดิสก์ (ต้องรัน Build ผ่าน Deployment Agent ใน Phase 2)';
+      ? 'NOT_CHECKED — พบไฟล์ dist/index.html บนดิสก์ แต่ยังไม่มีหลักฐานการ Build (Build Evidence) ที่ยืนยันว่า Build สำเร็จและสัมพันธ์กับ Commit SHA ที่ตรวจสอบ (ห้ามสรุป PASS จากการมีไฟล์เพียงอย่างเดียว)'
+      : 'NOT_CHECKED — ยังไม่พบไฟล์ dist/index.html และยังไม่ได้ตรวจสอบการ Build จริงจากกระบวนการที่เชื่อถือได้';
 
-    // 4. Automated tests status
+    // Check 4 — Automated Tests (§3 Check 4):
+    // Must NEVER trust SAM_ATT_LAST_TEST_STATUS=PASS alone.
+    // Requires traceable test evidence (Commit SHA, Timestamp, and Test Result from a trusted runner).
     const envTestStatus = (process.env.SAM_ATT_LAST_TEST_STATUS || '').trim().toUpperCase();
     const testStatus: ChecklistItemStatus =
-      envTestStatus === 'PASS'
-        ? 'PASS'
-        : envTestStatus === 'FAIL'
-        ? 'FAIL'
-        : 'NOT_CHECKED';
+      envTestStatus === 'FAIL' ? 'FAIL' : 'NOT_CHECKED';
     const testDetail =
-      testStatus === 'PASS'
-        ? 'ผลทดสอบ Automated Tests ล่าสุดผ่านเกณฑ์ (SAM_ATT_LAST_TEST_STATUS=PASS)'
-        : testStatus === 'FAIL'
-        ? 'ผลทดสอบ Automated Tests ล่าสุดไม่ผ่านเกณฑ์'
-        : 'NOT CHECKED — Web Application ไม่รันคำสั่ง Shell ทดสอบโดยตรง (รอ Deployment Agent ใน Phase 2)';
+      envTestStatus === 'FAIL'
+        ? 'FAIL — มีรายงานผลทดสอบล่าสุดไม่ผ่านเกณฑ์ (FAIL)'
+        : envTestStatus === 'PASS'
+        ? 'NOT_CHECKED — พบค่า SAM_ATT_LAST_TEST_STATUS=PASS แต่ไม่มีหลักฐานผลทดสอบที่ตรวจสอบย้อนกลับได้ (Commit SHA, Timestamp และผลลัพธ์จากกระบวนการที่เชื่อถือได้) จึงไม่อนุญาตให้แสดง PASS'
+        : 'NOT_CHECKED — ยังไม่มีหลักฐานผลทดสอบ Automated Tests ที่ผูกกับ Commit SHA และ Timestamp จากกระบวนการที่เชื่อถือได้';
 
-    // 5. Backup readiness
-    const backupVerified = process.env.SAM_ATT_BACKUP_VERIFIED === 'true';
-    const backupStatus: ChecklistItemStatus = backupVerified ? 'PASS' : 'NOT_CHECKED';
-    const backupDetail = backupVerified
-      ? `พบข้อมูลสำรองเวอร์ชันที่ตรวจสอบแล้ว (${process.env.SAM_ATT_BACKUP_ID || 'VERIFIED'})`
-      : 'NOT CHECKED — ยังไม่มี Backup ที่สร้างโดย Deployment Agent (Phase 2 ยังไม่เปิดใช้งาน)';
+    // Check 5 — Backup (§3 Check 5):
+    // Must NEVER trust SAM_ATT_BACKUP_VERIFIED=true alone.
+    // Requires a real Backup Agent and verifiable backup archive + integrity check.
+    const envBackupFlag = (process.env.SAM_ATT_BACKUP_VERIFIED || '').trim().toLowerCase();
+    const backupStatus: ChecklistItemStatus = 'NOT_CHECKED';
+    const backupDetail =
+      envBackupFlag === 'true'
+        ? 'NOT_CHECKED — พบค่า SAM_ATT_BACKUP_VERIFIED=true แต่ยังไม่มีระบบ Backup Agent และไม่พบหลักฐานการตรวจสอบความสมบูรณ์ของไฟล์สำรองจริง จึงไม่อนุญาตให้แสดง PASS'
+        : 'NOT_CHECKED — ยังไม่มีระบบ Backup Agent และยังไม่มีหลักฐานชุดข้อมูลสำรองที่ตรวจสอบความสมบูรณ์แล้ว';
 
-    // 6. Database Configuration & Real Health Check
+    // Check 6 — Database Configuration (§3 Check 6):
+    // Verify real MySQL connectivity via repo.checkHealth().
+    // Must confirm:
+    // 1. repo.mode === 'REAL'
+    // 2. health.healthy === true
+    // 3. database name matches 'samchuk_attendance_v2'
+    // 4. Not using Mock Data or Test Database
     let dbCheckStatus: ChecklistItemStatus = 'FAIL';
     let dbCheckDetail = '';
     try {
       const health = await repo.checkHealth();
+      const repoDbName = repo.getDatabaseName();
+      const reportedDbName = health.database || repoDbName;
       const hasRealEnv = Boolean(
         process.env.SAM_ATT_DB_HOST?.trim() &&
           process.env.SAM_ATT_DB_USER?.trim() &&
           process.env.SAM_ATT_DB_PASSWORD
       );
-      if (repo.mode === 'REAL' && health.healthy && hasRealEnv) {
-        dbCheckStatus = 'PASS';
-        dbCheckDetail = `เชื่อมต่อฐานข้อมูลจริง ${health.database} (โหมด REAL MySQL) สำเร็จ`;
-      } else if (health.healthy) {
-        dbCheckStatus = 'WARNING';
-        dbCheckDetail = `WARNING — ระบบทำงานในโหมด ${repo.mode} (${health.database}) ยังไม่ใช่โหมด REAL MySQL Production`;
-      } else {
+
+      if (!health.healthy) {
         dbCheckStatus = 'FAIL';
-        dbCheckDetail = `ไม่สามารถเชื่อมต่อฐานข้อมูล ${dbName} ได้`;
+        dbCheckDetail = `FAIL — ไม่สามารถเชื่อมต่อฐานข้อมูล ${reportedDbName} ได้ (${
+          health.message || 'Connection failed'
+        })`;
+      } else if (
+        reportedDbName !== AUTHORITATIVE_PRODUCTION_DATABASE_NAME ||
+        repoDbName !== AUTHORITATIVE_PRODUCTION_DATABASE_NAME
+      ) {
+        dbCheckStatus = 'FAIL';
+        dbCheckDetail = `FAIL — ชื่อฐานข้อมูลปัจจุบัน (${reportedDbName}) ไม่ตรงกับฐานข้อมูล Production ที่กำหนด (${AUTHORITATIVE_PRODUCTION_DATABASE_NAME})`;
+      } else if (repo.mode !== 'REAL' || !hasRealEnv) {
+        dbCheckStatus = 'WARNING';
+        dbCheckDetail = `WARNING — ระบบกำลังทำงานในโหมด ${repo.mode} (ไม่ใช่โหมด REAL MySQL Production หรือยังไม่ได้ตั้งค่า Environment เชื่อมต่อฐานข้อมูลจริงครบถ้วน) ห้ามสรุป PASS จาก Mock/Test Repository`;
+      } else {
+        dbCheckStatus = 'PASS';
+        dbCheckDetail = `PASS — เชื่อมต่อฐานข้อมูล MySQL จริง (${AUTHORITATIVE_PRODUCTION_DATABASE_NAME}) ในโหมด REAL สำเร็จและผ่านการตรวจสอบ SELECT 1`;
       }
     } catch (err) {
       dbCheckStatus = 'FAIL';
-      dbCheckDetail = `การเชื่อมต่อฐานข้อมูล ${dbName} ล้มเหลว: ${
-        err instanceof Error ? err.message : 'Unknown error'
+      dbCheckDetail = `FAIL — การเชื่อมต่อฐานข้อมูลล้มเหลว: ${
+        err instanceof Error ? err.message : 'Unknown database error'
       }`;
     }
 
-    // 7. Central API Gateway
-    const gatewayStatus: ChecklistItemStatus = 'PASS';
+    // Check 7 — Central API Gateway (§3 Check 7):
+    // Must NOT hardcode PASS or return PASS merely because Router exists or Port 3002 is configured.
+    // Since there is no verified external Gateway health probe in Phase 1, return NOT_CHECKED with reason.
+    const gatewayStatus: ChecklistItemStatus = 'NOT_CHECKED';
     const gatewayDetail =
-      'Central API Gateway พอร์ต 3002 (/api/Sam_Att/) ทำงานปกติโดยไม่เปิดพอร์ตเพิ่ม';
+      'NOT_CHECKED — ยังไม่มีกลไก Health Check ที่เชื่อถือได้สำหรับยืนยันเส้นทาง /api/Sam_Att/ จาก Central API Gateway พอร์ต 3002 โดยตรง (ไม่สรุป PASS เพียงเพราะมี Router หรือกำหนดค่า Port 3002)';
 
-    // 8. Procurement Health Check
-    const procurementVerified =
-      process.env.SAM_ATT_PROCUREMENT_HEALTH_VERIFIED === 'true';
-    const procurementStatus: ChecklistItemStatus = procurementVerified
-      ? 'PASS'
-      : 'NOT_CHECKED';
-    const procurementDetail = procurementVerified
-      ? 'ตรวจสอบสถานะระบบ Procurement บน Central API Gateway ผ่านเรียบร้อย'
-      : 'NOT CHECKED — ระบบแยกสิทธิ์จาก Procurement อย่างเด็ดขาด (รอ Deployment Agent ตรวจ Health Endpoint ใน Phase 2)';
+    // Check 8 — Procurement Health Check (§3 Check 8):
+    // Must NEVER trust SAM_ATT_PROCUREMENT_HEALTH_VERIFIED=true alone, and never treat HTTP 404 as healthy.
+    const envProcurementFlag = (
+      process.env.SAM_ATT_PROCUREMENT_HEALTH_VERIFIED || ''
+    )
+      .trim()
+      .toLowerCase();
+    const procurementStatus: ChecklistItemStatus = 'NOT_CHECKED';
+    const procurementDetail =
+      envProcurementFlag === 'true'
+        ? 'NOT_CHECKED — พบค่า SAM_ATT_PROCUREMENT_HEALTH_VERIFIED=true แต่ไม่มีผลตรวจสอบจริงจาก Endpoint หรือกลไกที่ได้รับการยืนยัน จึงไม่อนุญาตให้แสดง PASS'
+        : 'NOT_CHECKED — ยังไม่มี Endpoint หรือกลไกตรวจสอบสถานะระบบ Procurement ที่ได้รับการยืนยันว่าถูกต้อง (ไม่ถือว่า HTTP 404 จาก /api/Procurement/health หมายถึงทำงานปกติ)';
 
     const checklist: DeploymentChecklistItem[] = [
       {
         id: 'github_source',
         stepNumber: 1,
         label: '1. GitHub Source ตรวจสอบผ่าน',
-        description: `ตรวจสอบการเข้าถึง Repository ${AUTHORITATIVE_GITHUB_REPO_URL}`,
+        description: `ตรวจสอบการเข้าถึง Repository ${AUTHORITATIVE_GITHUB_REPO_URL} และ Commit SHA จาก GitHub API จริง`,
         status: githubStatus,
         detail: githubDetail,
         checkedAt: nowStr,
@@ -610,7 +723,7 @@ export class DeploymentCenterService {
         id: 'dependencies',
         stepNumber: 2,
         label: '2. Dependencies พร้อม',
-        description: 'ตรวจสอบไฟล์ package.json และโมดูลที่จำเป็นของระบบ',
+        description: 'ตรวจสอบความถูกต้องของ Dependencies จากหลักฐานกระบวนการ Build/Test ที่เชื่อถือได้',
         status: depStatus,
         detail: depDetail,
         checkedAt: nowStr,
@@ -619,7 +732,7 @@ export class DeploymentCenterService {
         id: 'build',
         stepNumber: 3,
         label: '3. Build ผ่าน',
-        description: 'ตรวจสอบความพร้อมของชุดไฟล์ Frontend Build (dist/)',
+        description: 'ตรวจสอบหลักฐานว่า Production Build สำเร็จและ Artifact ตรงกับ Commit SHA ที่ตรวจสอบ',
         status: buildStatus,
         detail: buildDetail,
         checkedAt: nowStr,
@@ -628,7 +741,7 @@ export class DeploymentCenterService {
         id: 'automated_tests',
         stepNumber: 4,
         label: '4. Automated Tests ผ่าน',
-        description: 'ผลรันชุดทดสอบ Attendance Engine และ Security Integration Tests',
+        description: 'ตรวจสอบหลักฐานผลการรัน Automated Tests ที่ผูกกับ Commit SHA และเวลาที่ตรวจสอบ',
         status: testStatus,
         detail: testDetail,
         checkedAt: nowStr,
@@ -637,7 +750,7 @@ export class DeploymentCenterService {
         id: 'backup',
         stepNumber: 5,
         label: '5. Backup พร้อม',
-        description: 'ตรวจสอบชุดสำรองเวอร์ชันปัจจุบันก่อนอัปเดต',
+        description: 'ตรวจสอบชุดสำรองเวอร์ชันปัจจุบันพร้อมหลักฐานความสมบูรณ์ก่อนอัปเดต',
         status: backupStatus,
         detail: backupDetail,
         checkedAt: nowStr,
@@ -646,7 +759,7 @@ export class DeploymentCenterService {
         id: 'database_config',
         stepNumber: 6,
         label: '6. Database Configuration ถูกต้อง',
-        description: `ตรวจสอบการตั้งค่าและเชื่อมต่อฐานข้อมูล ${dbName}`,
+        description: `ตรวจสอบการตั้งค่าและเชื่อมต่อฐานข้อมูล MySQL จริง (${AUTHORITATIVE_PRODUCTION_DATABASE_NAME})`,
         status: dbCheckStatus,
         detail: dbCheckDetail,
         checkedAt: nowStr,
@@ -655,7 +768,7 @@ export class DeploymentCenterService {
         id: 'central_gateway',
         stepNumber: 7,
         label: '7. Central API Gateway พร้อม',
-        description: 'ตรวจสอบการ Mount เส้นทาง /api/Sam_Att/ บนพอร์ต 3002',
+        description: 'ตรวจสอบหลักฐานการทำงานของเส้นทาง /api/Sam_Att/ บน Central API Gateway พอร์ต 3002',
         status: gatewayStatus,
         detail: gatewayDetail,
         checkedAt: nowStr,
@@ -664,7 +777,7 @@ export class DeploymentCenterService {
         id: 'procurement_health',
         stepNumber: 8,
         label: '8. Procurement Health Check ผ่าน',
-        description: 'ตรวจสอบว่าระบบ Procurement บน Central API Gateway ไม่ได้รับผลกระทบ',
+        description: 'ตรวจสอบผล Health Check จริงของระบบ Procurement บน Central API Gateway',
         status: procurementStatus,
         detail: procurementDetail,
         checkedAt: nowStr,
@@ -677,7 +790,7 @@ export class DeploymentCenterService {
 
   /**
    * Read Deployment History from environment/audit logs if configured, or return NOT_CONFIGURED / empty list.
-   * Never fabricates fake deployment records in production (§2.E & §6).
+   * Never fabricates fake deployment records in production.
    */
   public static async getDeploymentHistory(repo: ISamAttRepository): Promise<{
     historyStatus: 'AVAILABLE' | 'NOT_AVAILABLE' | 'NOT_CONFIGURED';
@@ -780,11 +893,11 @@ export class DeploymentCenterService {
     repo: ISamAttRepository,
     options?: { checkUpdates?: boolean; runPreflight?: boolean }
   ): Promise<DeploymentCenterStatusPayload> {
-    const nowStr = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    const nowStr = new Date().toISOString();
     const dbName =
       process.env.SAM_ATT_DB_NAME?.trim() ||
       repo.getDatabaseName() ||
-      'samchuk_attendance_v2';
+      AUTHORITATIVE_PRODUCTION_DATABASE_NAME;
 
     let dbHealthy = false;
     try {
@@ -795,10 +908,13 @@ export class DeploymentCenterService {
     }
 
     const currentServer = this.getCurrentServerVersion();
-    const { githubStatus, versionInfo: latestGitHub } =
-      await this.fetchLatestGitHubVersion(Boolean(options?.checkUpdates));
-    const comparison = this.compareVersions(currentServer, latestGitHub);
     const checklist = await this.evaluateChecklist(repo, Boolean(options?.runPreflight));
+    const { githubStatus, versionInfo: latestGitHub } =
+      await this.fetchLatestGitHubVersion(
+        Boolean(options?.checkUpdates && !options?.runPreflight)
+      );
+    const comparison = this.compareVersions(currentServer, latestGitHub);
+    const deploymentReadiness = this.computeReadinessSummary(checklist);
     const { historyStatus, history } = await this.getDeploymentHistory(repo);
 
     const statusLabel =
@@ -817,10 +933,14 @@ export class DeploymentCenterService {
       isDemoData: false,
       checkedAt: nowStr,
       systemStatus: {
-        samAttStatus: dbHealthy ? 'ONLINE' : 'DEGRADED',
-        samAttStatusText: dbHealthy
-          ? `ออนไลน์ปกติ (เชื่อมฐานข้อมูล ${dbName})`
-          : `รอการตรวจสอบฐานข้อมูล (${dbName})`,
+        samAttStatus:
+          dbHealthy && repo.mode === 'REAL' && dbName === AUTHORITATIVE_PRODUCTION_DATABASE_NAME
+            ? 'ONLINE'
+            : 'DEGRADED',
+        samAttStatusText:
+          dbHealthy && repo.mode === 'REAL'
+            ? `ออนไลน์ปกติ (เชื่อมฐานข้อมูล ${dbName})`
+            : `รอการยืนยันฐานข้อมูล Production (${dbName} / Mode: ${repo.mode})`,
         samAttFrontendPort: 3001,
         samAttFrontendPath: '/Sam_Att/',
         backendApiStatus: 'ONLINE',
@@ -862,6 +982,7 @@ export class DeploymentCenterService {
         comparisonMessage: comparison.comparisonMessage,
       },
       checklist,
+      deploymentReadiness,
       deploymentAgent: {
         phase2AgentAvailable: false,
         approveEnabled: false,

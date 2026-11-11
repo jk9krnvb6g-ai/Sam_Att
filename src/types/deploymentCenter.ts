@@ -1,4 +1,9 @@
-export type ChecklistItemStatus = 'PASS' | 'FAIL' | 'WARNING' | 'NOT_CHECKED';
+export type ChecklistItemStatus =
+  | 'PASS'
+  | 'FAIL'
+  | 'WARNING'
+  | 'NOT_CHECKED'
+  | 'NOT_AVAILABLE';
 
 export interface DeploymentChecklistItem {
   id: string;
@@ -7,7 +12,7 @@ export interface DeploymentChecklistItem {
   description: string;
   status: ChecklistItemStatus;
   detail: string;
-  checkedAt: string;
+  checkedAt: string | null;
 }
 
 export interface ServerVersionInfo {
@@ -46,17 +51,28 @@ export interface DeploymentHistoryItem {
 }
 
 export interface DeploymentSystemStatus {
-  samAttStatus: 'ONLINE' | 'DEGRADED';
+  samAttStatus: 'ONLINE' | 'DEGRADED' | 'UNAVAILABLE';
   samAttFrontendPath: string;
   samAttFrontendPort: number;
-  backendApiStatus: 'ONLINE' | 'DEGRADED';
+  backendApiStatus: 'ONLINE' | 'DEGRADED' | 'UNAVAILABLE';
   backendGatewayPath: string;
   backendGatewayPort: number;
   databaseName: string;
   databaseHealthy: boolean;
-  githubConnectionStatus: 'CONNECTED' | 'UNAVAILABLE' | 'NOT_CHECKED';
+  githubConnectionStatus: 'CONNECTED' | 'NOT_CONFIGURED' | 'NOT_AVAILABLE' | 'NOT_CHECKED' | 'UNAVAILABLE';
   githubRepositoryUrl: string;
   lastDeployedAt: string;
+}
+
+export interface DeploymentReadinessSummary {
+  readyToDeploy: boolean;
+  passedCount: number;
+  failedCount: number;
+  warningCount: number;
+  notCheckedCount: number;
+  totalCount: number;
+  readinessStatus: 'NOT_READY' | 'CHECKS_INCOMPLETE' | 'FAILED_CHECKS';
+  readinessMessage: string;
 }
 
 export interface DeploymentCenterStatusPayload {
@@ -69,6 +85,7 @@ export interface DeploymentCenterStatusPayload {
   latestGitHubVersion: GitHubVersionInfo;
   versionComparison: VersionComparisonResult;
   checklist: DeploymentChecklistItem[];
+  deploymentReadiness?: DeploymentReadinessSummary;
   deploymentAgent: {
     phase2AgentAvailable: boolean;
     approveEnabled: boolean;

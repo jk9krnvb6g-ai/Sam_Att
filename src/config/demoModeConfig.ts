@@ -2,7 +2,7 @@ import { UserAccount } from '../types/attendance';
 import { DeploymentCenterStatusPayload } from '../types/deploymentCenter';
 
 /**
- * Sam_Att V2 — Development Preview Demo Admin Configuration (§8)
+ * Sam_Att V2 — Development Preview Demo Admin Configuration
  *
  * SECURITY INVARIANTS:
  * 1. Exclusively active when Vite compile-time flags satisfy `import.meta.env.DEV && !import.meta.env.PROD`.
@@ -46,115 +46,140 @@ export function getDemoDeploymentCenterPayload(): DeploymentCenterStatusPayload 
       isDemoData: true,
       checkedAt: nowIso,
       systemStatus: {
-        samAttStatus: 'ONLINE',
+        samAttStatus: 'DEGRADED',
         samAttFrontendPath: '/Sam_Att/',
         samAttFrontendPort: 3001,
         backendApiStatus: 'ONLINE',
         backendGatewayPath: '/api/Sam_Att/',
         backendGatewayPort: 3002,
-        databaseName: 'samchuk_attendance_v2 (DEMO DATA)',
-        databaseHealthy: true,
-        githubConnectionStatus: 'CONNECTED',
+        databaseName: 'samchuk_attendance_v2 (DEMO DATA — Preview Only)',
+        databaseHealthy: false,
+        githubConnectionStatus: 'NOT_CHECKED',
         githubRepositoryUrl: 'https://github.com/jk9krnvb6g-ai/Sam_Att',
-        lastDeployedAt: 'DEMO DATA — 2026-11-11 08:30:00 (Preview Simulation)',
+        lastDeployedAt: 'NOT CONFIGURED (DEMO DATA — Preview Simulation)',
       },
       currentVersion: {
-        version: 'DEMO DATA — sam-att-v2-preview',
-        commitSha: 'DEMO DATA — 03c0d175 (Server Preview)',
-        deploymentDate: 'DEMO DATA — 2026-11-10 17:45:00',
-        configured: true,
-        source: 'DEMO DATA (Frontend Development Preview Only)',
+        version: 'NOT CONFIGURED (DEMO DATA)',
+        commitSha: 'NOT AVAILABLE (DEMO DATA)',
+        deploymentDate: 'NOT AVAILABLE (DEMO DATA)',
+        configured: false,
+        source: 'DEMO_DATA',
       },
       latestGitHubVersion: {
         repositoryUrl: 'https://github.com/jk9krnvb6g-ai/Sam_Att',
-        version: 'DEMO DATA — github-main-latest',
-        commitSha: 'DEMO DATA — a25f9c12 (GitHub Latest)',
-        latestCommitDate: 'DEMO DATA — 2026-11-11 09:15:00',
+        version: 'NOT CHECKED (DEMO DATA)',
+        commitSha: 'NOT AVAILABLE (DEMO DATA)',
+        latestCommitDate: 'NOT AVAILABLE (DEMO DATA)',
         branch: 'main',
-        reachable: true,
-        configured: true,
-        message: 'DEMO DATA: ข้อมูลจำลองสำหรับการแสดงผลใน Google AI Studio Development Preview เท่านั้น (ไม่ได้เรียก Production API)',
+        reachable: false,
+        configured: false,
+        message:
+          'DEMO DATA: โหมดพรีวิวไม่ได้เชื่อมต่อ Production Server จริง และไม่สร้างเลขเวอร์ชันหรือ Commit SHA ปลอม',
       },
       versionComparison: {
-        status: 'UPDATE_AVAILABLE',
-        statusLabel: 'DEMO DATA — มีอัปเดตใหม่จาก GitHub (Preview Simulation)',
+        status: 'NOT_AVAILABLE',
+        statusLabel: 'ยังไม่สามารถเปรียบเทียบเวอร์ชันได้ (NOT AVAILABLE — DEMO DATA)',
         summary:
-          'DEMO DATA: เซิร์ฟเวอร์จำลองอยู่ที่ Commit 03c0d175 ขณะที่ GitHub ล่าสุดอยู่ที่ Commit a25f9c12 (แสดงผลเฉพาะโหมดพรีวิว ไม่มีการเชื่อมต่อเซิร์ฟเวอร์จริง)',
+          'DEMO DATA: โหมดพรีวิวแสดงโครงสร้างหน้าจอ Deployment Center เท่านั้น โดยไม่ปลอมแปลง Commit SHA หรือผลการตรวจสอบเป็น PASS',
       },
       checklist: [
         {
-          id: 'github_source_verified',
+          id: 'github_source',
           stepNumber: 1,
-          label: 'GitHub Source ตรวจสอบผ่าน',
-          description: 'ตรวจสอบการเข้าถึง Repository https://github.com/jk9krnvb6g-ai/Sam_Att และ Commit ล่าสุด',
-          status: 'PASS',
-          detail: 'DEMO DATA: ตรวจสอบ Repository jk9krnvb6g-ai/Sam_Att สำเร็จ (Preview Mode)',
-          checkedAt: nowIso,
-        },
-        {
-          id: 'dependencies_ready',
-          stepNumber: 2,
-          label: 'Dependencies พร้อม',
-          description: 'ตรวจสอบ package.json, package-lock.json และโฟลเดอร์ node_modules บนเซิร์ฟเวอร์',
-          status: 'PASS',
-          detail: 'DEMO DATA: ตรวจพบ package.json, package-lock.json และ node_modules ครบถ้วน',
-          checkedAt: nowIso,
-        },
-        {
-          id: 'build_passed',
-          stepNumber: 3,
-          label: 'Build ผ่าน',
-          description: 'ตรวจสอบความพร้อมของ Production Build Artifact (dist/index.html)',
-          status: 'PASS',
-          detail: 'DEMO DATA: ตรวจพบ Production Build Artifact (dist/index.html) พร้อมใช้งาน',
-          checkedAt: nowIso,
-        },
-        {
-          id: 'automated_tests_passed',
-          stepNumber: 4,
-          label: 'Automated Tests ผ่าน',
-          description: 'ตรวจสอบชุดทดสอบ Unit & Integration Tests ของระบบ Sam_Att V2',
-          status: 'PASS',
-          detail: 'DEMO DATA: ชุดทดสอบ Unit & Phase 1+2 Integration Tests ผ่านครบถ้วน',
-          checkedAt: nowIso,
-        },
-        {
-          id: 'backup_ready',
-          stepNumber: 5,
-          label: 'Backup พร้อม',
-          description: 'ตรวจสอบพื้นที่จัดเก็บ Backup และสถานะ Backup ล่าสุดก่อนการอัปเดต',
-          status: 'WARNING',
-          detail: 'DEMO DATA: Phase 1 Read-Only — การสร้างจุดสำรองข้อมูลอัตโนมัติจะทำงานร่วมกับ Phase 2 Deployment Agent',
-          checkedAt: nowIso,
-        },
-        {
-          id: 'database_config_valid',
-          stepNumber: 6,
-          label: 'Database Configuration ถูกต้อง',
-          description: 'ตรวจสอบการตั้งค่าและการเชื่อมต่อฐานข้อมูล MySQL (samchuk_attendance_v2)',
-          status: 'PASS',
-          detail: 'DEMO DATA: ตั้งค่าฐานข้อมูล samchuk_attendance_v2 ถูกต้อง (Preview Simulation)',
-          checkedAt: nowIso,
-        },
-        {
-          id: 'central_gateway_ready',
-          stepNumber: 7,
-          label: 'Central API Gateway พร้อม',
-          description: 'ตรวจสอบความพร้อมของ Central API Gateway พอร์ต 3002 ภายใต้ /api/Sam_Att/',
-          status: 'PASS',
-          detail: 'DEMO DATA: Central API Gateway (:3002/api/Sam_Att/) พร้อมทำงานโดยไม่เปิดพอร์ตเพิ่ม',
-          checkedAt: nowIso,
-        },
-        {
-          id: 'procurement_health_passed',
-          stepNumber: 8,
-          label: 'Procurement Health Check ผ่าน',
-          description: 'ตรวจสอบว่าระบบจัดซื้อจัดจ้าง (Procurement) บน Central API Gateway ไม่ได้รับผลกระทบ',
+          label: '1. GitHub Source ตรวจสอบผ่าน',
+          description:
+            'ตรวจสอบการเข้าถึง Repository https://github.com/jk9krnvb6g-ai/Sam_Att และ Commit SHA จาก GitHub API จริง',
           status: 'NOT_CHECKED',
-          detail: 'DEMO DATA: รอเชื่อมต่อ SAM_ATT_PROCUREMENT_HEALTH_URL บน FILESERVER จริงเพื่อตรวจสอบสถานะ Procurement',
-          checkedAt: nowIso,
+          detail:
+            'NOT_CHECKED (DEMO DATA) — โหมดพรีวิวไม่ได้เรียก Production Backend เพื่อตรวจสอบ GitHub API จริง',
+          checkedAt: null,
+        },
+        {
+          id: 'dependencies',
+          stepNumber: 2,
+          label: '2. Dependencies พร้อม',
+          description:
+            'ตรวจสอบความถูกต้องของ Dependencies จากหลักฐานกระบวนการ Build/Test ที่เชื่อถือได้',
+          status: 'NOT_CHECKED',
+          detail:
+            'NOT_CHECKED (DEMO DATA) — การมี package.json และ node_modules เพียงอย่างเดียวไม่เพียงพอที่จะสรุป PASS ต้องมีหลักฐานจากกระบวนการ Build/Test',
+          checkedAt: null,
+        },
+        {
+          id: 'build',
+          stepNumber: 3,
+          label: '3. Build ผ่าน',
+          description:
+            'ตรวจสอบหลักฐานว่า Production Build สำเร็จและ Artifact ตรงกับ Commit SHA ที่ตรวจสอบ',
+          status: 'NOT_CHECKED',
+          detail:
+            'NOT_CHECKED (DEMO DATA) — ห้ามสรุป PASS จากการมีไฟล์ dist/index.html เพียงอย่างเดียวโดยไม่มี Build Evidence ที่ผูกกับ Commit SHA',
+          checkedAt: null,
+        },
+        {
+          id: 'automated_tests',
+          stepNumber: 4,
+          label: '4. Automated Tests ผ่าน',
+          description:
+            'ตรวจสอบหลักฐานผลการรัน Automated Tests ที่ผูกกับ Commit SHA และเวลาที่ตรวจสอบ',
+          status: 'NOT_CHECKED',
+          detail:
+            'NOT_CHECKED (DEMO DATA) — ห้ามเชื่อถือ SAM_ATT_LAST_TEST_STATUS=PASS เพียงค่าเดียวโดยไม่มีหลักฐานผลทดสอบที่ตรวจสอบย้อนกลับได้',
+          checkedAt: null,
+        },
+        {
+          id: 'backup',
+          stepNumber: 5,
+          label: '5. Backup พร้อม',
+          description: 'ตรวจสอบชุดสำรองเวอร์ชันปัจจุบันพร้อมหลักฐานความสมบูรณ์ก่อนอัปเดต',
+          status: 'NOT_CHECKED',
+          detail:
+            'NOT_CHECKED (DEMO DATA) — ยังไม่มี Backup Agent และไม่ใช้ SAM_ATT_BACKUP_VERIFIED=true เพียงอย่างเดียวเพื่อสรุป PASS',
+          checkedAt: null,
+        },
+        {
+          id: 'database_config',
+          stepNumber: 6,
+          label: '6. Database Configuration ถูกต้อง',
+          description: 'ตรวจสอบการตั้งค่าและเชื่อมต่อฐานข้อมูล MySQL จริง (samchuk_attendance_v2)',
+          status: 'NOT_CHECKED',
+          detail:
+            'NOT_CHECKED (DEMO DATA) — โหมดพรีวิวไม่ได้เชื่อมต่อฐานข้อมูล MySQL จริง (samchuk_attendance_v2)',
+          checkedAt: null,
+        },
+        {
+          id: 'central_gateway',
+          stepNumber: 7,
+          label: '7. Central API Gateway พร้อม',
+          description:
+            'ตรวจสอบหลักฐานการทำงานของเส้นทาง /api/Sam_Att/ บน Central API Gateway พอร์ต 3002',
+          status: 'NOT_CHECKED',
+          detail:
+            'NOT_CHECKED (DEMO DATA) — ยังไม่มีกลไก Health Check ที่เชื่อถือได้จาก Gateway พอร์ต 3002 (ไม่สรุป PASS เพียงเพราะมี Router)',
+          checkedAt: null,
+        },
+        {
+          id: 'procurement_health',
+          stepNumber: 8,
+          label: '8. Procurement Health Check ผ่าน',
+          description: 'ตรวจสอบผล Health Check จริงของระบบ Procurement บน Central API Gateway',
+          status: 'NOT_CHECKED',
+          detail:
+            'NOT_CHECKED (DEMO DATA) — ยังไม่มี Endpoint หรือกลไกตรวจสอบระบบ Procurement ที่ได้รับการยืนยัน',
+          checkedAt: null,
         },
       ],
+      deploymentReadiness: {
+        readyToDeploy: false,
+        passedCount: 0,
+        failedCount: 0,
+        warningCount: 0,
+        notCheckedCount: 8,
+        totalCount: 8,
+        readinessStatus: 'CHECKS_INCOMPLETE',
+        readinessMessage:
+          'ยังไม่พร้อม Deploy — มีรายการที่ยังไม่ได้ตรวจสอบ (8 รายการ NOT CHECKED) และระบบอยู่ในโหมด Phase 1 Read-Only',
+      },
       deploymentAgent: {
         phase2AgentAvailable: false,
         approveEnabled: false,
@@ -162,28 +187,7 @@ export function getDemoDeploymentCenterPayload(): DeploymentCenterStatusPayload 
         lockReason:
           'Phase 1 Read-Only Security Lock: ปุ่มอนุมัติ Deploy และ Rollback ถูกล็อกไว้จนกว่าจะมีระบบ Phase 2 Backend Deployment Agent (Windows Service / Scheduled Task IPC) เพื่อป้องกันการรันคำสั่ง OS/PowerShell จากหน้าเว็บโดยตรง',
       },
-      history: [
-        {
-          id: 'DEMO-HIST-001',
-          deployedAt: '2026-11-11T01:30:00.000Z',
-          versionOrCommit: 'DEMO DATA — 03c0d175',
-          actor: 'demo_admin_preview',
-          actorName: 'Demo Administrator (DEMO DATA)',
-          status: 'SUCCESS',
-          summary:
-            'DEMO DATA: ตรวจสอบความพร้อมระบบ (Preflight Check) และบันทึกสถานะชุดติดตั้ง Sam_Att V2 บนโหมดพรีวิว',
-        },
-        {
-          id: 'DEMO-HIST-002',
-          deployedAt: '2026-11-10T10:45:00.000Z',
-          versionOrCommit: 'DEMO DATA — 62af82e2',
-          actor: 'admin_samchuk',
-          actorName: 'ผู้ดูแลระบบ รพ.สามชุก (DEMO DATA)',
-          status: 'SUCCESS',
-          summary:
-            'DEMO DATA: อัปเดตระบบตรวจสอบการเชื่อมต่อฐานข้อมูล samchuk_attendance_v2 และ HOSOffice Live Sync',
-        },
-      ],
+      history: [],
     };
   }
   return null;
