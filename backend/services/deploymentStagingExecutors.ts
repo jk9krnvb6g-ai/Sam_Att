@@ -12,7 +12,7 @@ const BRANCH = 'fix/a96-deployment-fail-closed';
 export function createVerifiedStagingHooks(npmCliPath: string): NonNullable<StagingDeploymentEngineConfig['hooks']> {
   if (!path.isAbsolute(npmCliPath) || !fs.statSync(npmCliPath).isFile()) throw new Error('NPM_CLI_REQUIRED');
   const run = async (command: string, args: string[], cwd: string) => {
-    const result = await exec(command, args, {
+    const result = await exec(command, command === 'git' ? ['-c', `safe.directory=${cwd}`, ...args] : args, {
       cwd, shell: false, timeout: 15 * 60_000, maxBuffer: 8 * 1024 * 1024,
       windowsHide: true, env: { ...process.env, NODE_ENV: 'test', CI: '1', GIT_TERMINAL_PROMPT: '0' },
     });
