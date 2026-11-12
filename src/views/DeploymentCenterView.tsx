@@ -206,7 +206,10 @@ export const DeploymentCenterView: React.FC = () => {
 
   const handleConfirmApproveDeployment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (actionLoading !== null || !payload) return;
+    if (actionLoading !== null || !payload || !isReadyToDeploy || !payload.deploymentAgent.approveEnabled) {
+      setApproveModalError('ระบบยังไม่ผ่าน Preflight หรือ Deployment Agent ไม่พร้อม ไม่สามารถสั่ง Deploy ได้');
+      return;
+    }
 
     const targetSha =
       payload.latestGitHubVersion.commitSha !== 'NOT_AVAILABLE'
@@ -286,7 +289,10 @@ export const DeploymentCenterView: React.FC = () => {
 
   const handleConfirmRollback = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (actionLoading !== null) return;
+    if (actionLoading !== null || !payload?.deploymentAgent.rollbackEnabled) {
+      setRollbackModalError('Deployment Agent หรือชุดสำรองที่ตรวจสอบแล้วไม่พร้อม ไม่สามารถสั่ง Rollback ได้');
+      return;
+    }
 
     if (!selectedBackupId.trim()) {
       setRollbackModalError('กรุณาเลือกหรือระบุ Backup ID ที่ต้องการย้อนกลับ');
@@ -605,7 +611,7 @@ export const DeploymentCenterView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => void handleCheckForUpdates()}
-                disabled={actionLoading !== null}
+                disabled={loading || actionLoading !== null}
                 className="flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl bg-gradient-to-r from-[#8B5CF6] to-[#6D28D9] hover:from-[#7C3AED] hover:to-[#5B21B6] text-white text-xs font-bold shadow-2xs transition-all cursor-pointer disabled:opacity-60"
               >
                 {actionLoading === 'check-updates' ? (
@@ -620,7 +626,7 @@ export const DeploymentCenterView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => void handleRunPreflightCheck()}
-                disabled={actionLoading !== null}
+                disabled={loading || actionLoading !== null}
                 className="flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl bg-violet-50 hover:bg-violet-100 text-violet-900 border border-violet-200 text-xs font-bold transition-all cursor-pointer disabled:opacity-60"
               >
                 {actionLoading === 'preflight' ? (
@@ -636,7 +642,7 @@ export const DeploymentCenterView: React.FC = () => {
                 type="button"
                 onClick={handleOpenApproveModal}
                 disabled={
-                  actionLoading !== null || !payload.deploymentAgent.approveEnabled
+                  loading || actionLoading !== null || !isReadyToDeploy || !payload.deploymentAgent.approveEnabled
                 }
                 title={payload.deploymentAgent.lockReason}
                 className={`flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all ${
@@ -668,7 +674,7 @@ export const DeploymentCenterView: React.FC = () => {
                 type="button"
                 onClick={() => handleOpenRollbackModal()}
                 disabled={
-                  actionLoading !== null || !payload.deploymentAgent.rollbackEnabled
+                  loading || actionLoading !== null || !payload.deploymentAgent.rollbackEnabled
                 }
                 title={payload.deploymentAgent.lockReason}
                 className={`flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all ${
