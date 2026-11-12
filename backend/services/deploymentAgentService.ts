@@ -453,6 +453,7 @@ export interface StagingDeploymentEngineConfig {
    */
   hooks?: {
     fetchGitHubSource?: (commitSha: string, targetDir: string) => Promise<{ ok: boolean; error?: string }>;
+    verifyGitHubSource?: (commitSha: string, targetDir: string) => Promise<{ ok: boolean; error?: string }>;
     runDependenciesCheck?: (stagingSourceDir: string) => Promise<{ ok: boolean; detail: string }>;
     runTypecheck?: (stagingSourceDir: string) => Promise<{ ok: boolean; detail: string }>;
     runUnitTests?: (stagingSourceDir: string) => Promise<{ ok: boolean; detail: string }>;
@@ -597,6 +598,9 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
       backupDetail = `FAIL — ไม่สามารถเข้าถึงโฟลเดอร์ Backup ได้: ${sanitizeDeploymentErrorText(err)}`;
     }
 
+    if (!this.config.hooks?.runPostDeployHealthProbe) {
+      throw new Error('HEALTH_PROBE_NOT_CONFIGURED: ไม่มี Health Check จริง');
+    }
     const probe = this.config.hooks?.runPostDeployHealthProbe
       ? await this.config.hooks.runPostDeployHealthProbe({
           targetCommitSha,
@@ -1118,8 +1122,12 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
         `ดาวน์โหลด Source สำหรับ Commit ${params.targetCommitSha.slice(0, 8)} ลงใน Staging สำเร็จ`
       );
 
-      // Fail closed until a trusted verifier proves the downloaded source matches the approved SHA.
-      throw new Error('SOURCE_INTEGRITY_NOT_IMPLEMENTED: ยังไม่มี Source Integrity Verification');
+      if (!this.config.hooks?.verifyGitHubSource) {
+        throw new Error('SOURCE_VERIFIER_NOT_CONFIGURED: ไม่มีการตรวจสอบ Source Commit');
+      }
+      const sourceVerified = await this.config.hooks.verifyGitHubSource(params.targetCommitSha, releaseStagingDir);
+      if (!sourceVerified.ok) throw new Error(sourceVerified.error || 'SOURCE_INTEGRITY_FAILED');
+      updateProgress(4, 'COMPLETED', 'BUILDING', 'ตรวจสอบ Source Commit สำเร็จ');
 
       // Step 5: Controlled Dependencies
       if (!this.config.hooks?.runDependenciesCheck) throw new Error('DEPENDENCIES_EXECUTOR_NOT_CONFIGURED');
@@ -1175,33 +1183,12 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
         }
       }
 
+      // Never synthesize a successful release from placeholder files.
       if (!fs.existsSync(path.join(stagedFrontendDir, 'index.html'))) {
-        fs.writeFileSync(
-          path.join(stagedFrontendDir, 'index.html'),
-          `<!doctype html><html><head><title>Sam_Att V2 (${params.targetCommitSha.slice(
-            0,
-            8
-          )})</title></head><body data-commit="${params.targetCommitSha.toLowerCase()}">Sam_Att V2 Release ${
-            params.targetVersion
-          }</body></html>`,
-          'utf8'
-        );
+        throw new Error('FRONTEND_ARTIFACT_MISSING: Production build did not create index.html');
       }
-      if (!fs.existsSync(path.join(stagedBackendDir, 'samAttAdapter.json'))) {
-        fs.writeFileSync(
-          path.join(stagedBackendDir, 'samAttAdapter.json'),
-          JSON.stringify(
-            {
-              module: 'Sam_Att_V2',
-              mountPath: '/api/Sam_Att',
-              commitSha: params.targetCommitSha.toLowerCase(),
-              version: params.targetVersion,
-            },
-            null,
-            2
-          ),
-          'utf8'
-        );
+      if (!fs.existsSync(path.join(stagedBackendDir, 'sam-att-gateway.cjs'))) {
+        throw new Error('BACKEND_ARTIFACT_MISSING: Production build did not create sam-att-gateway.cjs');
       }
       updateProgress(9, 'COMPLETED', 'BUILDING', 'Build Frontend และ Backend Artifacts สำเร็จ');
 
