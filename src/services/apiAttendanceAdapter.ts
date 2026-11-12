@@ -21,8 +21,11 @@ import {
   User,
 } from '../types/attendance';
 import {
+  ApproveDeploymentResponse,
+  DeploymentBackupSummary,
   DeploymentCenterStatusPayload,
   DeploymentHistoryItem,
+  RollbackDeploymentResponse,
 } from '../types/deploymentCenter';
 
 export type DataSourceMode = 'API';
@@ -1557,6 +1560,11 @@ class ApiAttendanceAdapter {
   // ==========================================
   // 10. Deployment Center (`/deployment/*` — ADMIN Only)
   // ==========================================
+  private checkUpdatesInFlight: Promise<DeploymentCenterStatusPayload> | null = null;
+  private preflightInFlight: Promise<DeploymentCenterStatusPayload> | null = null;
+  private approveDeployInFlight: Promise<ApproveDeploymentResponse> | null = null;
+  private rollbackDeployInFlight: Promise<RollbackDeploymentResponse> | null = null;
+
   public async fetchDeploymentStatus(): Promise<DeploymentCenterStatusPayload> {
     return this.requestJson<DeploymentCenterStatusPayload>('/deployment/status', {
       method: 'GET',
@@ -1564,17 +1572,35 @@ class ApiAttendanceAdapter {
   }
 
   public async checkDeploymentUpdates(): Promise<DeploymentCenterStatusPayload> {
-    return this.requestJson<DeploymentCenterStatusPayload>('/deployment/check-updates', {
-      method: 'POST',
-      body: JSON.stringify({}),
+    if (this.checkUpdatesInFlight) {
+      return this.checkUpdatesInFlight;
+    }
+    this.checkUpdatesInFlight = this.requestJson<DeploymentCenterStatusPayload>(
+      '/deployment/check-updates',
+      {
+        method: 'POST',
+        body: JSON.stringify({}),
+      }
+    ).finally(() => {
+      this.checkUpdatesInFlight = null;
     });
+    return this.checkUpdatesInFlight;
   }
 
   public async runDeploymentPreflight(): Promise<DeploymentCenterStatusPayload> {
-    return this.requestJson<DeploymentCenterStatusPayload>('/deployment/preflight', {
-      method: 'POST',
-      body: JSON.stringify({}),
+    if (this.preflightInFlight) {
+      return this.preflightInFlight;
+    }
+    this.preflightInFlight = this.requestJson<DeploymentCenterStatusPayload>(
+      '/deployment/preflight',
+      {
+        method: 'POST',
+        body: JSON.stringify({}),
+      }
+    ).finally(() => {
+      this.preflightInFlight = null;
     });
+    return this.preflightInFlight;
   }
 
   public async fetchDeploymentHistory(limit = 30): Promise<DeploymentHistoryItem[]> {
@@ -1585,6 +1611,66 @@ class ApiAttendanceAdapter {
       method: 'GET',
     });
     return data.history || [];
+  }
+
+  public async fetchDeploymentBackups(): Promise<DeploymentBackupSummary[]> {
+    const data = await this.requestJson<{
+      success: boolean;
+      backups: DeploymentBackupSummary[];
+    }>('/deployment/backups', {
+      method: 'GET',
+    });
+    return data.backups || [];
+  }
+
+  public async approveDeployment(params: {
+    targetCommitSha: string;
+    adminPassword: string;
+    maintenanceWindowApproved?: boolean;
+  }): Promise<ApproveDeploymentResponse> {
+    if (this.approveDeployInFlight) {
+      return this.approveDeployInFlight;
+    }
+    this.approveDeployInFlight = this.requestJson<ApproveDeploymentResponse>(
+      '/deployment/approve',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          targetCommitSha: params.targetCommitSha,
+          adminPassword: params.adminPassword,
+          maintenanceWindowApproved: Boolean(params.maintenanceWindowApproved),
+        }),
+      }
+    ).finally(() => {
+      this.approveDeployInFlight = null;
+    });
+    return this.approveDeployInFlight;
+  }
+
+  public async rollbackDeployment(params: {
+    backupId: string;
+    adminPassword: string;
+    confirmRollback: boolean;
+    reason?: string;
+  }): Promise<RollbackDeploymentResponse> {
+    if (this.rollbackDeployInFlight) {
+      return this.rollbackDeployInFlight;
+    }
+    this.rollbackDeployInFlight = this.requestJson<RollbackDeploymentResponse>(
+      '/deployment/rollback',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          backupId: params.backupId,
+          adminPassword: params.adminPassword,
+          confirmRollback: Boolean(params.confirmRollback),
+          reason: params.reason || '',
+        }),
+      }
+    ).finally(() => {
+      this.rollbackDeployInFlight = null;
+    });
+    return this.rollbackDeployInFlight;
   }
 }
 

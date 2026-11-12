@@ -42,6 +42,11 @@ import {
 import { createDefaultSeededRepository } from '../repositories/defaultRepositorySeed';
 import { AuthService } from '../services/authService';
 import { DeploymentCenterService } from '../services/deploymentCenterService';
+import {
+  LocalStagingDeploymentEngine,
+  readAndVerifyDeploymentManifest,
+  writeVerifiedDeploymentManifest,
+} from '../services/deploymentAgentService';
 import { createSamAttRouter } from '../router';
 import {
   apiAttendanceAdapter,
@@ -3059,6 +3064,977 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
     } finally {
       globalThis.fetch = origFetch;
       (globalThis as any).window = origWindow;
+    }
+  });
+
+  it('Scenario 24: Deployment Center Phase 2 — All 20 Required Secure Deployment Management Test Cases (Manifest Verification, Check for Updates, 8-Item Preflight, Backup, 17-Step Build/Deploy, Shared Gateway Maintenance Guard, 7-Point Health Check, Auto/Manual Rollback, CRITICAL Recovery, Rate Limit 429 & History/Audit Accuracy)', async () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sam-att-phase2-deploy-center-'));
+    const workspaceRoot = path.join(tmpRoot, 'workspace');
+    const frontendProdDir = path.join(tmpRoot, 'inetpub', 'Sam_Att');
+    const backendProdDir = path.join(tmpRoot, 'inetpub', 'Central-API-Gateway', 'sam_att_module');
+    const adapterConfigPath = path.join(
+      tmpRoot,
+      'inetpub',
+      'Central-API-Gateway',
+      'sam_att_adapter.json'
+    );
+    const deployRoot = path.join(tmpRoot, 'ProgramData', 'Deployments', 'Sam_Att');
+    const manifestPath = path.join(deployRoot, 'current.json');
+    const backupsDir = path.join(deployRoot, 'Backups');
+    const stagingDir = path.join(deployRoot, 'Staging');
+    const historyFilePath = path.join(deployRoot, 'history.json');
+
+    fs.mkdirSync(workspaceRoot, { recursive: true });
+    fs.mkdirSync(frontendProdDir, { recursive: true });
+    fs.mkdirSync(backendProdDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(frontendProdDir, 'index.html'),
+      '<html><body>Sam_Att Initial Baseline A94</body></html>',
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(backendProdDir, 'router.js'),
+      '// Sam_Att Initial Backend Router A94',
+      'utf8'
+    );
+    fs.writeFileSync(
+      adapterConfigPath,
+      JSON.stringify({ mountPath: '/api/Sam_Att', port: 3002 }, null, 2),
+      'utf8'
+    );
+
+    const origSecret = process.env.SAM_ATT_JWT_SECRET;
+    const origDbHost = process.env.SAM_ATT_DB_HOST;
+    const origDbName = process.env.SAM_ATT_DB_NAME;
+    const origDbUser = process.env.SAM_ATT_DB_USER;
+    const origDbPass = process.env.SAM_ATT_DB_PASSWORD;
+
+    process.env.SAM_ATT_JWT_SECRET =
+      'samchuk_hospital_phase2_deployment_center_test_secret_min_32_chars';
+    process.env.SAM_ATT_DB_HOST = '127.0.0.1';
+    process.env.SAM_ATT_DB_NAME = 'samchuk_attendance_v2';
+    process.env.SAM_ATT_DB_USER = 'sam_att_prod';
+    process.env.SAM_ATT_DB_PASSWORD = 'super_secret_prod_db_password';
+
+    const recordedAuditLogs: Array<{
+      id: string;
+      actor: string;
+      actorName: string;
+      actorRole: string;
+      action: string;
+      entityType: string;
+      entityId: string;
+      summary: string;
+      timestamp: string;
+      metadata?: Record<string, unknown>;
+    }> = [];
+
+    const adminPasswordHash = AuthService.hashPassword('admin_secret_123');
+    const staffPasswordHash = AuthService.hashPassword('staff_secret_123');
+    const genPasswordHash = AuthService.hashPassword('user_secret_123');
+
+    const fakeRealPool: SqlConnectionPool = {
+      async execute<T = any>(sql: string, params: unknown[] = []): Promise<[T, any]> {
+        const norm = sql.trim();
+        if (norm.startsWith('SELECT 1')) {
+          return [[{ ok: 1 }] as unknown as T, []];
+        }
+        if (norm.includes('FROM revoked_sessions')) {
+          return [[] as unknown as T, []];
+        }
+        if (norm.includes('FROM auth_rate_limits')) {
+          return [[] as unknown as T, []];
+        }
+        if (norm.includes('FROM users')) {
+          const u = String(params[0] || '').toLowerCase();
+          if (u === 'admin_test' || u === 'usr_admin') {
+            return [
+              [
+                {
+                  id: 'USR_ADMIN',
+                  username: 'admin_test',
+                  password_hash: adminPasswordHash,
+                  full_name: 'นายสมศักดิ์ บริหารงาน',
+                  role: 'ADMIN',
+                  person_id: null,
+                  department: 'IT',
+                  position: 'Admin',
+                  active: 1,
+                },
+              ] as unknown as T,
+              [],
+            ];
+          }
+          if (u === 'staff_test' || u === 'usr_staff') {
+            return [
+              [
+                {
+                  id: 'USR_STAFF',
+                  username: 'staff_test',
+                  password_hash: staffPasswordHash,
+                  full_name: 'เจ้าหน้าที่ HR',
+                  role: 'RESPONSIBLE_STAFF',
+                  person_id: 'P002',
+                  department: 'HR',
+                  position: 'HR',
+                  active: 1,
+                },
+              ] as unknown as T,
+              [],
+            ];
+          }
+          if (u === 'nurse_kanda' || u === 'usr_gen_1') {
+            return [
+              [
+                {
+                  id: 'USR_GEN_1',
+                  username: 'nurse_kanda',
+                  password_hash: genPasswordHash,
+                  full_name: 'นางสาวกานดา สุขใจ',
+                  role: 'GENERAL_USER',
+                  person_id: 'P001',
+                  department: 'IPD',
+                  position: 'Nurse',
+                  active: 1,
+                },
+              ] as unknown as T,
+              [],
+            ];
+          }
+          return [[] as unknown as T, []];
+        }
+        if (norm.startsWith('INSERT INTO audit_logs')) {
+          recordedAuditLogs.unshift({
+            id: String(params[0] || `LOG_${recordedAuditLogs.length + 1}`),
+            actor: String(params[1] || 'admin_test'),
+            actorName: String(params[2] || 'นายสมศักดิ์ บริหารงาน'),
+            actorRole: String(params[3] || 'ADMIN'),
+            action: String(params[4] || ''),
+            entityType: String(params[5] || ''),
+            entityId: String(params[6] || ''),
+            summary: String(params[7] || ''),
+            timestamp: String(params[8] || new Date().toISOString()),
+            metadata: params[9] ? JSON.parse(String(params[9])) : undefined,
+          });
+          return [{ affectedRows: 1 } as unknown as T, []];
+        }
+        if (norm.includes('FROM audit_logs')) {
+          return [
+            recordedAuditLogs.map((l) => ({
+              id: l.id,
+              actor: l.actor,
+              actor_name: l.actorName,
+              actor_role: l.actorRole,
+              action: l.action,
+              entity_type: l.entityType,
+              entity_id: l.entityId,
+              summary: l.summary,
+              timestamp: l.timestamp,
+              metadata_json: l.metadata ? JSON.stringify(l.metadata) : null,
+            })) as unknown as T,
+            [],
+          ];
+        }
+        return [[] as unknown as T, []];
+      },
+      async getConnection(): Promise<SqlQueryableConnection> {
+        return {
+          execute: this.execute.bind(this),
+          async beginTransaction() {},
+          async commit() {},
+          async rollback() {},
+          release() {},
+        };
+      },
+      async end() {},
+    };
+
+    try {
+      DeploymentCenterService.resetStateForTests();
+      const realRepo = new MySqlSamAttRepository(fakeRealPool);
+      const app = express();
+      app.use('/api/Sam_Att', createSamAttRouter(realRepo));
+
+      const adminToken = AuthService.issueSignedToken(
+        {
+          id: 'USR_ADMIN',
+          username: 'admin_test',
+          passwordHash: '',
+          fullName: 'นายสมศักดิ์ บริหารงาน',
+          role: 'ADMIN',
+          personId: null,
+          department: 'IT',
+          position: 'Admin',
+          active: true,
+        },
+        3600,
+        'REAL'
+      );
+      const staffToken = AuthService.issueSignedToken(
+        {
+          id: 'USR_STAFF',
+          username: 'staff_test',
+          passwordHash: '',
+          fullName: 'เจ้าหน้าที่ HR',
+          role: 'RESPONSIBLE_STAFF',
+          personId: 'P002',
+          department: 'HR',
+          position: 'HR',
+          active: true,
+        },
+        3600,
+        'REAL'
+      );
+      const genToken = AuthService.issueSignedToken(
+        {
+          id: 'USR_GEN_1',
+          username: 'nurse_kanda',
+          passwordHash: '',
+          fullName: 'นางสาวกานดา สุขใจ',
+          role: 'GENERAL_USER',
+          personId: 'P001',
+          department: 'IPD',
+          position: 'Nurse',
+          active: true,
+        },
+        3600,
+        'REAL'
+      );
+
+      const COMMIT_A94 = 'e5bc7de2bdd46613d6fca958e16d042540cfa3bc';
+      const COMMIT_A95 = '95959595bdd46613d6fca958e16d042540cfa950';
+
+      let simulateGitHubOnline = true;
+      let latestGitHubSha = COMMIT_A95;
+
+      DeploymentCenterService.configurePhase2Environment({
+        agent: null,
+        manifestPath,
+        historyFilePath,
+        gitHubFetcher: async () => {
+          if (!simulateGitHubOnline) {
+            return {
+              ok: false,
+              status: 503,
+              error: 'GitHub API unreachable (ENOTFOUND api.github.com)',
+            };
+          }
+          return {
+            ok: true,
+            status: 200,
+            data: {
+              sha: latestGitHubSha,
+              commit: {
+                message: 'feat(deployment-center): Phase 2 Secure Deployment Management',
+                committer: { date: '2026-11-12T06:00:00.000Z' },
+              },
+            },
+          };
+        },
+      });
+
+      // =========================================================================
+      // Test Case #7: Unauthorized Deploy (GENERAL_USER, RESPONSIBLE_STAFF) -> 403
+      // =========================================================================
+      for (const tok of [genToken, staffToken]) {
+        const unauthApprove = await invokeGatewayRoute(app, {
+          method: 'POST',
+          url: '/api/Sam_Att/deployment/approve',
+          headers: { Authorization: `Bearer ${tok}` },
+          body: { targetCommitSha: COMMIT_A95, adminPassword: 'admin_secret_123' },
+        });
+        assert.equal(unauthApprove.status, 403);
+
+        const unauthRollback = await invokeGatewayRoute(app, {
+          method: 'POST',
+          url: '/api/Sam_Att/deployment/rollback',
+          headers: { Authorization: `Bearer ${tok}` },
+          body: {
+            backupId: 'BKP_20261112_0001',
+            adminPassword: 'admin_secret_123',
+            confirmRollback: true,
+          },
+        });
+        assert.equal(unauthRollback.status, 403);
+      }
+
+      // =========================================================================
+      // Test Case #12: Agent Unavailable -> NOT_CONFIGURED and Deploy blocked (501)
+      // Test Case #3: Current SHA Missing (no current.json) -> NOT AVAILABLE
+      // Test Case #1: GitHub Connected -> fetches latest SHA
+      // =========================================================================
+      const checkUpdatesNoManifest = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/check-updates',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: {},
+      });
+      assert.equal(checkUpdatesNoManifest.status, 200);
+      assert.equal(
+        checkUpdatesNoManifest.body.currentVersion.commitSha,
+        'NOT AVAILABLE',
+        'Test Case #3: Missing current.json must display NOT AVAILABLE without guessing SHA'
+      );
+      assert.equal(
+        checkUpdatesNoManifest.body.latestGitHubVersion.commitSha,
+        COMMIT_A95,
+        'Test Case #1: GitHub Connected must retrieve latest 40-char Commit SHA'
+      );
+      assert.equal(
+        checkUpdatesNoManifest.body.latestGitHubVersion.commitMessage,
+        'feat(deployment-center): Phase 2 Secure Deployment Management'
+      );
+      assert.equal(
+        checkUpdatesNoManifest.body.versionComparison.status,
+        'NOT_AVAILABLE',
+        'When current.json is missing, comparison status must be NOT_AVAILABLE'
+      );
+      assert.equal(
+        checkUpdatesNoManifest.body.deploymentAgent.agentStatus,
+        'NOT_CONFIGURED',
+        'Test Case #12: When Agent is not configured, status must be NOT_CONFIGURED'
+      );
+      assert.equal(checkUpdatesNoManifest.body.deploymentAgent.approveEnabled, false);
+
+      const deployWhenAgentUnavailable = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/approve',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: { targetCommitSha: COMMIT_A95, adminPassword: 'admin_secret_123' },
+      });
+      assert.equal(
+        deployWhenAgentUnavailable.status,
+        501,
+        'Test Case #12: Deploy must be blocked with 501 when Agent is unavailable'
+      );
+
+      // =========================================================================
+      // Test Case #20 (Part A): Check for Updates must record 1 Audit Log and NEVER record Deployment History SUCCESS
+      // =========================================================================
+      assert.equal(
+        recordedAuditLogs.filter((l) => l.action === 'DEPLOYMENT_CHECK_UPDATES').length,
+        1
+      );
+      assert.equal(
+        checkUpdatesNoManifest.body.history.length,
+        0,
+        'Test Case #20: Check for Updates must NEVER appear as a SUCCESS deployment in Deployment History'
+      );
+
+      // =========================================================================
+      // Test Case #2: GitHub Disconnected -> NOT_AVAILABLE / ERROR
+      // =========================================================================
+      simulateGitHubOnline = false;
+      const checkUpdatesOffline = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/check-updates',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: {},
+      });
+      assert.equal(checkUpdatesOffline.status, 200);
+      assert.equal(
+        checkUpdatesOffline.body.systemStatus.githubConnectionStatus,
+        'NOT_AVAILABLE',
+        'Test Case #2: Disconnected GitHub must report NOT_AVAILABLE'
+      );
+      assert.equal(
+        checkUpdatesOffline.body.latestGitHubVersion.commitSha,
+        'NOT AVAILABLE'
+      );
+      simulateGitHubOnline = true;
+
+      // =========================================================================
+      // Test Case #6: Invalid Manifest (corrupted / tampered current.json) -> ERROR
+      // =========================================================================
+      fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
+      fs.writeFileSync(
+        manifestPath,
+        JSON.stringify({
+          schemaVersion: '2.0',
+          deploymentId: 'DEP_TAMPERED',
+          version: 'main@e5bc7de2',
+          commitSha: COMMIT_A94,
+          branch: 'main',
+          deployedAt: '2026-11-11T00:00:00.000Z',
+          approvedBy: { userId: 'USR_ADMIN', username: 'admin_test', fullName: 'Admin' },
+          frontendArtifactSha256: 'a'.repeat(64),
+          backendArtifactSha256: 'b'.repeat(64),
+          backupId: null,
+          healthCheckVerified: true,
+          manifestSignatureSha256: '0'.repeat(64), // Invalid tampered signature!
+        }),
+        'utf8'
+      );
+
+      const statusCorruptManifest = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/check-updates',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: {},
+      });
+      assert.equal(statusCorruptManifest.status, 200);
+      assert.equal(statusCorruptManifest.body.currentVersion.manifestValid, false);
+      assert.equal(
+        statusCorruptManifest.body.versionComparison.status,
+        'ERROR',
+        'Test Case #6: Corrupted/tampered current.json must report comparison status ERROR'
+      );
+
+      // =========================================================================
+      // Seed valid baseline current.json for Commit A94 and verify Test Cases #4 & #5
+      // =========================================================================
+      writeVerifiedDeploymentManifest(manifestPath, {
+        schemaVersion: '2.0',
+        deploymentId: 'DEP_BASELINE_A94',
+        version: `main@${COMMIT_A94.slice(0, 8)}`,
+        commitSha: COMMIT_A94,
+        branch: 'main',
+        deployedAt: '2026-11-10T10:00:00.000Z',
+        approvedBy: {
+          userId: 'USR_ADMIN',
+          username: 'admin_test',
+          fullName: 'นายสมศักดิ์ บริหารงาน',
+        },
+        frontendArtifactSha256: crypto
+          .createHash('sha256')
+          .update('baseline-fe')
+          .digest('hex'),
+        backendArtifactSha256: crypto
+          .createHash('sha256')
+          .update('baseline-be')
+          .digest('hex'),
+        backupId: null,
+        healthCheckVerified: true,
+      });
+
+      // Test Case #4: Update Available (current A94 !== latest A95)
+      latestGitHubSha = COMMIT_A95;
+      const updateAvailableRes = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/check-updates',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: {},
+      });
+      assert.equal(updateAvailableRes.status, 200);
+      assert.equal(updateAvailableRes.body.currentVersion.commitSha, COMMIT_A94);
+      assert.equal(updateAvailableRes.body.latestGitHubVersion.commitSha, COMMIT_A95);
+      assert.equal(
+        updateAvailableRes.body.versionComparison.status,
+        'UPDATE_AVAILABLE',
+        'Test Case #4: When current !== latest, status must be UPDATE_AVAILABLE'
+      );
+
+      // Test Case #5: Already Up to Date (current A94 === latest A94)
+      latestGitHubSha = COMMIT_A94;
+      const upToDateRes = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/check-updates',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: {},
+      });
+      assert.equal(upToDateRes.status, 200);
+      assert.equal(
+        upToDateRes.body.versionComparison.status,
+        'UP_TO_DATE',
+        'Test Case #5: When current === latest, status must be UP_TO_DATE'
+      );
+      latestGitHubSha = COMMIT_A95;
+
+      // =========================================================================
+      // Configure Phase 2 LocalStagingDeploymentEngine with controllable simulation hooks
+      // =========================================================================
+      let hookBuildOk = true;
+      let hookBackupOk = true;
+      let hookGatewayHealthy = true;
+      let hookProcurementHealthy = true;
+      let hookProcurementStatusCode = 200;
+      let hookRollbackOk = true;
+      let backendRequiresRestart = false;
+      let isolatedActivationSupported = true;
+
+      const createEngine = () =>
+        new LocalStagingDeploymentEngine({
+          workspaceRoot,
+          frontendProdDir,
+          backendProdDir,
+          adapterConfigPath,
+          manifestPath,
+          backupsDir,
+          stagingDir,
+          backendRequiresGatewayRestart: backendRequiresRestart,
+          isolatedBackendActivationSupported: isolatedActivationSupported,
+          hooks: {
+            runDependenciesCheck: async () => ({
+              ok: true,
+              detail: 'PASS — npm dependencies verified in Staging',
+            }),
+            runTypecheck: async () => ({
+              ok: true,
+              detail: 'PASS — tsc --noEmit passed (0 errors)',
+            }),
+            runUnitTests: async () => ({
+              ok: true,
+              detail: 'PASS — Unit tests 21/21 passed',
+            }),
+            runIntegrationTests: async () => ({
+              ok: true,
+              detail: 'PASS — Integration tests passed',
+            }),
+            runBuild: async (stageDir) => {
+              if (!hookBuildOk) {
+                return {
+                  ok: false,
+                  detail: 'FAIL — Vite build failed in Staging (simulated compilation error)',
+                };
+              }
+              const feBuild = path.join(stageDir, 'dist');
+              const beBuild = path.join(stageDir, 'dist-backend');
+              fs.mkdirSync(feBuild, { recursive: true });
+              fs.mkdirSync(beBuild, { recursive: true });
+              fs.writeFileSync(
+                path.join(feBuild, 'index.html'),
+                `<html><body>Sam_Att Deployed Commit ${latestGitHubSha}</body></html>`,
+                'utf8'
+              );
+              fs.writeFileSync(
+                path.join(beBuild, 'router.js'),
+                `// Sam_Att Backend Commit ${latestGitHubSha}`,
+                'utf8'
+              );
+              return {
+                ok: true,
+                detail: 'PASS — Staging build succeeded',
+                frontendBuildDir: feBuild,
+                backendBuildDir: beBuild,
+              };
+            },
+            runBackupHook: async () => {
+              if (!hookBackupOk) {
+                return {
+                  ok: false,
+                  error: 'Disk write permission denied on Backups directory',
+                };
+              }
+              return { ok: true };
+            },
+            runPostDeployHealthProbe: async () => ({
+              frontendHealthy: true,
+              backendHealthy: hookGatewayHealthy,
+              authHealthy: true,
+              mysqlHealthy: true,
+              routerHealthy: hookGatewayHealthy,
+              procurementHealthy: hookProcurementHealthy,
+              procurementStatusCode: hookProcurementStatusCode,
+              errorDetail: !hookGatewayHealthy
+                ? 'Central API Gateway :3002/api/Sam_Att/health connection refused'
+                : !hookProcurementHealthy
+                ? `Procurement health check failed with HTTP ${hookProcurementStatusCode}`
+                : undefined,
+            }),
+            runRollbackHook: async () => {
+              if (!hookRollbackOk) {
+                return {
+                  ok: false,
+                  error: 'Simulated disk I/O failure while restoring backup archive',
+                };
+              }
+              return { ok: true };
+            },
+          },
+        });
+
+      DeploymentCenterService.configurePhase2Environment({
+        agent: createEngine(),
+      });
+
+      // =========================================================================
+      // Test Case #9 & #14: Preflight Failed (Procurement HTTP 404 is FAIL, never PASS) -> Deploy blocked (412)
+      // =========================================================================
+      hookProcurementHealthy = true;
+      hookProcurementStatusCode = 404; // Requirement §3.3: HTTP 404 MUST NOT be treated as PASS!
+
+      const preflightProc404 = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/preflight',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: {},
+      });
+      assert.equal(preflightProc404.status, 200);
+      const procCheck404 = preflightProc404.body.checklist.find(
+        (c: any) => c.id === 'procurement_health'
+      );
+      assert.equal(
+        procCheck404.status,
+        'FAIL',
+        'Test Case #14: Procurement HTTP 404 must strictly report FAIL (never PASS)'
+      );
+      assert.equal(preflightProc404.body.deploymentReadiness.readyToDeploy, false);
+
+      const deployBlockedByPreflight = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/approve',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: { targetCommitSha: COMMIT_A95, adminPassword: 'admin_secret_123' },
+      });
+      assert.equal(
+        deployBlockedByPreflight.status,
+        412,
+        'Test Case #9: Deploy must be blocked with HTTP 412 when Preflight has any FAIL item'
+      );
+
+      // Now restore Procurement HTTP 200 and verify all 8 Preflight items PASS with real evidence
+      hookProcurementStatusCode = 200;
+      const preflightAllPass = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/preflight',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: {},
+      });
+      assert.equal(preflightAllPass.status, 200);
+      assert.equal(
+        preflightAllPass.body.checklist.every((c: any) => c.status === 'PASS'),
+        true,
+        'All 8 Preflight items must PASS when verified evidence is present'
+      );
+      assert.equal(preflightAllPass.body.deploymentReadiness.readyToDeploy, true);
+
+      // =========================================================================
+      // Test Case #10: Backup Failed -> Deploy stops immediately and does not overwrite Production
+      // =========================================================================
+      hookBackupOk = false;
+      const deployBackupFail = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/approve',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: { targetCommitSha: COMMIT_A95, adminPassword: 'admin_secret_123' },
+      });
+      assert.equal(deployBackupFail.status, 500);
+      assert.equal(deployBackupFail.body.status, 'FAILED');
+      assert.ok(
+        fs
+          .readFileSync(path.join(frontendProdDir, 'index.html'), 'utf8')
+          .includes('Sam_Att Initial Baseline A94'),
+        'Test Case #10: Production frontend must remain untouched when Backup fails'
+      );
+      assert.equal(
+        readAndVerifyDeploymentManifest(manifestPath).manifest?.commitSha,
+        COMMIT_A94,
+        'Test Case #10: current.json must remain on A94 when Backup fails'
+      );
+      hookBackupOk = true;
+
+      // =========================================================================
+      // Test Case #11: Build Failed -> Deploy stops in Staging and does not overwrite Production
+      // =========================================================================
+      // Re-run preflight with build passing, then fail build during deploy step 9
+      await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/preflight',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: {},
+      });
+      hookBuildOk = false;
+      const deployBuildFail = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/approve',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: { targetCommitSha: COMMIT_A95, adminPassword: 'admin_secret_123' },
+      });
+      assert.equal(deployBuildFail.status, 500);
+      assert.equal(deployBuildFail.body.status, 'FAILED');
+      assert.ok(
+        fs
+          .readFileSync(path.join(frontendProdDir, 'index.html'), 'utf8')
+          .includes('Sam_Att Initial Baseline A94'),
+        'Test Case #11: Production frontend must NOT be overwritten when Staging Build fails'
+      );
+      hookBuildOk = true;
+
+      // =========================================================================
+      // Test Case #15: Backend update requiring Shared Gateway (:3002) restart without Maintenance Window -> MAINTENANCE_REQUIRED
+      // =========================================================================
+      backendRequiresRestart = true;
+      isolatedActivationSupported = false;
+      DeploymentCenterService.configurePhase2Environment({
+        agent: createEngine(),
+      });
+      await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/preflight',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: {},
+      });
+
+      const deployMaintenanceReq = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/approve',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: {
+          targetCommitSha: COMMIT_A95,
+          adminPassword: 'admin_secret_123',
+          maintenanceWindowApproved: false,
+        },
+      });
+      assert.equal(deployMaintenanceReq.status, 202);
+      assert.equal(
+        deployMaintenanceReq.body.status,
+        'MAINTENANCE_REQUIRED',
+        'Test Case #15: Shared Gateway restart without Maintenance Window must stop safely at MAINTENANCE_REQUIRED'
+      );
+      assert.equal(
+        readAndVerifyDeploymentManifest(manifestPath).manifest?.commitSha,
+        COMMIT_A94,
+        'current.json must not be updated to A95 while waiting for Maintenance Window'
+      );
+      backendRequiresRestart = false;
+      isolatedActivationSupported = true;
+      DeploymentCenterService.configurePhase2Environment({
+        agent: createEngine(),
+      });
+
+      // =========================================================================
+      // Test Case #13: Post-Deploy Gateway Health Check Failed -> Auto-Rollback to A94
+      // =========================================================================
+      await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/preflight',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: {},
+      });
+      hookGatewayHealthy = false;
+      const deployGatewayHealthFail = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/approve',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: { targetCommitSha: COMMIT_A95, adminPassword: 'admin_secret_123' },
+      });
+      assert.equal(deployGatewayHealthFail.status, 500);
+      assert.equal(
+        deployGatewayHealthFail.body.status,
+        'ROLLED_BACK',
+        'Test Case #13: Post-deploy Gateway Health failure must trigger automatic rollback'
+      );
+      assert.ok(
+        fs
+          .readFileSync(path.join(frontendProdDir, 'index.html'), 'utf8')
+          .includes('Sam_Att Initial Baseline A94'),
+        'Auto-rollback must restore previous Frontend files'
+      );
+      assert.equal(
+        readAndVerifyDeploymentManifest(manifestPath).manifest?.commitSha,
+        COMMIT_A94,
+        'Auto-rollback must keep current.json at Commit A94'
+      );
+      hookGatewayHealthy = true;
+
+      // =========================================================================
+      // Test Case #16: Staging Deploy Success -> current.json written with verified SHA-256 signature & Backup created
+      // =========================================================================
+      await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/preflight',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: {},
+      });
+      const deploySuccessRes = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/approve',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: { targetCommitSha: COMMIT_A95, adminPassword: 'admin_secret_123' },
+      });
+      assert.equal(deploySuccessRes.status, 200);
+      assert.equal(deploySuccessRes.body.success, true);
+      assert.equal(deploySuccessRes.body.status, 'SUCCESS');
+      assert.equal(deploySuccessRes.body.targetCommitSha, COMMIT_A95);
+      const createdBackupId = deploySuccessRes.body.backupId as string;
+      assert.ok(createdBackupId && createdBackupId.startsWith('BKP_'));
+
+      const verifiedManifestAfterSuccess = readAndVerifyDeploymentManifest(manifestPath);
+      assert.equal(verifiedManifestAfterSuccess.status, 'VALID');
+      assert.equal(
+        verifiedManifestAfterSuccess.manifest?.commitSha,
+        COMMIT_A95,
+        'Test Case #16: current.json must be updated to COMMIT_A95 after 7/7 Health Check passes'
+      );
+      assert.equal(verifiedManifestAfterSuccess.manifest?.healthCheckVerified, true);
+      assert.ok(
+        fs
+          .readFileSync(path.join(frontendProdDir, 'index.html'), 'utf8')
+          .includes(COMMIT_A95),
+        'Test Case #16: Deployed frontend index.html must contain target COMMIT_A95'
+      );
+
+      // =========================================================================
+      // Test Case #8: Duplicate / Concurrent Deploy Lock -> HTTP 409
+      // =========================================================================
+      const activeAgent = DeploymentCenterService.getActiveAgent() as any;
+      activeAgent.activeLock = {
+        lockedAt: Date.now(),
+        deploymentId: 'DEP_CONCURRENT_ACTIVE',
+      };
+      const concurrentDeployRes = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/approve',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: { targetCommitSha: COMMIT_A95, adminPassword: 'admin_secret_123' },
+      });
+      assert.equal(
+        concurrentDeployRes.status,
+        409,
+        'Test Case #8: Concurrent deployment request while lock is active must return HTTP 409'
+      );
+      activeAgent.activeLock = null;
+
+      // =========================================================================
+      // Test Case #17: Rollback Success -> Restores Commit A94 Frontend, Backend & current.json
+      // =========================================================================
+      const rollbackSuccessRes = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/rollback',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: {
+          backupId: createdBackupId,
+          adminPassword: 'admin_secret_123',
+          confirmRollback: true,
+          reason: 'Verify Rollback in Staging Simulation',
+        },
+      });
+      assert.equal(rollbackSuccessRes.status, 200);
+      assert.equal(rollbackSuccessRes.body.success, true);
+      assert.equal(rollbackSuccessRes.body.status, 'ROLLED_BACK');
+      assert.equal(rollbackSuccessRes.body.restoredCommitSha, COMMIT_A94);
+      assert.equal(
+        readAndVerifyDeploymentManifest(manifestPath).manifest?.commitSha,
+        COMMIT_A94,
+        'Test Case #17: current.json must be restored to COMMIT_A94 after Rollback'
+      );
+      assert.ok(
+        fs
+          .readFileSync(path.join(frontendProdDir, 'index.html'), 'utf8')
+          .includes('Sam_Att Initial Baseline A94'),
+        'Test Case #17: Frontend index.html must be restored to Baseline A94 after Rollback'
+      );
+
+      // =========================================================================
+      // Test Case #18: Rollback Failed -> Returns CRITICAL status and exact Thai recovery banner text
+      // =========================================================================
+      hookRollbackOk = false;
+      const rollbackFailRes = await invokeGatewayRoute(app, {
+        method: 'POST',
+        url: '/api/Sam_Att/deployment/rollback',
+        headers: { Authorization: `Bearer ${adminToken}` },
+        body: {
+          backupId: createdBackupId,
+          adminPassword: 'admin_secret_123',
+          confirmRollback: true,
+          reason: 'Simulate Critical Rollback Failure',
+        },
+      });
+      assert.equal(rollbackFailRes.status, 500);
+      assert.equal(rollbackFailRes.body.success, false);
+      assert.equal(rollbackFailRes.body.status, 'ROLLBACK_FAILED');
+      assert.ok(
+        String(rollbackFailRes.body.criticalManualRecoveryAdvice || '').includes(
+          'CRITICAL: การย้อนกลับระบบล้มเหลว กรุณาตรวจสอบเซิร์ฟเวอร์และกู้คืนจาก Backup ล่าสุดตามคู่มือผู้ดูแลระบบ'
+        ),
+        'Test Case #18: Rollback failure must include CRITICAL manual recovery message'
+      );
+      hookRollbackOk = true;
+
+      // =========================================================================
+      // Test Case #19: Rate Limit 429 on Deployment Center -> No loop, no [object Object]
+      // =========================================================================
+      const origFetch = globalThis.fetch;
+      let rateLimitCalls = 0;
+      globalThis.fetch = (async () => {
+        rateLimitCalls += 1;
+        return new Response(
+          JSON.stringify({
+            success: false,
+            error: {
+              code: 'RATE_LIMIT_EXCEEDED',
+              message: 'Too many requests to Deployment Center',
+              retryAfterSeconds: 30,
+            },
+          }),
+          { status: 429, headers: { 'Content-Type': 'application/json' } }
+        );
+      }) as typeof fetch;
+
+      try {
+        await assert.rejects(
+          async () => {
+            await apiAttendanceAdapter.checkDeploymentUpdates();
+          },
+          (err: unknown) => {
+            const safeMsg = extractSafeErrorMessage(err);
+            assert.equal(safeMsg.includes('[object Object]'), false);
+            assert.equal(
+              safeMsg,
+              'ระบบถูกเรียกใช้งานถี่เกินกำหนด กรุณารอ 30 วินาทีแล้วลองใหม่'
+            );
+            return true;
+          }
+        );
+        assert.equal(
+          rateLimitCalls,
+          1,
+          'Test Case #19: HTTP 429 must stop immediately after 1 call without looping'
+        );
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+
+      // =========================================================================
+      // Test Case #20 (Part B): Audit Log & Deployment History completeness
+      // =========================================================================
+      const historyRes = await invokeGatewayRoute(app, {
+        method: 'GET',
+        url: '/api/Sam_Att/deployment/history',
+        headers: { Authorization: `Bearer ${adminToken}` },
+      });
+      assert.equal(historyRes.status, 200);
+      assert.equal(historyRes.body.success, true);
+      const historyItems = historyRes.body.history as any[];
+      assert.ok(historyItems.length >= 4, 'Deployment History must record all executed Deploy & Rollback jobs');
+      assert.equal(
+        historyItems.some(
+          (h) =>
+            h.summary.includes('ตรวจสอบอัปเดตเวอร์ชันจาก GitHub') ||
+            h.summary.includes('รันการตรวจสอบความพร้อมก่อนอัปเดต (Preflight Check)')
+        ),
+        false,
+        'Deployment History must NEVER include read-only Check for Updates or Preflight events'
+      );
+      assert.ok(
+        recordedAuditLogs.some((l) => l.action === 'DEPLOYMENT_CHECK_UPDATES'),
+        'Audit Logs must record DEPLOYMENT_CHECK_UPDATES'
+      );
+      assert.ok(
+        recordedAuditLogs.some((l) => l.action === 'DEPLOYMENT_PREFLIGHT_CHECK'),
+        'Audit Logs must record DEPLOYMENT_PREFLIGHT_CHECK'
+      );
+      assert.ok(
+        recordedAuditLogs.some((l) => l.action === 'DEPLOYMENT_EXECUTED'),
+        'Audit Logs must record DEPLOYMENT_EXECUTED'
+      );
+      assert.ok(
+        recordedAuditLogs.some((l) => l.action === 'DEPLOYMENT_ROLLBACK_EXECUTED'),
+        'Audit Logs must record DEPLOYMENT_ROLLBACK_EXECUTED'
+      );
+    } finally {
+      DeploymentCenterService.resetStateForTests();
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+      if (origSecret !== undefined) process.env.SAM_ATT_JWT_SECRET = origSecret;
+      else delete process.env.SAM_ATT_JWT_SECRET;
+      if (origDbHost !== undefined) process.env.SAM_ATT_DB_HOST = origDbHost;
+      else delete process.env.SAM_ATT_DB_HOST;
+      if (origDbName !== undefined) process.env.SAM_ATT_DB_NAME = origDbName;
+      else delete process.env.SAM_ATT_DB_NAME;
+      if (origDbUser !== undefined) process.env.SAM_ATT_DB_USER = origDbUser;
+      else delete process.env.SAM_ATT_DB_USER;
+      if (origDbPass !== undefined) process.env.SAM_ATT_DB_PASSWORD = origDbPass;
+      else delete process.env.SAM_ATT_DB_PASSWORD;
     }
   });
 });

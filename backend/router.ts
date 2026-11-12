@@ -1455,6 +1455,30 @@ export function createSamAttRouter(customRepository?: ISamAttRepository): Router
     })
   );
 
+  router.get(
+    '/deployment/backups',
+    adminOnly,
+    asyncRoute(async (_req: Request, res: Response) => {
+      const backups = await DeploymentCenterService.listAvailableBackups();
+      res.json({
+        success: true,
+        backups,
+      });
+    })
+  );
+
+  router.get(
+    '/deployment/progress',
+    adminOnly,
+    asyncRoute(async (_req: Request, res: Response) => {
+      const progress = DeploymentCenterService.getActiveProgress();
+      res.json({
+        success: true,
+        activeProgress: progress,
+      });
+    })
+  );
+
   router.post(
     '/deployment/approve',
     adminOnly,
@@ -1488,30 +1512,37 @@ export function createSamAttRouter(customRepository?: ISamAttRepository): Router
         clientIp
       );
       if (!reAuth.success) {
+        await repo.recordAuditLog({
+          actor: user.username,
+          actorName: user.fullName,
+          actorRole: user.role,
+          action: 'DEPLOYMENT_APPROVE_REAUTH_FAILED',
+          entityType: 'DeploymentCenter',
+          entityId: 'Sam_Att_V2',
+          summary: `ผู้ดูแลระบบ ${user.username} ยืนยันตัวตนซ้ำไม่สำเร็จเมื่อพยายามอนุมัติการ Deploy`,
+        });
         return res.status(reAuth.statusCode).json({
           success: false,
           error: reAuth.error || 'การยืนยันตัวตนซ้ำไม่สำเร็จ (รหัสผ่านไม่ถูกต้อง)',
         });
       }
 
-      await repo.recordAuditLog({
-        actor: user.username,
-        actorName: user.fullName,
-        actorRole: user.role,
-        action: 'DEPLOYMENT_APPROVE_ATTEMPT',
-        entityType: 'DeploymentCenter',
-        entityId: 'Sam_Att_V2',
-        summary: `ผู้ดูแลระบบ ${user.username} ทดสอบคำขออนุมัติ Deploy (ถูกระงับตามมาตรการ Phase 1 Read-Only: รอติดตั้ง Deployment Agent)`,
+      const targetCommitSha =
+        typeof req.body?.targetCommitSha === 'string' ? req.body.targetCommitSha.trim() : '';
+      const maintenanceWindowApproved = Boolean(req.body?.maintenanceWindowApproved);
+
+      const deployResult = await DeploymentCenterService.approveAndExecuteDeployment(repo, {
+        user: {
+          id: user.userId,
+          username: user.username,
+          fullName: user.fullName,
+          role: user.role,
+        },
+        targetCommitSha,
+        maintenanceWindowApproved,
       });
 
-      return res.status(501).json({
-        success: false,
-        liveDeployExecuted: false,
-        agentAvailable: false,
-        phase: 'PHASE_1_READ_ONLY',
-        error:
-          'Phase 1 Read-Only Mode: ยังไม่เปิดใช้งานการสั่ง Deploy จริงจากหน้าเว็บจนกว่าจะติดตั้ง Backend Deployment Agent ที่ปลอดภัยบน FILESERVER ใน Phase 2',
-      });
+      return res.status(deployResult.httpStatus).json(deployResult.body);
     })
   );
 
@@ -1548,31 +1579,38 @@ export function createSamAttRouter(customRepository?: ISamAttRepository): Router
         clientIp
       );
       if (!reAuth.success) {
+        await repo.recordAuditLog({
+          actor: user.username,
+          actorName: user.fullName,
+          actorRole: user.role,
+          action: 'DEPLOYMENT_ROLLBACK_REAUTH_FAILED',
+          entityType: 'DeploymentCenter',
+          entityId: 'Sam_Att_V2',
+          summary: `ผู้ดูแลระบบ ${user.username} ยืนยันตัวตนซ้ำไม่สำเร็จเมื่อพยายามสั่ง Rollback`,
+        });
         return res.status(reAuth.statusCode).json({
           success: false,
           error: reAuth.error || 'การยืนยันตัวตนซ้ำไม่สำเร็จ (รหัสผ่านไม่ถูกต้อง)',
         });
       }
 
-      await repo.recordAuditLog({
-        actor: user.username,
-        actorName: user.fullName,
-        actorRole: user.role,
-        action: 'DEPLOYMENT_ROLLBACK_ATTEMPT',
-        entityType: 'DeploymentCenter',
-        entityId: 'Sam_Att_V2',
-        summary: `ผู้ดูแลระบบ ${user.username} ทดสอบคำขอ Rollback (ถูกระงับตามมาตรการ Phase 1 Read-Only: รอติดตั้ง Deployment Agent)`,
+      const backupId = typeof req.body?.backupId === 'string' ? req.body.backupId.trim() : '';
+      const confirmRollback = Boolean(req.body?.confirmRollback);
+      const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : undefined;
+
+      const rollbackResult = await DeploymentCenterService.executeRollback(repo, {
+        user: {
+          id: user.userId,
+          username: user.username,
+          fullName: user.fullName,
+          role: user.role,
+        },
+        backupId,
+        confirmRollback,
+        reason,
       });
 
-      return res.status(501).json({
-        success: false,
-        rollbackExecuted: false,
-        liveRollbackExecuted: false,
-        agentAvailable: false,
-        phase: 'PHASE_1_READ_ONLY',
-        error:
-          'Phase 1 Read-Only Mode: ยังไม่เปิดใช้งานการ Rollback อัตโนมัติจนกว่าจะติดตั้ง Backend Deployment Agent และมีเวอร์ชันสำรองที่ตรวจสอบได้ใน Phase 2',
-      });
+      return res.status(rollbackResult.httpStatus).json(rollbackResult.body);
     })
   );
 
