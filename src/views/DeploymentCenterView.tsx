@@ -1212,8 +1212,8 @@ export const DeploymentCenterView: React.FC = () => {
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-500">Preflight Status:</span>
-                  <span className="font-bold text-emerald-700">
-                    PASS {passedCount}/{payload.checklist.length} รายการ
+                  <span className={`font-bold ${isReadyToDeploy ? 'text-emerald-700' : 'text-amber-700'}`}>
+                    {isReadyToDeploy ? 'PASS' : 'NOT READY'} {passedCount}/{payload.checklist.length} รายการ
                   </span>
                 </div>
               </div>
