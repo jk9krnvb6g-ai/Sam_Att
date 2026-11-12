@@ -1,34 +1,35 @@
-# A96 verification and remaining production blockers
+# A96 Phase 2 verification
 
-This branch is a tested hardening revision, **not a completed or deployable Phase 2 service**.
-No FILESERVER, Gateway, Procurement service, production database, firewall or service configuration was changed.
+Baseline for this continuation: `0c2f29801abdca4eb8a7d624325426abad3d616b`, branch `fix/a96-deployment-fail-closed`.
 
-## Verified locally
+The previous code blockers have implementations in this branch:
 
-- Baseline: d09d9f280b9f0f86f5c0d567011da3df271e8b76.
-- Original baseline had 34/35 passing tests; Phase 2 orchestration failed because its isolated source/build fixtures did not implement the required source verification and artifact contracts.
-- Real TypeScript check, real Vite frontend build, real esbuild mountable backend build and router-export smoke check run locally.
-- Unit/integration/security suites exercise isolated filesystem and API fixtures; they are not production deployment, live MySQL, scanner hardware, or FILESERVER acceptance evidence.
-- BUG-001/A95 regression scenario remains in the integration suite.
-- New IPC tests cover HMAC, operator allowlist, replay including future timestamps, expiry and malformed frames. These are verifier tests, not Windows pipe ACL tests.
-- New deployment tests cover real filesystem artifact hashing, missing executors, backup corruption, missing production baseline, rollback health failure, persistent lock ownership, Procurement activation refusal, request flag bypass, final-probe exception recovery and path traversal.
-- Lockfile added so npm ci can run; npm audit performed against installed dependencies.
+- Native .NET Framework `ServiceBase` executable and guarded dedicated virtual-account installer. The installer registers a stopped service; it never starts or restarts Gateway/Procurement or opens ports.
+- Native pipe with protected, verified kernel DACL, first-instance reservation, remote-client rejection and Windows client-token identity enforcement. A persistent Node worker verifies request HMAC/operator authorization/durable nonce replay records and signs nonce-bound responses.
+- Authenticated existing-port health probes: exact frontend HTTPS bytes, real ADMIN session route, signed REAL MySQL/router/source identity evidence and strict functional Procurement contract. TLS validation is enabled; redirects are rejected.
+- Exclusive cross-process file lock retained through automatic recovery; crash/recovery journal with fail-closed redeployment and guarded abandoned-lock maintenance operation.
+- Stable Sam_Att Gateway host on the existing port: immutable SHA256-verified release loading, validate-without-activation, atomic router-reference activation, in-flight request retention, startup from verified current manifest and rollback activation. No sibling router or listener is modified. Node cluster workers are rejected; a single Gateway process is required.
+- Backup source/config/manifest verification, production dependency packaging, real temporary restore/copy/hash drill, validation of the previous Gateway candidate, expected active-source verification after deploy/rollback, and critical recovery journaling.
+- Frontend no longer offers approval to restart the shared Gateway; client readiness is based on authenticated responses rather than assuming READY at construction.
+- Deployment Center source feed, source executors and recorded target branch now agree on the requested fix branch.
 
-## Changes
+## Actual local verification
 
-Preflight fetches and verifies source in a unique staging directory, runs actual configured executors and hashes their artifact directories. Missing evidence cannot become PASS. Backup does not synthesize production files and verifies saved current.json bytes. Deployment activation policy comes from the host, not request flags. Procurement is probed again before activation. Artifact hashes are checked again before and after copying. Exceptions after activation trigger recovery. Recovery health failure is critical, never success. Active operations do not lose their lock simply because time elapsed.
+`npm ci --ignore-scripts`, `npm test` (typecheck, Vite build, esbuild backend/worker/host/checker builds, .NET native compilation, every test file) and `npm audit --json` were run.
 
-Real staging executor functions use a fixed repository and branch, detached exact commit, Git object verification, npm ci, typecheck, test suites and both builds. They are supplied for host integration; **they are not wired to a production service or live health probe**. The backend build exports the mountable router and uses external dependencies; runtime dependency provisioning and Gateway adapter compatibility still need host validation.
+The suite contains 55 tests: 21 attendance unit, 14 original integration scenarios including BUG-001/A95, 16 security/recovery tests, 3 host/lock/probe tests, and 1 multi-scenario native transport integration test. The native test uses the actual compiled executable and real Windows named pipes, checks the actual kernel DACL, first-instance refusal, authenticated client responses, persisted replay refusal across host restart, client-token rejection, and an actual ACL-denied client. It does not install an SCM service or contact production.
 
-## BLOCKED before deployment
+The runner's Windows AppContainer requires its exact package SID in isolated-console mode. Production mode explicitly forbids this field and uses distinct dedicated service identities. Tests never grant Everyone or Authenticated Users and never weaken the production DACL.
 
-1. The repository contains no SCM-compatible native Windows Service executable. The previous installer only created folders/ACLs and printed a readiness message. It now refuses installation before modifying the machine.
-2. Node's pipe listener does not configure the required explicit pipe DACL or remote-client rejection. The development entrypoint now refuses Windows startup before creating the deployment engine or listener. A secure native host must be implemented and tested with the real Gateway/Agent service SIDs. Response authentication also remains a native-host requirement.
-3. There are no verifiable authorized FILESERVER access details in this session. Service account/ACL, real IPC, live MySQL/auth/router/frontend/Procurement probes and a backup restore drill were not tested.
-4. Host integration still needs protected credential storage, real health probe contracts, a cross-process durable lock, verified backend dependency provisioning and demonstrably safe isolated activation. Backend changes cannot be approved for live activation based only on file copies.
-5. Existing current.json integrity hashes are checksums, not proof of authorship; protected storage/ACL is essential. Old backups without a saved-manifest checksum are rejected when they contain current.json.
-6. The existing Deployment Center update feed still targets main. The new staging executor is pinned to the requested fix branch for review. A production host must align its approved source policy before enabling deployment; no merge into main was performed.
+Gateway tests load real compiled isolated router fixtures, retain an in-flight request across activation, reject corrupted/tampered/replayed requests, restore old routing and exercise sibling Procurement routes throughout. Probe tests are explicit HTTP-contract fixtures; they are not live MySQL/Procurement evidence. Cross-process lock tests launch real child processes and verify that a lock survives owner exit.
 
-Run `scripts/Invoke-A96MaintenanceReadiness.ps1` locally on authorized FILESERVER with independently recorded source/artifact/backup hashes and the actual functional Procurement health URI. It is a single **read-only readiness gate**, intentionally ends BLOCKED in this revision, and contains no deployment or restart operation. It is not a completed deployment script or evidence of rollback readiness.
+## Remaining operational acceptance — BLOCKED by the no-production-access constraint
 
-Live Deployment Center deploy/rollback acceptance testing is **not ready**. Local isolated tests and frontend build review are available. Complete the native host and host integration, rerun all checks, then perform FILESERVER acceptance in an authorized maintenance window before declaring Phase 2 complete.
+- No FILESERVER connection, changes, service install/start/stop, Gateway restart, live deploy, live backup or live rollback occurred.
+- Actual SCM lifecycle, virtual-service account rights, production directory/secret ACL provisioning, live TLS/auth/MySQL/Procurement checks, and a production recovery drill have not been run.
+- The first stable Gateway host mount must be adopted by the real Gateway owner through an approved procedure. An existing legacy Gateway without this host cannot be safely hot-activated by merely copying files. No source or configuration in the running production Gateway was changed.
+- A real remote SMB client rejection attempt was not made; the native host sets the documented kernel PIPE_REJECT_REMOTE_CLIENTS flag. Local pipe allow/deny and token enforcement were actually tested.
+- Multi-process/load-balanced Gateway topology is unsupported by this implementation and must remain disabled until a coordinated activation mechanism is verified. Token rotation and the actual Procurement functional contract must be supplied by the operator.
+- Current manifest and immutable baseline must be independently verified before enabling deployment. No placeholder baseline or fabricated health evidence is created. Integrity SHA checksums do not prove authorship without the protected storage/ACL boundary.
+
+See `native/DeploymentAgent/README.md` for configuration, source/runtime artifact layout, maintenance gates and integration procedure. Live deployment/rollback web acceptance remains **BLOCKED pending these real-host checks**, while local code and isolated acceptance can be reviewed/tested now.

@@ -1,11 +1,14 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import crypto from 'node:crypto';
 import { NamedPipeIpcMessage, signIpcPayload } from './deploymentAgentService';
 
 /** Authentication boundary shared by the pipe host and isolated security tests. */
 export class DeploymentIpcVerifier {
   private readonly nonces = new Map<string, number>();
-  constructor(private readonly secret: string, private readonly operatorIds: ReadonlySet<string>) {
+  constructor(private readonly secret: string, private readonly operatorIds: ReadonlySet<string>, private readonly replayDirectory?: string) {
     if (secret.trim().length < 32) throw new Error('IPC_SECRET_TOO_SHORT');
+    if (replayDirectory) fs.mkdirSync(replayDirectory, { recursive: true });
   }
   verify(input: unknown, now = Date.now()): NamedPipeIpcMessage {
     const msg = input as NamedPipeIpcMessage;
@@ -38,6 +41,20 @@ export class DeploymentIpcVerifier {
       throw new Error('IPC_INVALID_BACKUP_ID');
     }
     // Retain until the last possible acceptance time, including future-dated frames.
+    if (this.replayDirectory) {
+      const recorded = fs.readdirSync(this.replayDirectory);
+      for (const name of recorded) {
+        if (!/^[0-9a-f]{24,64}$/.test(name)) throw new Error('IPC_REPLAY_STORE_INVALID');
+        const file = path.join(this.replayDirectory, name);
+        if (Number(fs.readFileSync(file, 'utf8')) < now) fs.unlinkSync(file);
+      }
+      if (fs.readdirSync(this.replayDirectory).length >= 10000) throw new Error('IPC_REPLAY_CAPACITY');
+      const file = path.join(this.replayDirectory, msg.nonce);
+      let fd;
+      try { fd = fs.openSync(file, 'wx', 0o600); }
+      catch (err: any) { if (err.code === 'EEXIST') throw new Error('IPC_REPLAY_REJECTED'); throw err; }
+      try { fs.writeFileSync(fd, String(msg.timestamp + 60000)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    }
     this.nonces.set(msg.nonce, msg.timestamp + 60_000);
     return msg;
   }

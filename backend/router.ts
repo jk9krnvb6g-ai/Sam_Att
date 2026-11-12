@@ -1636,5 +1636,10 @@ export function createSamAttRouter(customRepository?: ISamAttRepository): Router
   return router;
 }
 
-export const samAttRouter: Router = createSamAttRouter();
+let defaultRouter: Router | undefined;
+export const samAttRouter: Router = Router();
+samAttRouter.use((req, res, next) => {
+  defaultRouter ||= createSamAttRouter();
+  return defaultRouter(req, res, next);
+});
 export default samAttRouter;

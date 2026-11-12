@@ -10,13 +10,15 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && tsx --test backend/__tests__/attendanceEngine.unit.test.ts backend/__tests__/samAttPhase2.integration.test.ts backend/__tests__/deploymentSecurity.test.ts",
+    "test": "npm run typecheck && npm run build && npm run build:agent && tsx --test backend/__tests__/*.test.ts",
     "test:unit": "tsx --test backend/__tests__/attendanceEngine.unit.test.ts",
-    "test:integration": "npm run build && tsx --test backend/__tests__/samAttPhase2.integration.test.ts",
+    "test:integration": "npm run build && tsx --test backend/__tests__/samAttPhase2.integration.test.ts backend/__tests__/deploymentHost.test.ts",
     "build:frontend": "vite build",
     "build:backend": "node scripts/build-backend.mjs",
     "test:security": "tsx --test backend/__tests__/deploymentSecurity.test.ts",
-    "test:deployment": "tsx --test backend/__tests__/deploymentSecurity.test.ts"
+    "test:deployment": "tsx --test backend/__tests__/deploymentSecurity.test.ts",
+    "build:agent": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-native-agent.ps1",
+    "test:native": "npm run build:backend && npm run build:agent && tsx --test backend/__tests__/deploymentNative.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

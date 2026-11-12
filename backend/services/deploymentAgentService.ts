@@ -1,3 +1,6 @@
+import { APPROVED_DEPLOYMENT_BRANCH } from '../deployment/sourcePolicy';
+import { verifyFrame } from '../deployment/controlSecurity';
+import { DeploymentFileLock } from '../deployment/fileLock';
 /**
  * Sam_Att V2 — Phase 2 Secure Deployment Agent, Manifest Manager, Backup Engine & IPC Transport
  *
@@ -474,6 +477,7 @@ export interface StagingDeploymentEngineConfig {
     runBackupHook?: () => Promise<{ ok: boolean; error?: string }>;
     runPostDeployHealthProbe?: (context: {
       targetCommitSha: string;
+      expectedActiveCommitSha?: string;
       frontendProdDir: string;
       backendProdDir: string;
     }) => Promise<{
@@ -486,6 +490,7 @@ export interface StagingDeploymentEngineConfig {
       procurementStatusCode?: number;
       errorDetail?: string;
     }>;
+    activateBackend?: (context: { commitSha: string; backendDir: string; frontendDir: string }) => Promise<void>;
     runRollbackHook?: (backupId: string) => Promise<{ ok: boolean; error?: string }>;
   };
 }
@@ -498,6 +503,8 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
   public readonly isAvailable: boolean = true;
   public readonly namedPipePath: string;
   private readonly config: StagingDeploymentEngineConfig;
+  private readonly diskLock: DeploymentFileLock;
+  private readonly recoveryFile: string;
   private activeLock: {
     lockedAt: number;
     deploymentId: string;
@@ -506,6 +513,8 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
 
   constructor(config: StagingDeploymentEngineConfig) {
     this.config = config;
+    this.diskLock = new DeploymentFileLock(path.join(config.workspaceRoot, 'deployment.lock'));
+    this.recoveryFile = path.join(config.workspaceRoot, 'recovery-required.json');
     this.namedPipePath =
       config.namedPipePath || AUTHORITATIVE_WINDOWS_PATHS.NAMED_PIPE_PATH;
     fs.mkdirSync(this.config.frontendProdDir, { recursive: true });
@@ -520,13 +529,15 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
 
   public isLocked(): boolean {
     // Never release a lock while its operation may still be running.
-    return this.activeLock !== null;
+    return this.activeLock !== null || this.diskLock.isLocked();
   }
 
   private acquireLock(deploymentId: string): boolean {
     if (this.isLocked()) {
       return false;
     }
+    if (fs.existsSync(this.recoveryFile) && !deploymentId.startsWith('ROLLBACK_')) return false;
+    if (!this.diskLock.acquire(deploymentId)) return false;
     this.activeLock = {
       lockedAt: Date.now(),
       deploymentId,
@@ -535,8 +546,17 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
   }
 
   private releaseLock(): void {
+    this.diskLock.release();
     this.activeLock = null;
   }
+
+  private journalRecovery(backupId: string, phase: string) {
+    const temp = `${this.recoveryFile}.tmp`;
+    const fd = fs.openSync(temp, 'w', 0o600);
+    try { fs.writeFileSync(fd, JSON.stringify({ backupId, phase, at: new Date().toISOString() })); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    fs.renameSync(temp, this.recoveryFile);
+  }
+  private clearRecoveryJournal() { if (fs.existsSync(this.recoveryFile)) fs.unlinkSync(this.recoveryFile); }
 
   public getActiveProgress(): DeploymentProgressState | null {
     return this.activeProgress;
@@ -609,7 +629,7 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
       backendProdDir: this.config.backendProdDir,
     });
 
-    const gatewayPassed = probe.backendHealthy === true && probe.routerHealthy === true;
+    const gatewayPassed = probe.backendHealthy === true && probe.routerHealthy === true && probe.authHealthy === true && probe.mysqlHealthy === true && probe.frontendHealthy === true;
     const procurementCode = probe.procurementStatusCode ?? 0;
     // Requirement §3.3: Procurement Health Check MUST NOT treat HTTP 404 as PASS!
     const procurementPassed =
@@ -639,7 +659,7 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
             8
           )} ผ่านครบถ้วน (${unitCheck.detail}; ${intCheck.detail})`
         : `FAIL — ผลรัน Automated Tests ไม่ผ่าน (${unitCheck.detail}; ${intCheck.detail})`,
-      backupCapabilityPassed: backupWritable,
+      backupCapabilityPassed: backupWritable && !fs.existsSync(this.recoveryFile),
       backupCapabilityDetail: backupDetail,
       gatewayHealthPassed: gatewayPassed,
       gatewayHealthDetail: gatewayPassed
@@ -898,6 +918,7 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
     const probe = this.config.hooks?.runPostDeployHealthProbe
       ? await this.config.hooks.runPostDeployHealthProbe({
           targetCommitSha,
+          expectedActiveCommitSha: targetCommitSha,
           frontendProdDir: this.config.frontendProdDir,
           backendProdDir: this.config.backendProdDir,
         })
@@ -1282,7 +1303,8 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
         frontendProdDir: this.config.frontendProdDir,
         backendProdDir: this.config.backendProdDir,
       });
-      if (beforeActivation?.backendHealthy !== true || beforeActivation.routerHealthy !== true ||
+      if (beforeActivation?.frontendHealthy !== true || beforeActivation.authHealthy !== true || beforeActivation.mysqlHealthy !== true ||
+          beforeActivation.backendHealthy !== true || beforeActivation.routerHealthy !== true ||
           beforeActivation.procurementHealthy !== true || !beforeActivation.procurementStatusCode ||
           beforeActivation.procurementStatusCode < 200 || beforeActivation.procurementStatusCode >= 300) {
         throw new Error('PRE_ACTIVATION_HEALTH_FAILED');
@@ -1290,6 +1312,7 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
       // Activate Sam_Att Frontend & Backend artifacts without touching Procurement
       if (computeDirectorySha256Hex(stagedFrontendDir) !== stagedFrontendSha ||
           computeDirectorySha256Hex(stagedBackendDir) !== stagedBackendSha) throw new Error('STAGING_CHANGED');
+      this.journalRecovery(createdBackupId!, 'ACTIVATION_STARTED');
       activationStarted = true;
       clearAndRestoreDirectorySync(stagedFrontendDir, this.config.frontendProdDir);
       clearAndRestoreDirectorySync(stagedBackendDir, this.config.backendProdDir);
@@ -1302,6 +1325,9 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
 
       if (computeDirectorySha256Hex(this.config.frontendProdDir) !== stagedFrontendSha ||
           computeDirectorySha256Hex(this.config.backendProdDir) !== stagedBackendSha) throw new Error('ACTIVATED_ARTIFACT_MISMATCH');
+      if (this.config.hooks?.activateBackend) await this.config.hooks.activateBackend({
+        commitSha: params.targetCommitSha, backendDir: this.config.backendProdDir, frontendDir: this.config.frontendProdDir,
+      });
       // Step 15: Post-Deployment 7-Point Health Check (§3.7)
       const healthReport = await this.evaluateSevenPointHealthCheck(
         params.targetCommitSha,
@@ -1320,12 +1346,12 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
         );
 
         // Automatic Rollback on Health Check Failure (§3.7)
-        this.releaseLock();
-        const autoRollback = await this.executeVerifiedRollback({
+        const autoRollback = await this.executeVerifiedRollbackInternal({
           backupId: createdBackupId,
           requestedBy: params.approvedBy,
           reason: `Automatic Rollback เนื่องจาก Post-Deploy Health Check ไม่ผ่าน: ${healthReport.summary}`,
-        });
+        }, true);
+        this.releaseLock();
 
         const finalStatus: DeploymentJobStatus = autoRollback.rolledBack
           ? 'ROLLED_BACK'
@@ -1367,7 +1393,7 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
         deploymentId: params.deploymentId,
         version: params.targetVersion,
         commitSha: params.targetCommitSha.toLowerCase(),
-        branch: 'main',
+        branch: APPROVED_DEPLOYMENT_BRANCH,
         deployedAt: new Date().toISOString(),
         approvedBy: params.approvedBy,
         frontendArtifactSha256: prodFrontendSha,
@@ -1396,6 +1422,7 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
         `บันทึก Deployment Manifest (${this.config.manifestPath}) พร้อมลายมือชื่อ SHA-256 สำเร็จ`
       );
 
+      this.clearRecoveryJournal();
       // Step 17: Unlock Deployment
       updateProgress(17, 'COMPLETED', 'SUCCESS', 'ปลดล็อก Deployment Lock เรียบร้อยแล้ว');
       this.releaseLock();
@@ -1420,8 +1447,7 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
       const sanitizedErr = sanitizeDeploymentErrorText(err);
       let recovery: ExecuteRollbackResult | null = null;
       if (activationStarted && createdBackupId) {
-        this.releaseLock();
-        recovery = await this.executeVerifiedRollback({ backupId: createdBackupId, requestedBy: params.approvedBy });
+        recovery = await this.executeVerifiedRollbackInternal({ backupId: createdBackupId, requestedBy: params.approvedBy }, true);
       }
       if (this.activeProgress) {
         this.activeProgress.status = recovery?.rolledBack ? 'ROLLED_BACK' : 'FAILED';
@@ -1462,8 +1488,11 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
    * - Never touches Procurement.
    * - Returns `ROLLBACK_FAILED_CRITICAL` with detailed recovery steps if Rollback fails.
    */
-  public async executeVerifiedRollback(
-    params: ExecuteRollbackParams
+  public async executeVerifiedRollback(params: ExecuteRollbackParams): Promise<ExecuteRollbackResult> {
+    return this.executeVerifiedRollbackInternal(params, false);
+  }
+  private async executeVerifiedRollbackInternal(
+    params: ExecuteRollbackParams, lockAlreadyHeld: boolean
   ): Promise<ExecuteRollbackResult> {
     const criticalGuidance = `CRITICAL: การย้อนกลับระบบล้มเหลว กรุณาตรวจสอบเซิร์ฟเวอร์และกู้คืนจาก Backup ล่าสุดตามคู่มือผู้ดูแลระบบ
 1. ตรวจสอบโฟลเดอร์สำรองข้อมูลที่ ${this.config.backupsDir}\\${params.backupId}
@@ -1487,7 +1516,7 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
       };
     }
 
-    if (!this.acquireLock(`ROLLBACK_${params.backupId}`)) {
+    if (!lockAlreadyHeld && !this.acquireLock(`ROLLBACK_${params.backupId}`)) {
       return {
         rolledBack: false,
         status: 'FAILED',
@@ -1518,6 +1547,7 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
         );
       }
 
+      this.journalRecovery(params.backupId, 'ROLLBACK_STARTED');
       // Restore Frontend and Backend artifacts from verified backup
       const frontendBackupDir = path.join(backupDir, 'frontend');
       const backendBackupDir = path.join(backupDir, 'backend');
@@ -1544,6 +1574,9 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
       const restoredCommit = integrity.manifest.previousCommitSha;
       const restoredVersion = integrity.manifest.previousVersion;
 
+      if (this.config.hooks?.activateBackend) await this.config.hooks.activateBackend({
+        commitSha: restoredCommit, backendDir: this.config.backendProdDir, frontendDir: this.config.frontendProdDir,
+      });
       // Verify post-rollback health check
       const healthReport = await this.evaluateSevenPointHealthCheck(
         HEX_40_REGEX.test(restoredCommit) ? restoredCommit : '0000000000000000000000000000000000000000',
@@ -1551,7 +1584,8 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
       );
 
       if (!healthReport.overallHealthy) throw new Error('ROLLBACK_HEALTH_CHECK_FAILED');
-      this.releaseLock();
+      this.clearRecoveryJournal();
+      if (!lockAlreadyHeld) this.releaseLock();
 
       return {
         rolledBack: true,
@@ -1566,7 +1600,7 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
         criticalRecoveryAdvice: null,
       };
     } catch (err) {
-      this.releaseLock();
+      if (!lockAlreadyHeld) this.releaseLock();
       const sanitizedErr = sanitizeDeploymentErrorText(err);
       return {
         rolledBack: false,
@@ -1615,16 +1649,19 @@ export class WindowsNamedPipeDeploymentAgentClient implements IDeploymentAgentPh
   private readonly timeoutMs: number;
   private cachedProgress: DeploymentProgressState | null = null;
   private lockedState = false;
+  private lastAuthenticatedAt = 0;
 
   constructor(options: { namedPipePath?: string; ipcSecret: string; timeoutMs?: number }) {
     this.namedPipePath =
       options.namedPipePath || AUTHORITATIVE_WINDOWS_PATHS.NAMED_PIPE_PATH;
+    if (!/^\\\\\.\\pipe\\[A-Za-z0-9_-]{8,100}$/.test(this.namedPipePath)) throw new Error('LOCAL_NAMED_PIPE_REQUIRED');
+    if (options.ipcSecret.trim().length < 32) throw new Error('IPC_SECRET_TOO_SHORT');
     this.ipcSecret = options.ipcSecret;
-    this.timeoutMs = options.timeoutMs ?? 60_000;
+    this.timeoutMs = options.timeoutMs ?? 60 * 60_000;
   }
 
   public get agentStatus(): 'NOT_CONFIGURED' | 'READY' | 'BUSY' | 'OFFLINE' {
-    return this.lockedState ? 'BUSY' : 'READY';
+    return this.lockedState ? 'BUSY' : this.lastAuthenticatedAt && Date.now() - this.lastAuthenticatedAt < 60_000 ? 'READY' : 'OFFLINE';
   }
 
   public isLocked(): boolean {
@@ -1652,6 +1689,7 @@ export class WindowsNamedPipeDeploymentAgentClient implements IDeploymentAgentPh
 
     return new Promise<T>((resolve, reject) => {
       const socket = net.createConnection({ path: this.namedPipePath });
+      socket.setEncoding('utf8');
       let buffer = '';
       const timer = setTimeout(() => {
         socket.destroy();
@@ -1664,12 +1702,14 @@ export class WindowsNamedPipeDeploymentAgentClient implements IDeploymentAgentPh
 
       socket.on('data', (chunk) => {
         buffer += chunk.toString('utf8');
+        if (Buffer.byteLength(buffer) > 8 * 1024 * 1024) { socket.destroy(new Error('IPC_RESPONSE_TOO_LARGE')); return; }
         if (buffer.includes('\n')) {
           clearTimeout(timer);
           socket.end();
           try {
             const line = buffer.split('\n')[0];
-            const parsed = JSON.parse(line) as { ok: boolean; data?: T; error?: string };
+            const parsed = verifyFrame(this.ipcSecret, JSON.parse(line), `RESPONSE:${action}`, nonce).payload as { ok: boolean; data?: T; error?: string };
+            this.lastAuthenticatedAt = Date.now();
             if (!parsed.ok) {
               reject(new Error(parsed.error || 'Agent IPC returned error'));
             } else {
@@ -1681,11 +1721,17 @@ export class WindowsNamedPipeDeploymentAgentClient implements IDeploymentAgentPh
         }
       });
 
+      socket.on('end', () => { clearTimeout(timer); if (!buffer.includes('\n')) reject(new Error('IPC_TRUNCATED_RESPONSE')); });
       socket.on('error', (err) => {
+        this.lastAuthenticatedAt = 0;
         clearTimeout(timer);
         reject(err);
       });
     });
+  }
+
+  public async probeStatus(): Promise<{ status: string; locked: boolean; isolatedActivation: boolean }> {
+    return this.sendIpcRequest('PING', {});
   }
 
   public async getPreDeploymentEvidence(
@@ -1713,9 +1759,7 @@ export class WindowsNamedPipeDeploymentAgentClient implements IDeploymentAgentPh
     }
   }
 
-  public async executeVerifiedRollback(
-    params: ExecuteRollbackParams
-  ): Promise<ExecuteRollbackResult> {
+  public async executeVerifiedRollback(params: ExecuteRollbackParams): Promise<ExecuteRollbackResult> {
     this.lockedState = true;
     try {
       return await this.sendIpcRequest<ExecuteRollbackResult>('ROLLBACK', params);

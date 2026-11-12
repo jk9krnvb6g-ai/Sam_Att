@@ -1,3 +1,4 @@
+import { APPROVED_DEPLOYMENT_BRANCH } from '../deployment/sourcePolicy';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -6,21 +7,28 @@ import { StagingDeploymentEngineConfig } from './deploymentAgentService';
 
 const exec = promisify(execFile);
 const REMOTE = 'https://github.com/jk9krnvb6g-ai/Sam_Att.git';
-const BRANCH = 'fix/a96-deployment-fail-closed';
+const BRANCH = APPROVED_DEPLOYMENT_BRANCH;
 
 /** Real source/build executors; intentionally does not assert production health or activation support. */
 export function createVerifiedStagingHooks(npmCliPath: string): NonNullable<StagingDeploymentEngineConfig['hooks']> {
   if (!path.isAbsolute(npmCliPath) || !fs.statSync(npmCliPath).isFile()) throw new Error('NPM_CLI_REQUIRED');
   const run = async (command: string, args: string[], cwd: string) => {
+    // Builds/tests must not inherit production DB credentials, bearer tokens,
+    // IPC secrets, NODE_OPTIONS or production repository selection.
+    const childEnv: NodeJS.ProcessEnv = {};
+    for (const key of ['PATH','SystemRoot','WINDIR','COMSPEC','PATHEXT','TEMP','TMP','USERPROFILE','APPDATA','LOCALAPPDATA','ProgramFiles','ProgramFiles(x86)','ProgramData','SystemDrive','HOMEDRIVE','HOMEPATH','npm_config_cache']) {
+      if (process.env[key] !== undefined) childEnv[key] = process.env[key];
+    }
+    Object.assign(childEnv, { NODE_ENV: 'test', SAM_ATT_REPO_MODE: 'TEST', CI: '1', GIT_TERMINAL_PROMPT: '0' });
     const result = await exec(command, command === 'git' ? ['-c', `safe.directory=${cwd}`, ...args] : args, {
       cwd, shell: false, timeout: 15 * 60_000, maxBuffer: 8 * 1024 * 1024,
-      windowsHide: true, env: { ...process.env, NODE_ENV: 'test', CI: '1', GIT_TERMINAL_PROMPT: '0' },
+      windowsHide: true, env: childEnv,
     });
     return result.stdout.trim();
   };
   const npm = async (dir: string, args: string[]) => {
     try { await run(process.execPath, [npmCliPath, ...args], dir); return { ok: true, detail: `Completed npm ${args.join(' ')}` }; }
-    catch { return { ok: false, detail: `Failed npm ${args.join(' ')}; inspect protected staging logs` }; }
+    catch { return { ok: false, detail: `Failed npm ${args.join(' ')}; executor returned nonzero` }; }
   };
   return {
     fetchGitHubSource: async (sha, dir) => {
@@ -46,7 +54,10 @@ export function createVerifiedStagingHooks(npmCliPath: string): NonNullable<Stag
     runUnitTests: dir => npm(dir, ['run', 'test:unit']),
     runIntegrationTests: async dir => {
       const result = await npm(dir, ['run', 'test:integration']);
-      return result.ok ? npm(dir, ['run', 'test:security']) : result;
+      if (!result.ok) return result;
+      const security = await npm(dir, ['run', 'test:security']);
+      if (!security.ok) return security;
+      return process.platform === 'win32' ? npm(dir, ['run', 'test:native']) : security;
     },
     runBuild: async dir => {
       const result = await npm(dir, ['run', 'build']);
@@ -55,6 +66,8 @@ export function createVerifiedStagingHooks(npmCliPath: string): NonNullable<Stag
       if (result.ok) {
         fs.cpSync(path.join(dir, 'dist'), frontendBuildDir, { recursive: true });
         fs.cpSync(path.join(dir, 'dist-backend'), backendBuildDir, { recursive: true });
+        const runtime = await npm(backendBuildDir, ['ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund']);
+        if (!runtime.ok) return { ...runtime, frontendBuildDir, backendBuildDir };
       }
       return { ...result, frontendBuildDir, backendBuildDir };
     },

@@ -185,7 +185,7 @@ test('Windows development agent refuses startup before creating an insecure pipe
     env: { ...process.env, SAM_ATT_AGENT_IPC_SECRET: secret }, encoding: 'utf8', timeout: 15_000, windowsHide: true,
   });
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /WINDOWS_SECURE_PIPE_HOST_REQUIRED/);
+  assert.match(result.stderr, /USE_NATIVE_SERVICE_HOST/);
 });
 
 test('external adapter config is checksummed, rejects corruption and restores verified bytes', async () => {
@@ -205,4 +205,22 @@ test('external adapter config is checksummed, rejects corruption and restores ve
     assert.equal(recovery.rolledBack, true);
     assert.equal(fs.readFileSync(f.cfg.adapterConfigPath, 'utf8'), '{"release":"old"}');
   } finally { f.clean(); }
+});
+
+test('critical recovery keeps a durable journal and blocks redeploy until healthy manual rollback', async () => {
+  const f=pipelineFixture();
+  try {
+    let probes=0;
+    const healthy=f.hooks.runPostDeployHealthProbe;
+    f.hooks.runPostDeployHealthProbe=async()=>({ ...(await healthy()), backendHealthy: ++probes === 1 });
+    const failed=await f.engine.executeApprovedDeployment(f.params);
+    assert.equal(failed.status,'FAILED');
+    assert.equal(failed.rollbackStatus,'ROLLBACK_FAILED_CRITICAL');
+    assert.equal(fs.existsSync(path.join(f.cfg.workspaceRoot,'recovery-required.json')),true);
+    assert.equal((await f.engine.executeApprovedDeployment({...f.params,deploymentId:'DEP_NEXT'})).accepted,false);
+    f.hooks.runPostDeployHealthProbe=healthy;
+    const recovered=await f.engine.executeVerifiedRollback({backupId:failed.backupId!,requestedBy:f.params.approvedBy});
+    assert.equal(recovered.rolledBack,true);
+    assert.equal(fs.existsSync(path.join(f.cfg.workspaceRoot,'recovery-required.json')),false);
+  } finally {f.clean();}
 });

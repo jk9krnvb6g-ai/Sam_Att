@@ -64,7 +64,6 @@ export const DeploymentCenterView: React.FC = () => {
   // Section 6: Approve & Deploy Modal state
   const [showApproveModal, setShowApproveModal] = useState<boolean>(false);
   const [approvePassword, setApprovePassword] = useState<string>('');
-  const [maintenanceWindowApproved, setMaintenanceWindowApproved] = useState<boolean>(false);
   const [approveModalError, setApproveModalError] = useState<string | null>(null);
 
   // Section 9: Rollback Modal state
@@ -200,7 +199,7 @@ export const DeploymentCenterView: React.FC = () => {
   // Section 6: Approve & Execute Deployment
   const handleOpenApproveModal = () => {
     setApprovePassword('');
-    setMaintenanceWindowApproved(false);
+
     setApproveModalError(null);
     setShowApproveModal(true);
   };
@@ -233,7 +232,6 @@ export const DeploymentCenterView: React.FC = () => {
       const result = await apiAttendanceAdapter.approveDeployment({
         targetCommitSha: targetSha,
         adminPassword: approvePassword,
-        maintenanceWindowApproved,
       });
 
       setLastDeployResponse(result);
@@ -1231,20 +1229,10 @@ export const DeploymentCenterView: React.FC = () => {
                 </div>
               </div>
 
-              <label className="flex items-start gap-2.5 p-3 rounded-xl bg-amber-50/70 border border-amber-200 text-xs text-amber-950 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={maintenanceWindowApproved}
-                  onChange={(e) => setMaintenanceWindowApproved(e.target.checked)}
-                  className="mt-0.5 rounded border-amber-400"
-                />
-                <span>
-                  <strong className="font-bold">
-                    อนุมัติ Maintenance Window สำหรับ Backend Shared Gateway (:3002)
-                  </strong>{' '}
-                  (หากไม่ติ๊กและระบบตรวจพบว่าต้องรีสตาร์ท Central API Gateway ที่ใช้ร่วมกับ Procurement ระบบจะ Deploy เฉพาะส่วนที่ปลอดภัยและหยุดที่สถานะ MAINTENANCE_REQUIRED)
-                </span>
-              </label>
+              <div className="p-3 rounded-xl bg-amber-50/70 border border-amber-200 text-xs text-amber-950">
+                ระบบจะติดตั้งเมื่อยืนยันได้ว่าอัปเดตเฉพาะ Sam_Att โดยไม่รีสตาร์ท Gateway เท่านั้น
+                หากยังไม่พร้อม ระบบจะหยุดที่ MAINTENANCE_REQUIRED เพื่อให้ผู้ดูแลเตรียมการใน Maintenance Window
+              </div>
 
               {approveModalError && (
                 <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 font-mono-data">
