@@ -3546,6 +3546,7 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
       let hookBuildOk = true;
       let hookBackupOk = true;
       let hookGatewayHealthy = true;
+      let hookFailNewRelease = false;
       let hookProcurementHealthy = true;
       let hookProcurementStatusCode = 200;
       let hookRollbackOk = true;
@@ -3564,6 +3565,14 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
           backendRequiresGatewayRestart: backendRequiresRestart,
           isolatedBackendActivationSupported: isolatedActivationSupported,
           hooks: {
+            // Explicit isolated fixtures: these exercise orchestration, not production build evidence.
+            fetchGitHubSource: async (sha, dir) => {
+              fs.writeFileSync(path.join(dir, 'source-sha.txt'), sha);
+              return { ok: true };
+            },
+            verifyGitHubSource: async (sha, dir) => ({
+              ok: fs.readFileSync(path.join(dir, 'source-sha.txt'), 'utf8') === sha,
+            }),
             runDependenciesCheck: async () => ({
               ok: true,
               detail: 'PASS — npm dependencies verified in Staging',
@@ -3587,8 +3596,8 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
                   detail: 'FAIL — Vite build failed in Staging (simulated compilation error)',
                 };
               }
-              const feBuild = path.join(stageDir, 'dist');
-              const beBuild = path.join(stageDir, 'dist-backend');
+              const feBuild = path.join(stageDir, 'frontend_dist');
+              const beBuild = path.join(stageDir, 'backend_dist');
               fs.mkdirSync(feBuild, { recursive: true });
               fs.mkdirSync(beBuild, { recursive: true });
               fs.writeFileSync(
@@ -3597,7 +3606,7 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
                 'utf8'
               );
               fs.writeFileSync(
-                path.join(beBuild, 'router.js'),
+                path.join(beBuild, 'sam-att-gateway.cjs'),
                 `// Sam_Att Backend Commit ${latestGitHubSha}`,
                 'utf8'
               );
@@ -3619,7 +3628,7 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
             },
             runPostDeployHealthProbe: async () => ({
               frontendHealthy: true,
-              backendHealthy: hookGatewayHealthy,
+              backendHealthy: hookGatewayHealthy && !(hookFailNewRelease && fs.readFileSync(path.join(frontendProdDir, 'index.html'), 'utf8').includes(latestGitHubSha)),
               authHealthy: true,
               mysqlHealthy: true,
               routerHealthy: hookGatewayHealthy,
@@ -3632,6 +3641,9 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
                 : undefined,
             }),
             runRollbackHook: async () => {
+              // Recovery fixture restores healthy gateway behavior for the old release.
+              hookGatewayHealthy = true;
+              hookFailNewRelease = false;
               if (!hookRollbackOk) {
                 return {
                   ok: false,
@@ -3801,7 +3813,7 @@ describe('Sam_Att V2 Phase 1+2 Hardening — Database, Security, Repository & AP
         headers: { Authorization: `Bearer ${adminToken}` },
         body: {},
       });
-      hookGatewayHealthy = false;
+      hookFailNewRelease = true;
       const deployGatewayHealthFail = await invokeGatewayRoute(app, {
         method: 'POST',
         url: '/api/Sam_Att/deployment/approve',

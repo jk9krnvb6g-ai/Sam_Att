@@ -1,7 +1,9 @@
+import { DeploymentIpcVerifier } from '../backend/services/deploymentIpcSecurity';
 /**
  * Sam_Att V2 — Windows Named Pipe Deployment Agent Service (`FILESERVER`)
  *
- * Runs as a dedicated least-privilege Windows Service (`SamchukSamAttDeployAgent`)
+ * Development host only; Windows startup is blocked pending a native secure service host.
+ * Intended service name: `SamchukSamAttDeployAgent`
  * listening exclusively on the local Windows Named Pipe:
  *   `\\.\pipe\SamchukSamAttDeploymentAgent_v2`
  *
@@ -12,7 +14,6 @@
  * - Executes only the predefined `LocalStagingDeploymentEngine` operations (`PING`, `PREFLIGHT`, `LIST_BACKUPS`, `DEPLOY`, `ROLLBACK`).
  */
 
-import crypto from 'crypto';
 import fs from 'fs';
 import net from 'net';
 import path from 'path';
@@ -21,9 +22,7 @@ import {
   ExecuteDeployParams,
   ExecuteRollbackParams,
   LocalStagingDeploymentEngine,
-  NamedPipeIpcMessage,
   sanitizeDeploymentErrorText,
-  signIpcPayload,
 } from '../backend/services/deploymentAgentService';
 
 const namedPipePath =
@@ -37,6 +36,20 @@ if (!ipcSecret || ipcSecret.length < 32) {
   );
   process.exit(1);
 }
+
+// Node's net server cannot provision an explicit Windows pipe DACL or reject remote
+// SMB pipe clients. NTFS ACLs on DeploymentRoot do not protect this IPC endpoint.
+// Keep this development host disabled on Windows until a native ACL-enforcing host
+// and an SCM-compatible service executable have been supplied and verified.
+if (process.platform === 'win32') {
+  throw new Error('WINDOWS_SECURE_PIPE_HOST_REQUIRED: native pipe DACL and remote-client rejection are not implemented');
+}
+if (process.env.SAM_ATT_AGENT_LOCAL_TEST_HOST !== '1') {
+  throw new Error('LOCAL_TEST_HOST_ONLY');
+}
+const verifier = new DeploymentIpcVerifier(ipcSecret, new Set(
+  (process.env.SAM_ATT_AGENT_OPERATOR_IDS || '').split(',').map(s => s.trim()).filter(Boolean)
+));
 
 const samAttBackendAdapterDir =
   process.env.SAM_ATT_BACKEND_ADAPTER_DIR?.trim() ||
@@ -53,68 +66,24 @@ const engine = new LocalStagingDeploymentEngine({
   namedPipePath,
 });
 
-const usedNonces = new Map<string, number>();
-
-function cleanupExpiredNonces(): void {
-  const cutoff = Date.now() - 120_000;
-  usedNonces.forEach((ts, nonce) => {
-    if (ts < cutoff) usedNonces.delete(nonce);
-  });
-}
-
 const server = net.createServer((socket) => {
   let buffer = '';
+  let handled = false;
+  socket.setTimeout(10_000, () => socket.destroy());
+  socket.on('error', () => socket.destroy());
   socket.on('data', async (chunk) => {
+    if (handled) return;
     buffer += chunk.toString('utf8');
+    if (Buffer.byteLength(buffer) > 64 * 1024) { socket.destroy(); return; }
     if (!buffer.includes('\n')) return;
 
+    handled = true;
+    socket.setTimeout(0);
     const line = buffer.split('\n')[0];
     buffer = '';
 
     try {
-      cleanupExpiredNonces();
-      const msg = JSON.parse(line) as NamedPipeIpcMessage;
-
-      if (
-        !msg ||
-        typeof msg.action !== 'string' ||
-        typeof msg.timestamp !== 'number' ||
-        typeof msg.nonce !== 'string' ||
-        typeof msg.signature !== 'string'
-      ) {
-        socket.write(JSON.stringify({ ok: false, error: 'Malformed IPC message' }) + '\n');
-        socket.end();
-        return;
-      }
-
-      if (Math.abs(Date.now() - msg.timestamp) > 60_000) {
-        socket.write(JSON.stringify({ ok: false, error: 'IPC timestamp expired' }) + '\n');
-        socket.end();
-        return;
-      }
-
-      if (usedNonces.has(msg.nonce)) {
-        socket.write(JSON.stringify({ ok: false, error: 'IPC nonce replay rejected' }) + '\n');
-        socket.end();
-        return;
-      }
-
-      const expectedSig = signIpcPayload(
-        ipcSecret,
-        msg.action,
-        msg.timestamp,
-        msg.nonce,
-        msg.payload
-      );
-      const sigBuf = Buffer.from(msg.signature, 'utf8');
-      const expBuf = Buffer.from(expectedSig, 'utf8');
-      if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
-        socket.write(JSON.stringify({ ok: false, error: 'Invalid IPC HMAC signature' }) + '\n');
-        socket.end();
-        return;
-      }
-
-      usedNonces.set(msg.nonce, Date.now());
+      const msg = verifier.verify(JSON.parse(line));
 
       if (msg.action === 'PING') {
         socket.write(
@@ -159,7 +128,7 @@ const server = net.createServer((socket) => {
   });
 });
 
-if (process.platform !== 'win32' && fs.existsSync(namedPipePath)) {
+if (fs.existsSync(namedPipePath)) {
   fs.unlinkSync(namedPipePath);
 }
 

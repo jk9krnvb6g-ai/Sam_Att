@@ -5,14 +5,18 @@
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
-    "build": "vite build",
+    "build": "npm run build:frontend && npm run build:backend",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && tsx --test backend/__tests__/attendanceEngine.unit.test.ts backend/__tests__/samAttPhase2.integration.test.ts",
+    "test": "npm run build && tsx --test backend/__tests__/attendanceEngine.unit.test.ts backend/__tests__/samAttPhase2.integration.test.ts backend/__tests__/deploymentSecurity.test.ts",
     "test:unit": "tsx --test backend/__tests__/attendanceEngine.unit.test.ts",
-    "test:integration": "npm run build && tsx --test backend/__tests__/samAttPhase2.integration.test.ts"
+    "test:integration": "npm run build && tsx --test backend/__tests__/samAttPhase2.integration.test.ts",
+    "build:frontend": "vite build",
+    "build:backend": "node scripts/build-backend.mjs",
+    "test:security": "tsx --test backend/__tests__/deploymentSecurity.test.ts",
+    "test:deployment": "tsx --test backend/__tests__/deploymentSecurity.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

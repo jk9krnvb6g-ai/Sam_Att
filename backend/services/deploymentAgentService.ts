@@ -82,6 +82,9 @@ export interface BackupArchiveManifest {
   previousManifestPresent: boolean;
   verified: boolean;
   backupSignatureSha256: string;
+  previousManifestSha256?: string;
+  adapterConfigSha256?: string;
+  adapterConfigPresent?: boolean;
 }
 
 export interface AgentPreflightEvidence {
@@ -195,7 +198,7 @@ export function computeSha256Hex(content: string | Buffer): string {
 
 export function computeDirectorySha256Hex(dirPath: string): string {
   if (!fs.existsSync(dirPath)) {
-    return computeSha256Hex('EMPTY_DIR');
+    throw new Error('ARTIFACT_DIRECTORY_MISSING');
   }
   const hash = crypto.createHash('sha256');
   const walk = (currentDir: string) => {
@@ -205,6 +208,7 @@ export function computeDirectorySha256Hex(dirPath: string): string {
     for (const entry of entries) {
       const fullPath = path.join(currentDir, entry.name);
       const relPath = path.relative(dirPath, fullPath).replace(/\\/g, '/');
+      if (entry.isSymbolicLink()) throw new Error('ARTIFACT_LINK_REJECTED');
       if (entry.isDirectory()) {
         hash.update(`D:${relPath}\n`);
         walk(fullPath);
@@ -286,6 +290,9 @@ export function computeBackupSignatureSha256(
     frontendArtifactSha256: backup.frontendArtifactSha256.toLowerCase(),
     backendArtifactSha256: backup.backendArtifactSha256.toLowerCase(),
     previousManifestPresent: backup.previousManifestPresent,
+    previousManifestSha256: backup.previousManifestSha256,
+    adapterConfigSha256: backup.adapterConfigSha256,
+    adapterConfigPresent: backup.adapterConfigPresent,
     verified: backup.verified,
   });
   return computeSha256Hex(`SAM_ATT_V2_BACKUP_V2:${canonical}`);
@@ -512,13 +519,8 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
   }
 
   public isLocked(): boolean {
-    if (!this.activeLock) return false;
-    const timeoutMs = this.config.lockTimeoutMs ?? 15 * 60 * 1000;
-    if (Date.now() - this.activeLock.lockedAt > timeoutMs) {
-      this.activeLock = null;
-      return false;
-    }
-    return true;
+    // Never release a lock while its operation may still be running.
+    return this.activeLock !== null;
   }
 
   private acquireLock(deploymentId: string): boolean {
@@ -548,27 +550,27 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
     }
 
     const nowIso = new Date().toISOString();
-    const depCheck = this.config.hooks?.runDependenciesCheck
-      ? await this.config.hooks.runDependenciesCheck(this.config.stagingDir)
-      : {
-          ok: true,
-          detail: `PASS — ตรวจสอบ Dependencies ใน Staging สำหรับ Commit ${targetCommitSha.slice(0, 8)} สำเร็จ`,
-        };
-
-    const buildCheck = this.config.hooks?.runBuild
-      ? await this.config.hooks.runBuild(this.config.stagingDir)
-      : {
-          ok: true,
-          detail: `PASS — ทดสอบ Build Artifact สำหรับ Commit ${targetCommitSha.slice(0, 8)} สำเร็จ`,
-        };
-
-    const unitCheck = this.config.hooks?.runUnitTests
-      ? await this.config.hooks.runUnitTests(this.config.stagingDir)
-      : { ok: true, detail: 'Unit Tests passed' };
-    const intCheck = this.config.hooks?.runIntegrationTests
-      ? await this.config.hooks.runIntegrationTests(this.config.stagingDir)
-      : { ok: true, detail: 'Integration Tests passed' };
-    const testsPassed = unitCheck.ok && intCheck.ok;
+    const sourceDir = fs.mkdtempSync(path.join(this.config.stagingDir, 'preflight_'));
+    try {
+    if (!this.config.hooks?.fetchGitHubSource || !this.config.hooks?.verifyGitHubSource) {
+      throw new Error('SOURCE_EXECUTOR_NOT_CONFIGURED');
+    }
+    const fetched = await this.config.hooks.fetchGitHubSource(targetCommitSha, sourceDir);
+    if (!fetched.ok) throw new Error(fetched.error || 'SOURCE_FETCH_FAILED');
+    const verified = await this.config.hooks.verifyGitHubSource(targetCommitSha, sourceDir);
+    if (!verified.ok) throw new Error(verified.error || 'SOURCE_INTEGRITY_FAILED');
+    const missing = (name: string) => ({ ok: false, detail: `${name}_EXECUTOR_NOT_CONFIGURED` });
+    const depCheck = this.config.hooks.runDependenciesCheck
+      ? await this.config.hooks.runDependenciesCheck(sourceDir) : missing('DEPENDENCIES');
+    const typecheck = this.config.hooks.runTypecheck
+      ? await this.config.hooks.runTypecheck(sourceDir) : missing('TYPECHECK');
+    const buildCheck = this.config.hooks.runBuild
+      ? await this.config.hooks.runBuild(sourceDir) : { ...missing('BUILD'), frontendBuildDir: undefined, backendBuildDir: undefined };
+    const unitCheck = this.config.hooks.runUnitTests
+      ? await this.config.hooks.runUnitTests(sourceDir) : missing('UNIT_TEST');
+    const intCheck = this.config.hooks.runIntegrationTests
+      ? await this.config.hooks.runIntegrationTests(sourceDir) : missing('INTEGRATION_TEST');
+    const testsPassed = typecheck.ok && unitCheck.ok && intCheck.ok;
 
     let backupWritable = false;
     let backupDetail = '';
@@ -601,40 +603,32 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
     if (!this.config.hooks?.runPostDeployHealthProbe) {
       throw new Error('HEALTH_PROBE_NOT_CONFIGURED: ไม่มี Health Check จริง');
     }
-    const probe = this.config.hooks?.runPostDeployHealthProbe
-      ? await this.config.hooks.runPostDeployHealthProbe({
-          targetCommitSha,
-          frontendProdDir: this.config.frontendProdDir,
-          backendProdDir: this.config.backendProdDir,
-        })
-      : {
-          frontendHealthy: true,
-          backendHealthy: true,
-          authHealthy: true,
-          mysqlHealthy: true,
-          routerHealthy: true,
-          procurementHealthy: true,
-          procurementStatusCode: 200,
-        };
+    const probe = await this.config.hooks.runPostDeployHealthProbe({
+      targetCommitSha,
+      frontendProdDir: this.config.frontendProdDir,
+      backendProdDir: this.config.backendProdDir,
+    });
 
-    const gatewayPassed = Boolean(probe.backendHealthy !== false && probe.routerHealthy !== false);
+    const gatewayPassed = probe.backendHealthy === true && probe.routerHealthy === true;
     const procurementCode = probe.procurementStatusCode ?? 0;
     // Requirement §3.3: Procurement Health Check MUST NOT treat HTTP 404 as PASS!
     const procurementPassed =
-       Boolean(probe.procurementHealthy !== false) &&
+       (probe.procurementHealthy === true) &&
       procurementCode >= 200 &&
       procurementCode < 300 &&
       procurementCode !== 404;
 
-    const frontendSha = computeSha256Hex(`frontend:${targetCommitSha}`);
-    const backendSha = computeSha256Hex(`backend:${targetCommitSha}`);
+    const frontendSha = buildCheck.ok && buildCheck.frontendBuildDir ? computeDirectorySha256Hex(buildCheck.frontendBuildDir) : '';
+    const backendSha = buildCheck.ok && buildCheck.backendBuildDir ? computeDirectorySha256Hex(buildCheck.backendBuildDir) : '';
 
     return {
       commitSha: targetCommitSha.toLowerCase(),
       verifiedAt: nowIso,
       dependenciesPassed: depCheck.ok,
       dependenciesDetail: depCheck.detail,
-      buildPassed: buildCheck.ok,
+      buildPassed: buildCheck.ok && HEX_64_REGEX.test(frontendSha) && HEX_64_REGEX.test(backendSha) &&
+        fs.existsSync(path.join(buildCheck.frontendBuildDir || sourceDir, 'index.html')) &&
+        fs.existsSync(path.join(buildCheck.backendBuildDir || sourceDir, 'sam-att-gateway.cjs')),
       buildDetail: buildCheck.detail,
       frontendArtifactSha256: frontendSha,
       backendArtifactSha256: backendSha,
@@ -661,6 +655,9 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
           })`,
       procurementHttpStatus: procurementCode,
     };
+    } finally {
+      fs.rmSync(sourceDir, { recursive: true, force: true });
+    }
   }
 
   public async listVerifiedBackups(): Promise<DeploymentBackupSummary[]> {
@@ -719,6 +716,7 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
         !parsed ||
         parsed.schemaVersion !== '2.0' ||
         !SAFE_BACKUP_ID_REGEX.test(parsed.backupId) ||
+        path.basename(backupDir) !== parsed.backupId ||
         parsed.verified !== true
       ) {
         return {
@@ -737,6 +735,9 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
         frontendArtifactSha256: parsed.frontendArtifactSha256,
         backendArtifactSha256: parsed.backendArtifactSha256,
         previousManifestPresent: parsed.previousManifestPresent,
+        previousManifestSha256: parsed.previousManifestSha256,
+        adapterConfigSha256: parsed.adapterConfigSha256,
+        adapterConfigPresent: parsed.adapterConfigPresent,
         verified: parsed.verified,
       });
 
@@ -748,6 +749,18 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
         };
       }
 
+      const savedManifest = path.join(backupDir, 'current.json.bak');
+      if (parsed.previousManifestPresent !== fs.existsSync(savedManifest) ||
+          (parsed.previousManifestPresent && (!parsed.previousManifestSha256 ||
+           computeSha256Hex(fs.readFileSync(savedManifest)) !== parsed.previousManifestSha256))) {
+        throw new Error('BACKUP_MANIFEST_INTEGRITY_FAILED');
+      }
+      const savedConfig = path.join(backupDir, 'config', path.basename(this.config.adapterConfigPath));
+      if (parsed.adapterConfigPresent !== fs.existsSync(savedConfig) ||
+          (parsed.adapterConfigPresent && (!parsed.adapterConfigSha256 ||
+           computeSha256Hex(fs.readFileSync(savedConfig)) !== parsed.adapterConfigSha256))) {
+        throw new Error('BACKUP_CONFIG_INTEGRITY_FAILED');
+      }
       const actualFrontendSha = computeDirectorySha256Hex(frontendBackupDir);
       const actualBackendSha = computeDirectorySha256Hex(backendBackupDir);
       if (
@@ -794,24 +807,13 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
       fs.mkdirSync(backendBackupDir, { recursive: true });
       fs.mkdirSync(configBackupDir, { recursive: true });
 
-      // Ensure initial production folders have baseline files if empty in simulation
-      const feIndex = path.join(this.config.frontendProdDir, 'index.html');
-      if (!fs.existsSync(feIndex)) {
-        fs.writeFileSync(
-          feIndex,
-          '<!doctype html><html><head><title>Sam_Att V2</title></head><body>Sam_Att Baseline</body></html>',
-          'utf8'
-        );
+      if (!fs.existsSync(path.join(this.config.frontendProdDir, 'index.html')) ||
+          fs.readdirSync(this.config.backendProdDir).length === 0) {
+        throw new Error('PRODUCTION_BASELINE_MISSING');
       }
-      const beEntry = path.join(this.config.backendProdDir, 'samAttAdapter.json');
-      if (!fs.existsSync(beEntry)) {
-        fs.writeFileSync(
-          beEntry,
-          JSON.stringify({ module: 'Sam_Att_V2', mountPath: '/api/Sam_Att' }, null, 2),
-          'utf8'
-        );
-      }
-
+      // Hash first to reject links before copying any backup data.
+      computeDirectorySha256Hex(this.config.frontendProdDir);
+      computeDirectorySha256Hex(this.config.backendProdDir);
       copyDirectoryRecursiveSync(this.config.frontendProdDir, frontendBackupDir);
       copyDirectoryRecursiveSync(this.config.backendProdDir, backendBackupDir);
 
@@ -848,6 +850,9 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
         frontendArtifactSha256: frontendSha,
         backendArtifactSha256: backendSha,
         previousManifestPresent,
+        adapterConfigPresent: fs.existsSync(this.config.adapterConfigPath),
+        adapterConfigSha256: fs.existsSync(this.config.adapterConfigPath) ? computeSha256Hex(fs.readFileSync(this.config.adapterConfigPath)) : undefined,
+        previousManifestSha256: previousManifestPresent ? computeSha256Hex(fs.readFileSync(path.join(backupDir, 'current.json.bak'))) : undefined,
         verified: true,
       };
 
@@ -899,7 +904,7 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
       : {};
 
     const feIndexExists = fs.existsSync(path.join(this.config.frontendProdDir, 'index.html'));
-    const feHealthy = probe.frontendHealthy !== undefined ? probe.frontendHealthy : feIndexExists;
+    const feHealthy = probe.frontendHealthy === true && feIndexExists;
 
     const beHealthy = probe.backendHealthy === true;
     const authHealthy = probe.authHealthy === true;
@@ -912,7 +917,7 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
         manifestCheck.manifest?.commitSha.toLowerCase() === targetCommitSha.toLowerCase()
       : feIndexExists;
 
-    const procCode = probe.procurementStatusCode ?? 200;
+    const procCode = probe.procurementStatusCode ?? 0;
     const procHealthy =
       (probe.procurementHealthy === true) &&
       procCode >= 200 &&
@@ -1079,10 +1084,12 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
     }
 
     let createdBackupId: string | null = null;
+    let activationStarted = false;
 
     try {
       updateProgress(1, 'COMPLETED', 'PENDING', 'ล็อก Deployment สำเร็จ');
 
+      if (!/^[A-Za-z0-9_-]{1,100}$/.test(params.deploymentId)) throw new Error('INVALID_DEPLOYMENT_ID');
       // Step 2: Verify ADMIN & Commit SHA
       if (!HEX_40_REGEX.test(params.targetCommitSha)) {
         throw new Error('รหัส Commit SHA ที่อนุมัติไม่ถูกต้อง (ต้องเป็นรหัสฐานสิบหก 40 หลัก)');
@@ -1098,11 +1105,9 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
       );
 
       // Step 3: Download Source into isolated Staging workspace (never git pull in Production)
-      const releaseStagingDir = path.join(
-        this.config.stagingDir,
-        `release_${params.deploymentId}_${params.targetCommitSha.slice(0, 8)}`
-      );
-      fs.mkdirSync(releaseStagingDir, { recursive: true });
+      const releaseStagingDir = fs.mkdtempSync(path.join(
+        this.config.stagingDir, `release_${params.deploymentId}_${params.targetCommitSha.slice(0, 8)}_`
+      ));
 
       if (this.config.hooks?.fetchGitHubSource) {
         const fetchRes = await this.config.hooks.fetchGitHubSource(
@@ -1243,16 +1248,11 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
       updateProgress(13, 'COMPLETED', 'DEPLOYING', 'ยืนยันความพร้อมของ Staging Release ผ่าน');
 
       // Step 14: Deploy only Sam_Att V2 (Check Shared Gateway Port 3002 Safety — §3.6)
-      const requiresGatewayRestart =
-        params.backendRequiresGatewayRestart ??
-        this.config.backendRequiresGatewayRestart ??
-        false;
-      const isolatedSupported =
-        params.isolatedBackendActivationSupported ??
-        this.config.isolatedBackendActivationSupported ??
-        false;
+      // Activation capability is trusted host configuration, never caller input.
+      const requiresGatewayRestart = this.config.backendRequiresGatewayRestart ?? true;
+      const isolatedSupported = this.config.isolatedBackendActivationSupported === true;
 
-      if (requiresGatewayRestart && !isolatedSupported && !params.maintenanceWindowApproved) {
+      if (requiresGatewayRestart || !isolatedSupported) {
         updateProgress(
           14,
           'MAINTENANCE_REQUIRED',
@@ -1277,7 +1277,20 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
         };
       }
 
+      const beforeActivation = await this.config.hooks?.runPostDeployHealthProbe?.({
+        targetCommitSha: params.targetCommitSha,
+        frontendProdDir: this.config.frontendProdDir,
+        backendProdDir: this.config.backendProdDir,
+      });
+      if (beforeActivation?.backendHealthy !== true || beforeActivation.routerHealthy !== true ||
+          beforeActivation.procurementHealthy !== true || !beforeActivation.procurementStatusCode ||
+          beforeActivation.procurementStatusCode < 200 || beforeActivation.procurementStatusCode >= 300) {
+        throw new Error('PRE_ACTIVATION_HEALTH_FAILED');
+      }
       // Activate Sam_Att Frontend & Backend artifacts without touching Procurement
+      if (computeDirectorySha256Hex(stagedFrontendDir) !== stagedFrontendSha ||
+          computeDirectorySha256Hex(stagedBackendDir) !== stagedBackendSha) throw new Error('STAGING_CHANGED');
+      activationStarted = true;
       clearAndRestoreDirectorySync(stagedFrontendDir, this.config.frontendProdDir);
       clearAndRestoreDirectorySync(stagedBackendDir, this.config.backendProdDir);
       updateProgress(
@@ -1287,6 +1300,8 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
         'ติดตั้งไฟล์ Sam_Att V2 ลงโฟลเดอร์เป้าหมายสำเร็จโดยไม่แก้ไขหรือรีสตาร์ทระบบ Procurement'
       );
 
+      if (computeDirectorySha256Hex(this.config.frontendProdDir) !== stagedFrontendSha ||
+          computeDirectorySha256Hex(this.config.backendProdDir) !== stagedBackendSha) throw new Error('ACTIVATED_ARTIFACT_MISMATCH');
       // Step 15: Post-Deployment 7-Point Health Check (§3.7)
       const healthReport = await this.evaluateSevenPointHealthCheck(
         params.targetCommitSha,
@@ -1403,8 +1418,15 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
       };
     } catch (err) {
       const sanitizedErr = sanitizeDeploymentErrorText(err);
+      let recovery: ExecuteRollbackResult | null = null;
+      if (activationStarted && createdBackupId) {
+        this.releaseLock();
+        recovery = await this.executeVerifiedRollback({ backupId: createdBackupId, requestedBy: params.approvedBy });
+      }
       if (this.activeProgress) {
-        this.activeProgress.status = 'FAILED';
+        this.activeProgress.status = recovery?.rolledBack ? 'ROLLED_BACK' : 'FAILED';
+        this.activeProgress.rollbackStatus = recovery?.rollbackStatus ?? 'NONE';
+        this.activeProgress.criticalRecoveryAdvice = recovery?.criticalRecoveryAdvice;
         this.activeProgress.errorDetails = sanitizedErr;
         this.activeProgress.completedAt = new Date().toISOString();
         const runningStep = this.activeProgress.steps.find(
@@ -1420,13 +1442,14 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
       return {
         accepted: true,
         deploymentId: params.deploymentId,
-        status: 'FAILED',
+        status: recovery?.rolledBack ? 'ROLLED_BACK' : 'FAILED',
         backupId: createdBackupId,
         manifest: null,
         healthCheckReport: this.activeProgress?.healthCheckReport ?? null,
-        rollbackStatus: 'NONE',
+        rollbackStatus: recovery?.rollbackStatus ?? 'NONE',
+        criticalRecoveryAdvice: recovery?.criticalRecoveryAdvice,
         buildTestSummary: this.activeProgress?.buildTestSummary || 'FAILED',
-        summary: `การอัปเดตระบบล้มเหลวและถูกยกเลิกก่อนกระทบระบบจริง: ${sanitizedErr}`,
+        summary: `การอัปเดตระบบล้มเหลว: ${sanitizedErr}`,
         errorSanitized: sanitizedErr,
         progress: this.activeProgress!,
       };
@@ -1501,6 +1524,14 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
       clearAndRestoreDirectorySync(frontendBackupDir, this.config.frontendProdDir);
       clearAndRestoreDirectorySync(backendBackupDir, this.config.backendProdDir);
 
+      const savedConfig = path.join(backupDir, 'config', path.basename(this.config.adapterConfigPath));
+      if (integrity.manifest.adapterConfigPresent) {
+        fs.mkdirSync(path.dirname(this.config.adapterConfigPath), { recursive: true });
+        fs.copyFileSync(savedConfig, this.config.adapterConfigPath);
+      } else if (fs.existsSync(this.config.adapterConfigPath)) {
+        fs.unlinkSync(this.config.adapterConfigPath);
+      }
+
       // Restore Deployment Manifest (`current.json`)
       const backupManifestPath = path.join(backupDir, 'current.json.bak');
       if (fs.existsSync(backupManifestPath)) {
@@ -1519,6 +1550,7 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
         false
       );
 
+      if (!healthReport.overallHealthy) throw new Error('ROLLBACK_HEALTH_CHECK_FAILED');
       this.releaseLock();
 
       return {
