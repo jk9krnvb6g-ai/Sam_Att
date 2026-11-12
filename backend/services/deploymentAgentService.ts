@@ -614,7 +614,7 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
         };
 
     const gatewayPassed = Boolean(probe.backendHealthy !== false && probe.routerHealthy !== false);
-    const procurementCode = probe.procurementStatusCode ?? 200;
+    const procurementCode = probe.procurementStatusCode ?? 0;
     // Requirement §3.3: Procurement Health Check MUST NOT treat HTTP 404 as PASS!
     const procurementPassed =
        Boolean(probe.procurementHealthy !== false) &&
@@ -897,10 +897,10 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
     const feIndexExists = fs.existsSync(path.join(this.config.frontendProdDir, 'index.html'));
     const feHealthy = probe.frontendHealthy !== undefined ? probe.frontendHealthy : feIndexExists;
 
-    const beHealthy = probe.backendHealthy !== undefined ? probe.backendHealthy : true;
-    const authHealthy = probe.authHealthy !== undefined ? probe.authHealthy : true;
-    const mysqlHealthy = probe.mysqlHealthy !== undefined ? probe.mysqlHealthy : true;
-    const routerHealthy = probe.routerHealthy !== undefined ? probe.routerHealthy : true;
+    const beHealthy = probe.backendHealthy === true;
+    const authHealthy = probe.authHealthy === true;
+    const mysqlHealthy = probe.mysqlHealthy === true;
+    const routerHealthy = probe.routerHealthy === true;
 
     const manifestCheck = readAndVerifyDeploymentManifest(this.config.manifestPath);
     const manifestHealthy = expectManifestUpdated
@@ -910,7 +910,7 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
 
     const procCode = probe.procurementStatusCode ?? 200;
     const procHealthy =
-      (probe.procurementHealthy !== undefined ? probe.procurementHealthy : true) &&
+      (probe.procurementHealthy === true) &&
       procCode >= 200 &&
       procCode < 300 &&
       procCode !== 404;
@@ -1109,11 +1109,7 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
           throw new Error(fetchRes.error || 'ไม่สามารถดาวน์โหลด Source จาก GitHub ได้');
         }
       } else {
-        fs.writeFileSync(
-          path.join(releaseStagingDir, 'commit.txt'),
-          params.targetCommitSha.toLowerCase(),
-          'utf8'
-        );
+        throw new Error('SOURCE_EXECUTOR_NOT_CONFIGURED: ไม่มี Source Downloader จริง');
       }
       updateProgress(
         3,
@@ -1122,10 +1118,11 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
         `ดาวน์โหลด Source สำหรับ Commit ${params.targetCommitSha.slice(0, 8)} ลงใน Staging สำเร็จ`
       );
 
-      // Step 4: Verify Source
-      updateProgress(4, 'COMPLETED', 'BUILDING', 'ตรวจสอบโครงสร้างและ Commit SHA ของ Source ผ่าน');
+      // Fail closed until a trusted verifier proves the downloaded source matches the approved SHA.
+      throw new Error('SOURCE_INTEGRITY_NOT_IMPLEMENTED: ยังไม่มี Source Integrity Verification');
 
       // Step 5: Controlled Dependencies
+      if (!this.config.hooks?.runDependenciesCheck) throw new Error('DEPENDENCIES_EXECUTOR_NOT_CONFIGURED');
       if (this.config.hooks?.runDependenciesCheck) {
         const depRes = await this.config.hooks.runDependenciesCheck(releaseStagingDir);
         if (!depRes.ok) {
@@ -1135,6 +1132,7 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
       updateProgress(5, 'COMPLETED', 'BUILDING', 'ตรวจสอบและเตรียม Dependencies สำเร็จ');
 
       // Step 6: Typecheck
+      if (!this.config.hooks?.runTypecheck) throw new Error('TYPECHECK_EXECUTOR_NOT_CONFIGURED');
       if (this.config.hooks?.runTypecheck) {
         const tcRes = await this.config.hooks.runTypecheck(releaseStagingDir);
         if (!tcRes.ok) {
@@ -1144,6 +1142,7 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
       updateProgress(6, 'COMPLETED', 'BUILDING', 'TypeScript Typecheck (tsc --noEmit) ผ่าน 0 errors');
 
       // Step 7: Unit Tests
+      if (!this.config.hooks?.runUnitTests) throw new Error('UNIT_TEST_EXECUTOR_NOT_CONFIGURED');
       if (this.config.hooks?.runUnitTests) {
         const utRes = await this.config.hooks.runUnitTests(releaseStagingDir);
         if (!utRes.ok) {
@@ -1153,6 +1152,7 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
       updateProgress(7, 'COMPLETED', 'BUILDING', 'Unit Tests ผ่านครบทุกรายการ');
 
       // Step 8: Integration Tests
+      if (!this.config.hooks?.runIntegrationTests) throw new Error('INTEGRATION_TEST_EXECUTOR_NOT_CONFIGURED');
       if (this.config.hooks?.runIntegrationTests) {
         const itRes = await this.config.hooks.runIntegrationTests(releaseStagingDir);
         if (!itRes.ok) {
@@ -1167,6 +1167,7 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
       fs.mkdirSync(stagedFrontendDir, { recursive: true });
       fs.mkdirSync(stagedBackendDir, { recursive: true });
 
+      if (!this.config.hooks?.runBuild) throw new Error('BUILD_EXECUTOR_NOT_CONFIGURED');
       if (this.config.hooks?.runBuild) {
         const bRes = await this.config.hooks.runBuild(releaseStagingDir);
         if (!bRes.ok) {
@@ -1262,7 +1263,7 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
       const isolatedSupported =
         params.isolatedBackendActivationSupported ??
         this.config.isolatedBackendActivationSupported ??
-        true;
+        false;
 
       if (requiresGatewayRestart && !isolatedSupported && !params.maintenanceWindowApproved) {
         updateProgress(
@@ -1380,6 +1381,10 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
       );
       if (this.activeProgress) {
         this.activeProgress.healthCheckReport = finalHealthReport;
+      }
+
+      if (!finalHealthReport.overallHealthy) {
+        throw new Error('FINAL_HEALTH_CHECK_FAILED: post-manifest health check did not pass');
       }
 
       updateProgress(
