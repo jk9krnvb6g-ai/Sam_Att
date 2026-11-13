@@ -30,8 +30,27 @@ if ($procurement.authenticated -cne $true -or $procurement.functional -cne $true
 $rollback = Read-JsonFile $RollbackDrillEvidenceFile
 if ($rollback.verifiedBackup -cne $true -or $rollback.restoreHashesMatch -cne $true -or $rollback.rollbackHealthy -cne $true) { throw 'VERIFIED_ROLLBACK_DRILL_REQUIRED' }
 if (-not (Test-Path -LiteralPath $ReleaseSha256File -PathType Leaf)) { throw 'RELEASE_SHA256SUMS_MISSING' }
-$hashes = @(Get-Content -LiteralPath $ReleaseSha256File | Where-Object { $_ -match '^[a-f0-9]{64}  .+' })
-if ($hashes.Count -lt 5) { throw 'RELEASE_HASH_LIST_INCOMPLETE' }
+$releaseRoot = Split-Path -Parent ([IO.Path]::GetFullPath($ReleaseSha256File))
+$hashLines = @(Get-Content -LiteralPath $ReleaseSha256File)
+$expectedFiles = @('sam-att-gateway.cjs','sam-att-host.cjs','deployment-agent-worker.cjs','SamAttDeploymentAgent.exe','install-deployment-agent-service.ps1','Export-A98BaselineEvidence.ps1')
+if ($hashLines.Count -ne $expectedFiles.Count) { throw 'RELEASE_HASH_LIST_INCOMPLETE' }
+$seen = @{}
+foreach ($line in $hashLines) {
+  if ($line -cnotmatch '^([a-f0-9]{64})  ([A-Za-z0-9._-]+)
+Write-Host 'A99 DOCUMENTARY PRECHECK PASSED; THIS IS NOT CRYPTOGRAPHIC SIGNATURE VERIFICATION OR PRODUCTION ACCEPTANCE.'
+Write-Host 'Operator must independently verify approval authenticity, artifact hashes, baseline provenance, active Gateway host, and live Procurement before any installation.'
+Write-Host 'READ_ONLY: no service, Gateway, deployment, or production file modified.'
+) { throw 'RELEASE_HASH_LIST_INVALID' }
+  $expectedHash = $Matches[1]
+  $name = $Matches[2]
+  if ($name -notin $expectedFiles -or $seen.ContainsKey($name)) { throw 'RELEASE_HASH_LIST_INVALID' }
+  $seen[$name] = $true
+  $file = Join-Path $releaseRoot $name
+  if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "RELEASE_ARTIFACT_MISSING: $name" }
+  $actualHash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($actualHash -cne $expectedHash) { throw "RELEASE_ARTIFACT_HASH_MISMATCH: $name" }
+}
+if ($seen.Count -ne $expectedFiles.Count) { throw 'RELEASE_HASH_LIST_INCOMPLETE' }
 Write-Host 'A99 DOCUMENTARY PRECHECK PASSED; THIS IS NOT CRYPTOGRAPHIC SIGNATURE VERIFICATION OR PRODUCTION ACCEPTANCE.'
 Write-Host 'Operator must independently verify approval authenticity, artifact hashes, baseline provenance, active Gateway host, and live Procurement before any installation.'
 Write-Host 'READ_ONLY: no service, Gateway, deployment, or production file modified.'
