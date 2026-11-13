@@ -77,7 +77,8 @@ jobs:
             'build/agent/deployment-agent-worker.cjs',
             'build/agent/SamAttDeploymentAgent.exe',
             'scripts/install-deployment-agent-service.ps1',
-            'scripts/Export-A98BaselineEvidence.ps1'
+            'scripts/Export-A98BaselineEvidence.ps1',
+            'scripts/Invoke-A99WindowsPreflight.ps1'
           )
           $lines = foreach ($file in $files) {
             if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing release file: $file" }
@@ -91,6 +92,7 @@ jobs:
           Copy-Item -LiteralPath build/agent/SamAttDeploymentAgent.exe -Destination build/a98-release-candidate/
           Copy-Item -LiteralPath scripts/install-deployment-agent-service.ps1 -Destination build/a98-release-candidate/
           Copy-Item -LiteralPath scripts/Export-A98BaselineEvidence.ps1 -Destination build/a98-release-candidate/
+          Copy-Item -LiteralPath scripts/Invoke-A99WindowsPreflight.ps1 -Destination build/a98-release-candidate/
           @(
             "SourceCommit=${{ github.event.pull_request.head.sha || github.sha }}"
             "SourceRef=$env:GITHUB_REF"
