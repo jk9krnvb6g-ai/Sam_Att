@@ -36,11 +36,7 @@ $expectedFiles = @('sam-att-gateway.cjs','sam-att-host.cjs','deployment-agent-wo
 if ($hashLines.Count -ne $expectedFiles.Count) { throw 'RELEASE_HASH_LIST_INCOMPLETE' }
 $seen = @{}
 foreach ($line in $hashLines) {
-  if ($line -cnotmatch '^([a-f0-9]{64})  ([A-Za-z0-9._-]+)
-Write-Host 'A99 DOCUMENTARY PRECHECK PASSED; THIS IS NOT CRYPTOGRAPHIC SIGNATURE VERIFICATION OR PRODUCTION ACCEPTANCE.'
-Write-Host 'Operator must independently verify approval authenticity, artifact hashes, baseline provenance, active Gateway host, and live Procurement before any installation.'
-Write-Host 'READ_ONLY: no service, Gateway, deployment, or production file modified.'
-) { throw 'RELEASE_HASH_LIST_INVALID' }
+  if ($line -cnotmatch '^([a-f0-9]{64})  ([A-Za-z0-9._-]+)$') { throw 'RELEASE_HASH_LIST_INVALID' }
   $expectedHash = $Matches[1]
   $name = $Matches[2]
   if ($name -notin $expectedFiles -or $seen.ContainsKey($name)) { throw 'RELEASE_HASH_LIST_INVALID' }
