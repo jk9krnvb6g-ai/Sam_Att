@@ -17,7 +17,7 @@ for (const key of ['DeploymentRoot','FrontendDirectory','BackendDirectory','Rele
 }
 if (config.Mode !== 'ISOLATED' && config.Mode !== 'PRODUCTION') throw new Error('INVALID_HOST_MODE');
 if (config.Mode === 'PRODUCTION') {
-  if (path.resolve(config.DeploymentRoot).toLowerCase() !== 'c:\\programdata\\samchukhospital\\deployments\\sam_att' ||
+  if (path.resolve(config.DeploymentRoot).toLowerCase() !== 'c:\\inetpub\\wwwroot\\deployment_center\\sam_att' ||
       path.resolve(config.FrontendDirectory).toLowerCase() !== 'c:\\inetpub\\wwwroot\\sam_att' ||
       path.resolve(config.BackendDirectory).toLowerCase() !== 'c:\\programdata\\samchukhospital\\deployments\\sam_att\\backend' ||
       path.resolve(config.ReleaseRoot) !== path.join(path.resolve(config.DeploymentRoot), 'Releases')) throw new Error('PRODUCTION_PATH_POLICY_FAILED');
