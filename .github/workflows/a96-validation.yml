@@ -82,7 +82,7 @@ jobs:
           $lines = foreach ($file in $files) {
             if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing release file: $file" }
             $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
-            "$hash  $file"
+            "$hash  $([IO.Path]::GetFileName($file))"
           }
           $lines | Set-Content -LiteralPath build/a98-release-candidate/SHA256SUMS.txt -Encoding utf8
           Copy-Item -LiteralPath dist-backend/sam-att-gateway.cjs -Destination build/a98-release-candidate/
