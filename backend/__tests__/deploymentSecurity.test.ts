@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { LocalStagingDeploymentEngine, computeDirectorySha256Hex, signIpcPayload } from '../services/deploymentAgentService';
+import { LocalStagingDeploymentEngine, computeDirectorySha256Hex, signIpcPayload, writeVerifiedDeploymentManifest } from '../services/deploymentAgentService';
 import { DeploymentIpcVerifier } from '../services/deploymentIpcSecurity';
 
 const secret = 'security-test-only-'.repeat(3);
@@ -98,6 +98,21 @@ test('missing artifact directory cannot produce a valid checksum', () => {
 
 function pipelineFixture() {
   const f = fixture();
+  // An isolated production-like pipeline must begin with a verified active
+  // baseline. Never let the deployment engine manufacture this evidence.
+  writeVerifiedDeploymentManifest(f.cfg.manifestPath, {
+    schemaVersion: '2.0',
+    deploymentId: 'DEP_VERIFIED_FIXTURE_BASELINE',
+    version: 'old-fixture',
+    commitSha: 'b'.repeat(40),
+    branch: 'fixture',
+    deployedAt: new Date().toISOString(),
+    approvedBy: { userId: 'fixture-admin', username: 'fixture-admin', fullName: 'Fixture Admin' },
+    frontendArtifactSha256: computeDirectorySha256Hex(f.cfg.frontendProdDir),
+    backendArtifactSha256: computeDirectorySha256Hex(f.cfg.backendProdDir),
+    backupId: null,
+    healthCheckVerified: true,
+  });
   let probes = 0;
   const hooks = {
     fetchGitHubSource: async (sha: string, dir: string) => { fs.writeFileSync(path.join(dir, 'source'), sha); return { ok: true }; },
@@ -167,7 +182,8 @@ test('exception after manifest write triggers verified recovery to the previous 
     assert.equal(result.status, 'ROLLED_BACK');
     assert.equal(result.rollbackStatus, 'ROLLED_BACK');
     assert.match(fs.readFileSync(path.join(f.cfg.frontendProdDir, 'index.html'), 'utf8'), /old release/);
-    assert.equal(fs.existsSync(f.cfg.manifestPath), false);
+    assert.equal(fs.existsSync(f.cfg.manifestPath), true);
+    assert.equal(JSON.parse(fs.readFileSync(f.cfg.manifestPath, 'utf8')).commitSha, 'b'.repeat(40));
   } finally { f.clean(); }
 });
 test('deployment ID traversal is rejected before source execution', async () => {
