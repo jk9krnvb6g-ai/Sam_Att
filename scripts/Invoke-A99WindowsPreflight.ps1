@@ -3,7 +3,7 @@
 param(
   [string]$GatewayRoot = 'C:\inetpub\wwwroot\Central-API-Gateway',
   [string]$FrontendRoot = 'C:\inetpub\wwwroot\Sam_Att',
-  [string]$DeploymentRoot = 'C:\ProgramData\SamchukHospital\Deployments\Sam_Att',
+  [string]$DeploymentRoot = 'C:\inetpub\wwwroot\Deployment_Center\Sam_Att',
   [string]$GatewayTaskName = 'Hospital-Central-API-Gateway',
   [string]$AgentServiceName = 'SamchukSamAttDeployAgent',
   [string]$ApprovalFile,
