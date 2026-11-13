@@ -59,7 +59,7 @@ jobs:
       - name: Validate A98 PowerShell scripts parse on Windows
         shell: pwsh
         run: |
-          $files = @('scripts/Export-A98BaselineEvidence.ps1', 'scripts/Assert-A99MaintenanceApproval.ps1', 'scripts/Test-A96ProductionIntegrationReadiness.ps1', 'scripts/install-deployment-agent-service.ps1')
+          $files = @('scripts/Export-A98BaselineEvidence.ps1', 'scripts/Assert-A99MaintenanceApproval.ps1', 'scripts/Invoke-A99WindowsPreflight.ps1', 'scripts/Test-A96ProductionIntegrationReadiness.ps1', 'scripts/install-deployment-agent-service.ps1')
           foreach ($file in $files) {
             $tokens = $null
             $errors = $null
