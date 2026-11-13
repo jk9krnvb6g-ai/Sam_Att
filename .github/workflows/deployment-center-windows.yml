@@ -25,6 +25,7 @@ jobs:
           $files = @(
             'scripts/install-deployment-center-once.ps1',
             'scripts/provision-deployment-center-iis.ps1',
+            'scripts/Test-DeploymentCenterHttpIsolation.ps1',
             'scripts/prepare-deployment-center-artifacts.ps1',
             'scripts/install-deployment-agent-service.ps1',
             'scripts/build-native-agent.ps1'
