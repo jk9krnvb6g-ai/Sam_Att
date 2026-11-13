@@ -14,19 +14,19 @@ $commit = (& git.exe -C $repo rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-f]{40}$') { throw 'INVALID_COMMIT' }
 Push-Location $repo
 try {
-  $old = $ErrorActionPreference
-  $ErrorActionPreference = 'Continue'
-  try {
-    & npm.cmd run typecheck
-    $typeExit = $LASTEXITCODE
-    if ($typeExit -ne 0) { throw "TYPECHECK_FAILED: $typeExit" }
-    & npm.cmd run build
-    $buildExit = $LASTEXITCODE
-    if ($buildExit -ne 0) { throw "BUILD_FAILED: $buildExit" }
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'scripts\build-native-agent.ps1')
-    $nativeExit = $LASTEXITCODE
-    if ($nativeExit -ne 0) { throw "NATIVE_BUILD_FAILED: $nativeExit" }
-  } finally { $ErrorActionPreference = $old }
+  # Run CLI programs through cmd.exe to avoid Windows PowerShell 5.1 treating
+  # harmless native stderr warnings as terminating ErrorRecords.
+  function Invoke-Checked([string]$Command,[string]$Label) {
+    & cmd.exe /d /s /c $Command
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) { throw "${Label}_FAILED: $exitCode" }
+  }
+  Invoke-Checked 'npm.cmd run typecheck' 'TYPECHECK'
+  Invoke-Checked 'npm.cmd run build' 'BUILD'
+  $nativeScript = Join-Path $repo 'scripts\\build-native-agent.ps1'
+  & cmd.exe /d /s /c "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$nativeScript`""
+  $nativeExit = $LASTEXITCODE
+  if ($nativeExit -ne 0) { throw "NATIVE_BUILD_FAILED: $nativeExit" }
 } finally { Pop-Location }
 $paths = @(
   'dist-backend\sam-att-gateway.cjs',
