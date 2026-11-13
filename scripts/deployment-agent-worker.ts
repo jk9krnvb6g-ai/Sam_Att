@@ -1,3 +1,4 @@
+import { writeAgentSnapshot } from '../backend/deployment/agentSnapshot';
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
@@ -88,6 +89,10 @@ async function main() {
       },
     },
   });
+  const publishSnapshot=()=>writeAgentSnapshot(path.join(config.DeploymentRoot,'agent-status.json'),secret,{locked:engine.isLocked(),progress:engine.getActiveProgress()});
+  publishSnapshot();
+  const heartbeat=setInterval(()=>{try{publishSnapshot();}catch{console.error('AGENT_STATUS_WRITE_FAILED');}},1000);
+  heartbeat.unref();
   process.stdout.write('WORKER_READY\n');
   const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
   for await (const line of lines) {
@@ -106,6 +111,7 @@ async function main() {
     } catch (error) {
       payload = { ok: false, error: sanitizeDeploymentErrorText(error) };
     }
+    publishSnapshot();
     const nonce = /^[0-9a-f]{24,64}$/.test(request?.nonce) ? request.nonce : undefined;
     process.stdout.write(JSON.stringify(signedFrame(secret, `RESPONSE:${request?.action || 'REJECTED'}`, payload, nonce)) + '\n');
   }

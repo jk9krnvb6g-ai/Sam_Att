@@ -1,3 +1,6 @@
+import { assertDeploymentPathHasNoLinks } from '../deployment/pathSafety';
+export { assertDeploymentPathHasNoLinks } from '../deployment/pathSafety';
+import { readAgentSnapshot } from '../deployment/agentSnapshot';
 import { APPROVED_DEPLOYMENT_BRANCH } from '../deployment/sourcePolicy';
 import { verifyFrame } from '../deployment/controlSecurity';
 import { DeploymentFileLock } from '../deployment/fileLock';
@@ -197,17 +200,6 @@ export function sanitizeDeploymentErrorText(input: unknown): string {
 
 export function computeSha256Hex(content: string | Buffer): string {
   return crypto.createHash('sha256').update(content).digest('hex');
-}
-
-/** Reject links at every existing ancestor, including a junction used as an artifact root. */
-export function assertDeploymentPathHasNoLinks(input: string): void {
-  if (!path.isAbsolute(input)) throw new Error('ABSOLUTE_DEPLOYMENT_PATH_REQUIRED');
-  let cursor = path.resolve(input);
-  for (;;) {
-    try { if (fs.lstatSync(cursor).isSymbolicLink()) throw new Error('DEPLOYMENT_LINK_REJECTED'); }
-    catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-    const parent = path.dirname(cursor); if (parent === cursor) break; cursor = parent;
-  }
 }
 
 export function computeDirectorySha256Hex(dirPath: string): string {
@@ -1679,26 +1671,29 @@ export class WindowsNamedPipeDeploymentAgentClient implements IDeploymentAgentPh
   private cachedProgress: DeploymentProgressState | null = null;
   private lockedState = false;
   private lastAuthenticatedAt = 0;
+  private readonly progressPath?: string;
 
-  constructor(options: { namedPipePath?: string; ipcSecret: string; timeoutMs?: number }) {
+  constructor(options: { namedPipePath?: string; ipcSecret: string; timeoutMs?: number; progressPath?: string }) {
     this.namedPipePath =
       options.namedPipePath || AUTHORITATIVE_WINDOWS_PATHS.NAMED_PIPE_PATH;
     if (!/^\\\\\.\\pipe\\[A-Za-z0-9_-]{8,100}$/.test(this.namedPipePath)) throw new Error('LOCAL_NAMED_PIPE_REQUIRED');
     if (options.ipcSecret.trim().length < 32) throw new Error('IPC_SECRET_TOO_SHORT');
     this.ipcSecret = options.ipcSecret;
     this.timeoutMs = options.timeoutMs ?? 60 * 60_000;
+    this.progressPath = options.progressPath;
   }
 
   public get agentStatus(): 'NOT_CONFIGURED' | 'READY' | 'BUSY' | 'OFFLINE' {
-    return this.lockedState ? 'BUSY' : this.lastAuthenticatedAt && Date.now() - this.lastAuthenticatedAt < 60_000 ? 'READY' : 'OFFLINE';
+    const snapshot=readAgentSnapshot(this.progressPath,this.ipcSecret);
+    return this.lockedState || snapshot?.locked ? 'BUSY' : snapshot || (this.lastAuthenticatedAt && Date.now() - this.lastAuthenticatedAt < 60_000) ? 'READY' : 'OFFLINE';
   }
 
   public isLocked(): boolean {
-    return this.lockedState;
+    return this.lockedState || readAgentSnapshot(this.progressPath,this.ipcSecret)?.locked === true;
   }
 
   public getActiveProgress(): DeploymentProgressState | null {
-    return this.cachedProgress;
+    return readAgentSnapshot(this.progressPath,this.ipcSecret)?.progress ?? this.cachedProgress;
   }
 
   private async sendIpcRequest<T>(

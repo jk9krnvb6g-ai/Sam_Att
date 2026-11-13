@@ -24,13 +24,15 @@ if ($Mode -eq 'PRODUCTION') {
   $root='C:\inetpub\wwwroot\Deployment_Center\Sam_Att'
 } else {
   if (-not $IsolatedRoot) { throw 'ISOLATED_ROOT_REQUIRED' }
+  Assert-SafeInstallPath $IsolatedRoot
   $root=[IO.Path]::GetFullPath($IsolatedRoot)
   if ($root -match '(?i)\\inetpub(\\|$)|\\Central-API-Gateway(\\|$)' -or $env:COMPUTERNAME -eq 'FILESERVER') { throw 'ISOLATED_PRODUCTION_PATH_FORBIDDEN' }
 }
 Assert-SafeInstallPath $root
 Assert-SafeInstallPath $ConfigurationFile
 $config=Get-Content -LiteralPath $ConfigurationFile -Raw | ConvertFrom-Json
-if ($config.Mode -ne $Mode -or $config.DeploymentRoot -ne $root -or $config.BackendDirectory -ne (Join-Path $root 'Backend') -or $config.ReleaseRoot -ne (Join-Path $root 'Releases')) { throw 'INSTALL_CONFIG_PATH_POLICY_FAILED' }
+Assert-SafeInstallPath $config.DeploymentRoot
+if ($config.Mode -ne $Mode -or [IO.Path]::GetFullPath($config.DeploymentRoot) -ne $root -or [IO.Path]::GetFullPath($config.BackendDirectory) -ne (Join-Path $root 'Backend') -or [IO.Path]::GetFullPath($config.ReleaseRoot) -ne (Join-Path $root 'Releases')) { throw 'INSTALL_CONFIG_PATH_POLICY_FAILED' }
 foreach ($field in @('FrontendDirectory','BackendDirectory','ReleaseRoot','NodePath','NpmCliPath','IpcSecretFile','ControlSecretFile','SessionTokenFile','ProcurementTokenFile')) { Assert-SafeInstallPath ([string]$config.$field) }
 Assert-InstallHash $NativeExecutable $NativeSha256
 Assert-InstallHash $WorkerBundle $WorkerSha256
@@ -64,6 +66,7 @@ if ($Mode -eq 'PRODUCTION') {
   & (Join-Path $PSScriptRoot 'provision-deployment-center-iis.ps1') -Confirm:$false
   if (-not $?) { throw 'IIS_PROVISION_FAILED' }
 } else {
+  if((Test-Path -LiteralPath $root) -and -not (Test-Path -LiteralPath $receiptPath) -and @(Get-ChildItem -LiteralPath $root -Force).Count -gt 0){throw 'UNOWNED_ISOLATED_ROOT'}
   New-Item -ItemType Directory -Path $root -Force | Out-Null
   Set-InstallAdminAcl $root
 }

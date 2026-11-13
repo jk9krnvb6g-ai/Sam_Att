@@ -115,6 +115,24 @@ export const DeploymentCenterView: React.FC = () => {
     void loadDeploymentCenterData();
   }, [loadDeploymentCenterData]);
 
+  useEffect(() => {
+    if (isDemoMode || (actionLoading !== 'approve-deploy' && actionLoading !== 'rollback')) return;
+    let cancelled=false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refreshProgress=async()=>{
+      try {
+        const progress=await apiAttendanceAdapter.fetchDeploymentProgress();
+        if(!cancelled && progress)setLatestProgress(progress);
+      } catch(err) {
+        if(!cancelled)setErrorMessage(extractSafeErrorMessage(err,'ไม่สามารถตรวจสอบความคืบหน้าได้ กรุณาตรวจสอบสถานะก่อนสั่งงานซ้ำ'));
+      } finally {
+        if(!cancelled)timer=setTimeout(refreshProgress,2000);
+      }
+    };
+    void refreshProgress();
+    return ()=>{cancelled=true;if(timer)clearTimeout(timer);};
+  },[actionLoading,isDemoMode]);
+
   const handleManualRefresh = async () => {
     if (loading || actionLoading !== null) return;
     await loadDeploymentCenterData();

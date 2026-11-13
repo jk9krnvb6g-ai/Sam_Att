@@ -1,7 +1,8 @@
 #requires -Version 5.1
 Set-StrictMode -Version Latest
 function Assert-SafeInstallPath([string]$Path) {
-  if (-not [IO.Path]::IsPathRooted($Path) -or $Path.StartsWith('\\') -or $Path -match '(^|[\\/])\.\.([\\/]|$)' -or $Path.Substring(2).Contains(':')) { throw 'UNSAFE_INSTALL_PATH' }
+  if ($Path -notmatch '^[A-Za-z]:[\\/]' -or $Path.StartsWith('\\') -or $Path -match '(^|[\\/])\.\.([\\/]|$)' -or $Path.Substring(2).Contains(':')) { throw 'UNSAFE_INSTALL_PATH' }
+  if(@(($Path.Substring(3) -split '[\\/]') | Where-Object { $_ -match '[. ]$' }).Count -gt 0){throw 'UNSAFE_INSTALL_PATH'}
   $cursor = [IO.Path]::GetFullPath($Path)
   while ($cursor) {
     if (Test-Path -LiteralPath $cursor) {

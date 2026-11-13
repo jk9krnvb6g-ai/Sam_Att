@@ -50,9 +50,13 @@ jobs:
         shell: powershell
         run: |
           New-Item -ItemType Directory -Force build/test-results | Out-Null
-          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows/Installer.Acceptance.ps1 *> build/test-results/installer.txt
+          & cmd.exe /d /s /c "powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows/Installer.Acceptance.ps1 > build\test-results\installer.txt 2>&1"
           $result=$LASTEXITCODE
           Get-Content build/test-results/installer.txt
+          if($result -ne 0){exit $result}
+          & cmd.exe /d /s /c "powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows/Iis.Policy.Tests.ps1 > build\test-results\iis-policy.txt 2>&1"
+          $result=$LASTEXITCODE
+          Get-Content build/test-results/iis-policy.txt
           if($result -ne 0){exit $result}
       - name: Frontend to native IPC acceptance with isolated executors
         run: node --import tsx --test --test-reporter=tap --test-reporter-destination=build/test-results/web-ipc.tap backend/__tests__/deploymentWebIpc.test.ts

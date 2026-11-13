@@ -65,7 +65,10 @@ test('frontend API -> ADMIN router -> real native pipe -> worker engine deploy a
     const preflight=await apiAttendanceAdapter.runDeploymentPreflight();assert.equal(preflight.deploymentReadiness?.readyToDeploy,true,JSON.stringify(preflight.checklist));
     await assert.rejects(apiAttendanceAdapter.approveDeployment({targetCommitSha:target,adminPassword:'incorrect'}));
     apiAttendanceAdapter.setAuthToken(login.body.token);
-    const result=await apiAttendanceAdapter.approveDeployment({targetCommitSha:target,adminPassword:admin.username+'_pass'});
+    const pendingDeploy=apiAttendanceAdapter.approveDeployment({targetCommitSha:target,adminPassword:admin.username+'_pass'});
+    // The real progress endpoint stays responsive while a native operation owns the pipe.
+    await apiAttendanceAdapter.fetchDeploymentProgress();
+    const result=await pendingDeploy;
     assert.equal(result.status,'SUCCESS',JSON.stringify(result));
     assert.equal(readAndVerifyDeploymentManifest(manifestPath).manifest?.commitSha,target);
     assert.match(fs.readFileSync(path.join(frontend,'index.html'),'utf8'),/new web IPC fixture/);

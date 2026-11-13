@@ -12,7 +12,7 @@ function Reject($action,[string]$pattern){
   Assert $failed ('Expected rejection: '+$pattern)
 }
 try {
-  $root=Join-Path $fixture 'deployment'
+  $root=[IO.Path]::GetFullPath((Join-Path $fixture 'deployment'))
   $configPath=Join-Path $fixture 'config.json'
   $node=(Get-Command node.exe).Source
   foreach($name in @('ipc','control','session','procurement')){[IO.File]::WriteAllText((Join-Path $fixture $name),($name+'-isolated-fixture-secret-').PadRight(64,'x'))}

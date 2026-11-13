@@ -340,6 +340,7 @@ export class DeploymentCenterService {
           process.env.SAM_ATT_AGENT_NAMED_PIPE?.trim() ||
           AUTHORITATIVE_WINDOWS_PATHS.NAMED_PIPE_PATH,
         ipcSecret,
+        progressPath: path.join(path.dirname(this.getEffectiveManifestPath()), 'agent-status.json'),
       });
       return this.configuredPhase2Agent;
     }
