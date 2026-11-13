@@ -1,0 +1,79 @@
+name: Sam_Att Deployment Center Windows Verification
+on:
+  push:
+    branches: [fix/a96-deployment-fail-closed]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify-windows:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Parse deployment PowerShell scripts
+        shell: powershell
+        run: |
+          $files = @(
+            'scripts/install-deployment-center-once.ps1',
+            'scripts/provision-deployment-center-iis.ps1',
+            'scripts/prepare-deployment-center-artifacts.ps1',
+            'scripts/install-deployment-agent-service.ps1',
+            'scripts/build-native-agent.ps1'
+          )
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count) { $errors | Format-List; throw "PowerShell syntax invalid: $file" }
+          }
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Build frontend, backend, worker and host
+        run: npm run build
+      - name: Build native Windows service
+        shell: powershell
+        run: |
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-native-agent.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Deployment security tests
+        run: npm run test:security
+      - name: Deployment integration tests
+        run: npm run test:integration
+      - name: Native service tests
+        run: npm run test:native
+      - name: Verify required artifacts
+        shell: powershell
+        run: |
+          $files = @(
+            'dist/index.html',
+            'dist-backend/sam-att-gateway.cjs',
+            'dist-backend/sam-att-host.cjs',
+            'build/agent/deployment-agent-worker.cjs',
+            'build/agent/SamAttDeploymentAgent.exe',
+            'build/agent/check-deployment-readiness.cjs'
+          )
+          foreach ($file in $files) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing artifact: $file" }
+            $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+            Write-Host "$file SHA256=$hash"
+          }
+      - name: Upload verification artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sam-att-windows-verification
+          path: |
+            dist/
+            dist-backend/
+            build/agent/
+          if-no-files-found: warn
+          retention-days: 7
