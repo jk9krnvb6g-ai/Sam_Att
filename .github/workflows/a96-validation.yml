@@ -1,0 +1,58 @@
+name: A96 Windows validation
+
+on:
+  push:
+    branches:
+      - fix/a96-deployment-fail-closed
+  pull_request:
+    paths:
+      - 'backend/**'
+      - 'scripts/**'
+      - 'native/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/a96-validation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-validation:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Frontend build
+        run: npm run build:frontend
+      - name: Backend and worker build
+        run: npm run build:backend
+      - name: Native Windows agent build
+        shell: powershell
+        run: npm run build:agent
+      - name: Unit, integration, security and native isolated tests
+        run: npx tsx --test backend/__tests__/*.test.ts
+      - name: Verify built artifacts
+        shell: pwsh
+        run: |
+          $required = @(
+            'dist-backend/sam-att-gateway.cjs',
+            'dist-backend/sam-att-host.cjs',
+            'build/agent/deployment-agent-worker.cjs',
+            'build/agent/SamAttDeploymentAgent.exe'
+          )
+          foreach ($file in $required) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+              throw "Missing build artifact: $file"
+            }
+            $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+            Write-Host "$file SHA256=$hash"
+          }
