@@ -15,7 +15,10 @@ if ($DeploymentPath -ne '/Deployment_Center/') { throw 'UNAPPROVED_DEPLOYMENT_PA
 if ($BaseUrls.Count -eq 0) { throw 'BASE_URL_REQUIRED' }
 # A real existing canary must be deployed under the denied root by the operator.
 # A 404 for an absent file proves nothing; only an explicit 401/403 on the canary is accepted.
-if ($CanaryRelativePath -notmatch '^Sam_Att/[A-Za-z0-9_-]{16,80}\\.txt
+if ($CanaryRelativePath -notmatch '^Sam_Att/[A-Za-z0-9_-]{16,80}\.txt$') { throw 'INVALID_CANARY_PATH' }
+$canaryFile = Join-Path 'C:\inetpub\wwwroot\Deployment_Center' ($CanaryRelativePath.Replace('/','\'))
+if (-not (Test-Path -LiteralPath $canaryFile -PathType Leaf)) { throw 'CANARY_FILE_MISSING' }
+if ((Get-Item -LiteralPath $canaryFile -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'CANARY_REPARSE_REJECTED' }
 $paths = @(
   '/Deployment_Center/',
   '/Deployment_Center/web.config',
