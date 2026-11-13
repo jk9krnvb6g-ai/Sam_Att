@@ -16,7 +16,7 @@ $config = Get-Content -LiteralPath $ConfigurationFile -Raw | ConvertFrom-Json
 $root = 'C:\ProgramData\SamchukHospital\Deployments\Sam_Att'
 if ($config.Mode -ne 'PRODUCTION' -or [IO.Path]::GetFullPath($config.DeploymentRoot) -ne $root -or
     $config.FrontendDirectory -ne 'C:\inetpub\wwwroot\Sam_Att' -or
-    $config.BackendDirectory -ne 'C:\inetpub\wwwroot\Central-API-Gateway\modules\Sam_Att' -or
+    $config.BackendDirectory -ne (Join-Path $root 'Backend') -or
     $config.ReleaseRoot -ne (Join-Path $root 'Releases')) { throw 'Configuration path/mode policy failed.' }
 if ($config.PSObject.Properties.Name -contains 'IsolatedPackageSid') { throw 'Isolated package identities are forbidden in production.' }
 if ($config.GatewaySid -notmatch '^S-1-5-(21|80)-' -or $config.GatewaySid -eq $config.AgentSid) { throw 'Dedicated distinct Gateway and Agent identities required.' }
@@ -49,9 +49,9 @@ function Set-ProtectedAcl([string]$Path, [bool]$GatewayRead = $false, [bool]$Age
 }
 New-Item -ItemType Directory -Force -Path $root | Out-Null
 Set-ProtectedAcl $root $true
-foreach($name in @('ServiceHost','Secrets','Backups','Staging','Releases','IPCReplay','GatewayReplay')) {
+foreach($name in @('ServiceHost','Secrets','Backups','Staging','Releases','Backend','IPCReplay','GatewayReplay')) {
   $dir=Join-Path $root $name; New-Item -ItemType Directory -Force -Path $dir | Out-Null
-  Set-ProtectedAcl $dir ($name -eq 'Releases') ($name -notin @('ServiceHost','Secrets'))
+  Set-ProtectedAcl $dir ($name -in @('Releases','Backend')) ($name -notin @('ServiceHost','Secrets'))
 }
 $gatewayReplay=Join-Path $root 'GatewayReplay'
 Set-ProtectedAcl $gatewayReplay $true $false
