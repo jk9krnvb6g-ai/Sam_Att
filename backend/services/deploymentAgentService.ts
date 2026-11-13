@@ -1298,8 +1298,15 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
         };
       }
 
+      // Pre-activation probes must inspect the currently active release, not the
+      // target commit: the Gateway has not switched yet. Post-activation checks
+      // below verify the target commit after the router has actually changed.
+      const activeBeforeActivation = readAndVerifyDeploymentManifest(this.config.manifestPath);
+      if (activeBeforeActivation.status !== 'VALID' || !activeBeforeActivation.manifest) {
+        throw new Error('VERIFIED_ACTIVE_BASELINE_REQUIRED');
+      }
       const beforeActivation = await this.config.hooks?.runPostDeployHealthProbe?.({
-        targetCommitSha: params.targetCommitSha,
+        targetCommitSha: activeBeforeActivation.manifest.commitSha,
         frontendProdDir: this.config.frontendProdDir,
         backendProdDir: this.config.backendProdDir,
       });
