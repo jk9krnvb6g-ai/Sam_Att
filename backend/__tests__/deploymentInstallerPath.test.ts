@@ -4,12 +4,15 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 const installer = readFileSync(join(process.cwd(), 'scripts', 'install-deployment-agent-service.ps1'), 'utf8');
+const worker = readFileSync(join(process.cwd(), 'scripts', 'deployment-agent-worker.ts'), 'utf8');
 const guide = readFileSync(join(process.cwd(), 'native', 'DeploymentAgent', 'README.md'), 'utf8');
 
 test('A96 production backend destination is isolated from the shared Gateway adapter', () => {
   assert.match(installer, /\$config\.BackendDirectory -ne \(Join-Path \$root 'Backend'\)/);
   assert.doesNotMatch(installer, /Central-API-Gateway\\modules\\Sam_Att/);
   assert.match(installer, /'Releases','Backend','IPCReplay'/);
+  assert.match(worker, /programdata\\\\samchukhospital\\\\deployments\\\\sam_att\\\\backend/);
+  assert.doesNotMatch(worker, /central-api-gateway\\\\modules\\\\sam_att/);
   assert.match(installer, /\(\$name -in @\('Releases','Backend'\)\)/);
 });
 
