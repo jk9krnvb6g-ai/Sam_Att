@@ -11,7 +11,14 @@ export function writeAgentSnapshot(file: string, secret: string, snapshot: Agent
   assertDeploymentPathHasNoLinks(temp);
   const fd=fs.openSync(temp,'w',0o600);
   try {fs.writeFileSync(fd,JSON.stringify(signedFrame(secret,'AGENT_STATUS',snapshot)));fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
-  fs.renameSync(temp,file);
+  try {fs.renameSync(temp,file);return true;}
+  catch(error:any){
+    // Windows readers/antivirus can briefly deny replacement. Keep the last signed
+    // snapshot (which expires); a status refresh must never terminate deployment.
+    try{fs.unlinkSync(temp);}catch{}
+    if(['EPERM','EACCES','EBUSY'].includes(error.code))return false;
+    throw error;
+  }
 }
 export function readAgentSnapshot(file: string | undefined, secret: string): AgentSnapshot | null {
   if(!file)return null;

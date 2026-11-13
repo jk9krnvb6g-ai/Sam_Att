@@ -1,3 +1,4 @@
+import { writeAgentSnapshot } from '../../deployment/agentSnapshot';
 // Test-only worker. Bundled into a temporary directory by deploymentWebIpc.test.ts.
 // Build/typecheck/MySQL/Procurement hooks are explicit deterministic fixtures.
 import fs from 'node:fs';
@@ -14,7 +15,7 @@ const ok=async()=>({ok:true,detail:'explicit isolated executor fixture'});
 const engine=new LocalStagingDeploymentEngine({ workspaceRoot:root,frontendProdDir:c.FrontendDirectory,backendProdDir:c.BackendDirectory,
   manifestPath:path.join(root,'current.json'),adapterConfigPath:path.join(c.BackendDirectory,'adapter.json'),backupsDir:path.join(root,'Backups'),stagingDir:path.join(root,'Staging'),
   isolatedBackendActivationSupported:true,backendRequiresGatewayRestart:false,
-  hooks:{ fetchGitHubSource:async(sha,dir)=>{fs.writeFileSync(path.join(dir,'sha'),sha);return {ok:true};},
+  hooks:{ fetchGitHubSource:async(sha,dir)=>{await new Promise(resolve=>setTimeout(resolve,120));fs.writeFileSync(path.join(dir,'sha'),sha);return {ok:true};},
     verifyGitHubSource:async(sha,dir)=>({ok:fs.readFileSync(path.join(dir,'sha'),'utf8')===sha}),
     runDependenciesCheck:ok,runTypecheck:ok,runUnitTests:ok,runIntegrationTests:ok,
     runBuild:async(dir)=>{const fe=path.join(dir,'frontend_dist'),be=path.join(dir,'backend_dist');fs.mkdirSync(fe,{recursive:true});fs.mkdirSync(be,{recursive:true});
@@ -24,6 +25,8 @@ const engine=new LocalStagingDeploymentEngine({ workspaceRoot:root,frontendProdD
     activateBackend:async({commitSha})=>{fs.writeFileSync(path.join(root,'fixture-active-sha'),commitSha);},
   }
 });
+const publish=()=>writeAgentSnapshot(path.join(root,'agent-status.json'),secret,{locked:engine.isLocked(),progress:engine.getActiveProgress()});
+publish();setInterval(publish,25).unref();
 process.stdout.write('WORKER_READY\n');
 async function main(){
 for await(const line of readline.createInterface({input:process.stdin,crlfDelay:Infinity})){
@@ -36,6 +39,7 @@ for await(const line of readline.createInterface({input:process.stdin,crlfDelay:
       case 'LIST_BACKUPS':data=await engine.listVerifiedBackups();break;}
     payload={ok:true,data};
   }catch(e){payload={ok:false,error:String(e)};}
+  publish();
   process.stdout.write(JSON.stringify(signedFrame(secret,'RESPONSE:'+(req?.action||'REJECTED'),payload,req?.nonce))+'\n');
 }
 

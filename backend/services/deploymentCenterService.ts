@@ -763,7 +763,7 @@ export class DeploymentCenterService {
       };
     }
 
-    if (!agent || !agent.isAvailable || agent.agentStatus === 'NOT_CONFIGURED') {
+    if (!agent || !agent.isAvailable || agent.agentStatus === 'NOT_CONFIGURED' || agent.agentStatus === 'OFFLINE') {
       return {
         readyToDeploy: false,
         passedCount,
@@ -797,8 +797,10 @@ export class DeploymentCenterService {
       checklist.find((c) => c.id === 'github_source')?.evidence?.commitSha ||
       (latestGitHub?.available ? latestGitHub.commitSha : null);
 
+    const requiredChecks=['github_source','dependencies','build','automated_tests','backup','database_config','central_gateway','procurement_health'];
+    const checklistComplete=checklist.length===requiredChecks.length && requiredChecks.every(id=>checklist.filter(check=>check.id===id).length===1);
     const allEvidenceBoundToSameCommit =
-      Boolean(verifiedCommitSha && HEX_COMMIT_SHA_REGEX.test(verifiedCommitSha)) &&
+      checklistComplete && Boolean(verifiedCommitSha && HEX_COMMIT_SHA_REGEX.test(verifiedCommitSha)) &&
       checklist.every(
         (c) =>
           c.status === 'PASS' &&

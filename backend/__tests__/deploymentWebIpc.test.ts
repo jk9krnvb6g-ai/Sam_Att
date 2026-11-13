@@ -49,7 +49,7 @@ test('frontend API -> ADMIN router -> real native pipe -> worker engine deploy a
   const originalFetch=globalThis.fetch;let output='',errors='';host.stdout!.on('data',b=>output+=b);host.stderr!.on('data',b=>errors+=b);
   try{
     await new Promise<void>((resolve,reject)=>{const timer=setTimeout(()=>{clearInterval(check);reject(new Error(errors||'HOST timeout'));},15000);const check=setInterval(()=>{if(output.includes('HOST_READY')){clearInterval(check);clearTimeout(timer);resolve();}else if(host.exitCode!==null){clearInterval(check);clearTimeout(timer);reject(new Error(errors));}},20);});
-    const agent=new WindowsNamedPipeDeploymentAgentClient({namedPipePath:'\\\\.\\pipe\\'+pipeName,ipcSecret:secret,timeoutMs:15000});
+    const agent=new WindowsNamedPipeDeploymentAgentClient({namedPipePath:'\\\\.\\pipe\\'+pipeName,ipcSecret:secret,timeoutMs:15000,progressPath:path.join(root,'agent-status.json')});
     assert.ok(await agent.getPreDeploymentEvidence(target));
     DeploymentCenterService.resetStateForTests();
     DeploymentCenterService.configurePhase2Environment({agent,manifestPath,historyFilePath:path.join(root,'history.json'),gitHubFetcher:async()=>({ok:true,status:200,data:{sha:target,commit:{message:'isolated branch fixture',committer:{date:new Date().toISOString()}}}})});
@@ -67,7 +67,13 @@ test('frontend API -> ADMIN router -> real native pipe -> worker engine deploy a
     apiAttendanceAdapter.setAuthToken(login.body.token);
     const pendingDeploy=apiAttendanceAdapter.approveDeployment({targetCommitSha:target,adminPassword:admin.username+'_pass'});
     // The real progress endpoint stays responsive while a native operation owns the pipe.
-    await apiAttendanceAdapter.fetchDeploymentProgress();
+    let observedProgress=false;
+    for(let attempt=0;attempt<50;attempt++){
+      const progress=await apiAttendanceAdapter.fetchDeploymentProgress();
+      if(progress && progress.status!=='SUCCESS'){observedProgress=true;break;}
+      await new Promise(resolve=>setTimeout(resolve,10));
+    }
+    assert.equal(observedProgress,true,'UI observes signed progress while the real native pipe is busy');
     const result=await pendingDeploy;
     assert.equal(result.status,'SUCCESS',JSON.stringify(result));
     assert.equal(readAndVerifyDeploymentManifest(manifestPath).manifest?.commitSha,target);
