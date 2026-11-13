@@ -87,3 +87,14 @@ test('authenticated live-probe contracts bind signatures/nonces and require func
   badProcurement=true;badSignature=true;badAuth=true;
   const fail=await probes.probe('0'.repeat(64));assert.equal(fail.frontendHealthy,false);assert.equal(fail.mysqlHealthy,false);assert.equal(fail.procurementHealthy,false);assert.equal(fail.authHealthy,false);
 });
+
+
+test('staged stable host loads without checkout or Gateway dependencies', () => {
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'a96-standalone-host-'));
+  try {
+    const installed=path.join(root,'sam-att-host.cjs');
+    fs.copyFileSync(path.resolve('dist-backend/sam-att-host.cjs'),installed);
+    const result=spawnSync(process.execPath,['-e',`const host=require(${JSON.stringify(installed)});if(typeof host.createInstalledSamAttRouter!=='function')process.exit(2);`],{cwd:root,encoding:'utf8',windowsHide:true,env:{...process.env,NODE_PATH:''}});
+    assert.equal(result.status,0,result.stderr);
+  } finally {fs.rmSync(root,{recursive:true,force:true});}
+});

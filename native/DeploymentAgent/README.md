@@ -35,9 +35,9 @@ The JSON supplied to the installer has these fields (no secrets are committed):
 - PipeName: SamchukSamAttDeploymentAgent_v2
 - AgentSid: SID from `sc.exe showsid SamchukSamAttDeployAgent`
 - GatewaySid: actual dedicated Gateway service identity; distinct from Agent/SYSTEM/Administrators
-- DeploymentRoot: C:\ProgramData\SamchukHospital\Deployments\Sam_Att
+- DeploymentRoot: C:\inetpub\wwwroot\Deployment_Center\Sam_Att
 - FrontendDirectory: C:\inetpub\wwwroot\Sam_Att
-- BackendDirectory: C:\ProgramData\SamchukHospital\Deployments\Sam_Att\Backend (Agent-managed backend snapshot; never the Gateway adapter)
+- BackendDirectory: C:\inetpub\wwwroot\Deployment_Center\Sam_Att\Backend (Agent-managed backend snapshot; never the Gateway adapter)
 - ReleaseRoot: DeploymentRoot\Releases
 - NpmCliPath: reviewed absolute npm-cli.js path
 - OperatorIds: explicit ADMIN repository user IDs permitted to request deploy/rollback
@@ -50,7 +50,7 @@ The JSON supplied to the installer has these fields (no secrets are committed):
 
 Use the operator's secret provisioning system for token rotation. All request redirects are refused and HTTPS certificate validation remains enabled. The functional Procurement response contract is HTTP 200 with `healthy: true`, `service: "Procurement"`, `functional: true`. If the installed Procurement endpoint has another contract, it must be reviewed and explicitly adapted; a generic HTTP 200 is never accepted as functional health.
 
-The Gateway adapter at `C:\\inetpub\\wwwroot\\Central-API-Gateway\\modules\\sam-att\\index.js` is owned by the shared Gateway and must never be a deployment destination. The separate `Backend` directory is provisioned with Gateway read access; the Gateway's live `MODULE_SAM_ATT_PATH` and stable-host activation still require independent owner verification. This installer change alone does not mount or activate a release.\n\nThe installer requires an approved maintenance window, independently supplied executable hashes and FILESERVER identity. It creates a **stopped** virtual-account service, protects the host/config/secrets directories and provisions GatewayReplay separately. It does not start/stop/restart any service, modify firewall settings, change Gateway registration or deploy production content. Do not invoke it as part of unattended build/testing.
+The Gateway adapter at `C:\\inetpub\\wwwroot\\Central-API-Gateway\\modules\\sam-att\\index.js` is owned by the shared Gateway and must never be a deployment destination. The separate `Backend` directory is provisioned with Gateway read access; the Gateway's live `MODULE_SAM_ATT_PATH` and stable-host activation still require independent owner verification. The isolated Backend snapshot is never the active Gateway adapter. This installer change alone does not mount or activate a release.\n\nThe installer requires an approved maintenance window, independently supplied executable hashes and FILESERVER identity. It creates a **stopped** virtual-account service, protects the host/config/secrets directories and provisions GatewayReplay separately. It does not start/stop/restart any service, modify firewall settings, change Gateway registration or deploy production content. Do not invoke it as part of unattended build/testing.
 
 ## Stable Gateway integration
 

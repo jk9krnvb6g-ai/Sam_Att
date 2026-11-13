@@ -11,7 +11,7 @@ test('A96 production backend destination is isolated from the shared Gateway ada
   assert.match(installer, /\$config\.BackendDirectory -ne \(Join-Path \$root 'Backend'\)/);
   assert.doesNotMatch(installer, /Central-API-Gateway\\modules\\Sam_Att/);
   assert.match(installer, /'Releases','Backend','IPCReplay'/);
-  assert.match(worker, /programdata\\\\samchukhospital\\\\deployments\\\\sam_att\\\\backend/);
+  assert.match(worker, /inetpub\\\\wwwroot\\\\deployment_center\\\\sam_att\\\\backend/);
   assert.doesNotMatch(worker, /central-api-gateway\\\\modules\\\\sam_att/);
   assert.match(installer, /\(\$name -in @\('Releases','Backend'\)\)/);
 });
@@ -24,6 +24,6 @@ test('A96 fail-closed production installation gates remain in place', () => {
 });
 
 test('A96 deployment guide forbids Gateway adapter overwrite', () => {
-  assert.match(guide, /Deployments\\Sam_Att\\Backend/);
+  assert.match(guide, /Deployment_Center\\Sam_Att\\Backend/);
   assert.match(guide, /must never be a deployment destination/);
 });

@@ -28,7 +28,8 @@ jobs:
             'scripts/Test-DeploymentCenterHttpIsolation.ps1',
             'scripts/prepare-deployment-center-artifacts.ps1',
             'scripts/install-deployment-agent-service.ps1',
-            'scripts/build-native-agent.ps1'
+            'scripts/build-native-agent.ps1',
+            'scripts/DeploymentInstallSafety.ps1'
           )
           foreach ($file in $files) {
             $tokens = $null
@@ -45,6 +46,16 @@ jobs:
         run: |
           & powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-native-agent.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Installer filesystem, ACL, resume and junction acceptance (PowerShell 5.1)
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force build/test-results | Out-Null
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows/Installer.Acceptance.ps1 *> build/test-results/installer.txt
+          $result=$LASTEXITCODE
+          Get-Content build/test-results/installer.txt
+          if($result -ne 0){exit $result}
+      - name: Frontend to native IPC acceptance with isolated executors
+        run: node --import tsx --test --test-reporter=tap --test-reporter-destination=build/test-results/web-ipc.tap backend/__tests__/deploymentWebIpc.test.ts
       - name: Deployment security tests
         run: npm run test:security
       - name: Deployment integration tests
@@ -76,5 +87,6 @@ jobs:
             dist/
             dist-backend/
             build/agent/
+            build/test-results/
           if-no-files-found: warn
           retention-days: 7

@@ -199,7 +199,19 @@ export function computeSha256Hex(content: string | Buffer): string {
   return crypto.createHash('sha256').update(content).digest('hex');
 }
 
+/** Reject links at every existing ancestor, including a junction used as an artifact root. */
+export function assertDeploymentPathHasNoLinks(input: string): void {
+  if (!path.isAbsolute(input)) throw new Error('ABSOLUTE_DEPLOYMENT_PATH_REQUIRED');
+  let cursor = path.resolve(input);
+  for (;;) {
+    try { if (fs.lstatSync(cursor).isSymbolicLink()) throw new Error('DEPLOYMENT_LINK_REJECTED'); }
+    catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+    const parent = path.dirname(cursor); if (parent === cursor) break; cursor = parent;
+  }
+}
+
 export function computeDirectorySha256Hex(dirPath: string): string {
+  assertDeploymentPathHasNoLinks(dirPath);
   if (!fs.existsSync(dirPath)) {
     throw new Error('ARTIFACT_DIRECTORY_MISSING');
   }
@@ -227,6 +239,8 @@ export function computeDirectorySha256Hex(dirPath: string): string {
 }
 
 function copyDirectoryRecursiveSync(srcDir: string, destDir: string): number {
+  assertDeploymentPathHasNoLinks(srcDir);
+  assertDeploymentPathHasNoLinks(destDir);
   if (!fs.existsSync(srcDir)) return 0;
   fs.mkdirSync(destDir, { recursive: true });
   let count = 0;
@@ -234,6 +248,8 @@ function copyDirectoryRecursiveSync(srcDir: string, destDir: string): number {
   for (const entry of entries) {
     const srcPath = path.join(srcDir, entry.name);
     const destPath = path.join(destDir, entry.name);
+    if (entry.isSymbolicLink()) throw new Error('ARTIFACT_LINK_REJECTED');
+    assertDeploymentPathHasNoLinks(destPath);
     if (entry.isDirectory()) {
       count += copyDirectoryRecursiveSync(srcPath, destPath);
     } else if (entry.isFile()) {
@@ -245,6 +261,9 @@ function copyDirectoryRecursiveSync(srcDir: string, destDir: string): number {
 }
 
 function clearAndRestoreDirectorySync(srcDir: string, destDir: string): void {
+  computeDirectorySha256Hex(srcDir);
+  assertDeploymentPathHasNoLinks(destDir);
+  if (fs.existsSync(destDir)) computeDirectorySha256Hex(destDir);
   if (fs.existsSync(destDir)) {
     for (const entry of fs.readdirSync(destDir)) {
       fs.rmSync(path.join(destDir, entry), { recursive: true, force: true });
@@ -421,7 +440,9 @@ export function writeVerifiedDeploymentManifest(
   const dir = path.dirname(manifestPath);
   fs.mkdirSync(dir, { recursive: true });
   const tmpPath = `${manifestPath}.tmp.${process.pid}.${Date.now()}`;
-  fs.writeFileSync(tmpPath, JSON.stringify(fullManifest, null, 2), 'utf8');
+  assertDeploymentPathHasNoLinks(manifestPath);
+  const fd = fs.openSync(tmpPath, 'wx', 0o600);
+  try { fs.writeFileSync(fd, JSON.stringify(fullManifest, null, 2), 'utf8'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   fs.renameSync(tmpPath, manifestPath);
   return fullManifest;
 }
@@ -512,6 +533,7 @@ export class LocalStagingDeploymentEngine implements IDeploymentAgentPhase2 {
   private activeProgress: DeploymentProgressState | null = null;
 
   constructor(config: StagingDeploymentEngineConfig) {
+    for (const field of ['workspaceRoot','frontendProdDir','backendProdDir','backupsDir','stagingDir','manifestPath','adapterConfigPath'] as const) assertDeploymentPathHasNoLinks(config[field]);
     this.config = config;
     this.diskLock = new DeploymentFileLock(path.join(config.workspaceRoot, 'deployment.lock'));
     this.recoveryFile = path.join(config.workspaceRoot, 'recovery-required.json');

@@ -40,6 +40,14 @@ jobs:
         run: npm run build:agent
       - name: Unit, integration, security and native isolated tests
         run: npx tsx --test backend/__tests__/*.test.ts
+      - name: Installer filesystem, ACL, resume and junction acceptance
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force build/test-results | Out-Null
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows/Installer.Acceptance.ps1 *> build/test-results/installer.txt
+          $result=$LASTEXITCODE
+          Get-Content build/test-results/installer.txt
+          if($result -ne 0){exit $result}
       - name: Verify built artifacts
         shell: pwsh
         run: |
@@ -59,7 +67,7 @@ jobs:
       - name: Validate A98 PowerShell scripts parse on Windows
         shell: pwsh
         run: |
-          $files = @('scripts/Export-A98BaselineEvidence.ps1', 'scripts/Assert-A99MaintenanceApproval.ps1', 'scripts/Invoke-A99WindowsPreflight.ps1', 'scripts/Test-A96ProductionIntegrationReadiness.ps1', 'scripts/install-deployment-agent-service.ps1')
+          $files = @('scripts/Export-A98BaselineEvidence.ps1', 'scripts/Assert-A99MaintenanceApproval.ps1', 'scripts/Invoke-A99WindowsPreflight.ps1', 'scripts/Test-A96ProductionIntegrationReadiness.ps1', 'scripts/install-deployment-agent-service.ps1', 'scripts/install-deployment-center-once.ps1', 'scripts/DeploymentInstallSafety.ps1', 'scripts/provision-deployment-center-iis.ps1', 'scripts/Test-DeploymentCenterHttpIsolation.ps1')
           foreach ($file in $files) {
             $tokens = $null
             $errors = $null
@@ -106,3 +114,11 @@ jobs:
           path: build/a98-release-candidate/
           if-no-files-found: error
           retention-days: 14
+
+      - name: Upload Windows test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a96-windows-test-results
+          path: build/test-results/
+          if-no-files-found: error

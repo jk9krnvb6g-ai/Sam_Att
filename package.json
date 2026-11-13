@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test": "npm run typecheck && npm run build && npm run build:agent && tsx --test backend/__tests__/*.test.ts",
     "test:unit": "tsx --test backend/__tests__/attendanceEngine.unit.test.ts",
-    "test:integration": "npm run build && tsx --test backend/__tests__/samAttPhase2.integration.test.ts backend/__tests__/deploymentHost.test.ts",
+    "test:integration": "npm run build && tsx --test backend/__tests__/samAttPhase2.integration.test.ts backend/__tests__/deploymentHost.test.ts backend/__tests__/deploymentWebIpc.test.ts",
     "build:frontend": "vite build",
     "build:backend": "node scripts/build-backend.mjs",
     "test:security": "tsx --test backend/__tests__/deploymentSecurity.test.ts",

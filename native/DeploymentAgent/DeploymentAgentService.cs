@@ -74,6 +74,8 @@ public sealed class DeploymentAgentService : ServiceBase {
         start.UseShellExecute = false; start.CreateNoWindow = true;
         start.WorkingDirectory = Path.GetDirectoryName(config.WorkerPath);
         start.RedirectStandardInput = true; start.RedirectStandardOutput = true; start.RedirectStandardError = true;
+        start.StandardOutputEncoding = new UTF8Encoding(false, true);
+        start.StandardErrorEncoding = new UTF8Encoding(false, true);
         workerJob = CreateJobObject(IntPtr.Zero, null);
         if (workerJob.IsInvalid) throw new System.ComponentModel.Win32Exception();
         var limits = new ExtendedJobLimits(); limits.Basic.Flags = 0x2000; // KILL_ON_JOB_CLOSE
@@ -139,8 +141,10 @@ public sealed class DeploymentAgentService : ServiceBase {
                     // Keep a single worker for nonce memory and operation lifetime. No
                     // request can be accepted while the previous operation is executing.
                     dispatched = true;
-                    await worker.StandardInput.WriteLineAsync(frame);
-                    await worker.StandardInput.FlushAsync();
+                    // HMAC covers exact UTF-8 JSON, including Thai operator names.
+                    byte[] requestBytes = new UTF8Encoding(false, true).GetBytes(frame + "\n");
+                    await worker.StandardInput.BaseStream.WriteAsync(requestBytes, 0, requestBytes.Length);
+                    await worker.StandardInput.BaseStream.FlushAsync();
                     var response = worker.StandardOutput.ReadLineAsync();
                     if (await Task.WhenAny(response, Task.Delay(60 * 60 * 1000, stopping.Token)) != response) throw new System.TimeoutException("WORKER_TIMEOUT");
                     string line = await response;
