@@ -10,7 +10,7 @@ import { DeploymentFileLock } from '../deployment/fileLock';
  * 2. Zero Arbitrary Command Execution: Never accepts shell commands, PowerShell snippets, arbitrary Git URLs,
  *    or user-supplied file paths from the frontend or HTTP requests.
  * 3. Cryptographically Verified Deployment Manifest (`current.json`):
- *    - Default Windows path: `C:\ProgramData\SamchukHospital\Deployments\Sam_Att\current.json`
+ *    - Default Windows path: `C:\inetpub\wwwroot\Deployment_Center\Sam_Att\current.json`
  *    - Validates 40-char hex `commitSha`, `healthCheckVerified === true`, artifact SHA-256 checksums,
  *      and deterministic `manifestSignatureSha256`.
  *    - Never guesses a Commit SHA if `current.json` is missing (returns `MISSING` -> `NOT AVAILABLE`).
@@ -43,11 +43,11 @@ import {
 export const AUTHORITATIVE_WINDOWS_PATHS = {
   FRONTEND_PRODUCTION: 'C:\\inetpub\\wwwroot\\Sam_Att',
   GATEWAY_PRODUCTION: 'C:\\inetpub\\wwwroot\\Central-API-Gateway',
-  DEPLOYMENT_ROOT: 'C:\\ProgramData\\SamchukHospital\\Deployments\\Sam_Att',
-  MANIFEST_FILE: 'C:\\ProgramData\\SamchukHospital\\Deployments\\Sam_Att\\current.json',
-  BACKUPS_DIR: 'C:\\ProgramData\\SamchukHospital\\Deployments\\Sam_Att\\Backups',
-  STAGING_DIR: 'C:\\ProgramData\\SamchukHospital\\Deployments\\Sam_Att\\Staging',
-  HISTORY_FILE: 'C:\\ProgramData\\SamchukHospital\\Deployments\\Sam_Att\\history.json',
+  DEPLOYMENT_ROOT: 'C:\\inetpub\\wwwroot\\Deployment_Center\\Sam_Att',
+  MANIFEST_FILE: 'C:\\inetpub\\wwwroot\\Deployment_Center\\Sam_Att\\current.json',
+  BACKUPS_DIR: 'C:\\inetpub\\wwwroot\\Deployment_Center\\Sam_Att\\Backups',
+  STAGING_DIR: 'C:\\inetpub\\wwwroot\\Deployment_Center\\Sam_Att\\Staging',
+  HISTORY_FILE: 'C:\\inetpub\\wwwroot\\Deployment_Center\\Sam_Att\\history.json',
   NAMED_PIPE_PATH: '\\\\.\\pipe\\SamchukSamAttDeploymentAgent_v2',
 } as const;
 
