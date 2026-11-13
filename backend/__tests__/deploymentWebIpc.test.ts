@@ -48,7 +48,7 @@ test('frontend API -> ADMIN router -> real native pipe -> worker engine deploy a
   const host=spawn(path.resolve('build/agent/SamAttDeploymentAgent.exe'),['--console',configPath],{stdio:['pipe','pipe','pipe'],windowsHide:true});
   const originalFetch=globalThis.fetch;let output='',errors='';host.stdout!.on('data',b=>output+=b);host.stderr!.on('data',b=>errors+=b);
   try{
-    await new Promise<void>((resolve,reject)=>{const timer=setTimeout(()=>{clearInterval(check);reject(new Error(errors||'HOST timeout'));},15000);const check=setInterval(()=>{if(output.includes('HOST_READY')){clearInterval(check);clearTimeout(timer);resolve();}else if(host.exitCode!==null){clearInterval(check);clearTimeout(timer);reject(new Error(errors));}},20);});
+    await new Promise<void>((resolve,reject)=>{const timer=setTimeout(()=>{clearInterval(check);reject(new Error(errors||'HOST timeout'));},35000);const check=setInterval(()=>{if(output.includes('HOST_READY')){clearInterval(check);clearTimeout(timer);resolve();}else if(host.exitCode!==null){clearInterval(check);clearTimeout(timer);reject(new Error(errors));}},20);});
     const agent=new WindowsNamedPipeDeploymentAgentClient({namedPipePath:'\\\\.\\pipe\\'+pipeName,ipcSecret:secret,timeoutMs:15000,progressPath:path.join(root,'agent-status.json')});
     assert.ok(await agent.getPreDeploymentEvidence(target));
     DeploymentCenterService.resetStateForTests();

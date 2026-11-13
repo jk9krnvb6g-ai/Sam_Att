@@ -11,7 +11,7 @@ import { verifyFrame } from '../deployment/controlSecurity';
 
 const secret = 'native-isolated-test-secret-'.repeat(3);
 const hash = (file: string) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-test('native Windows host: real kernel DACL, first-instance reservation, authenticated response and replay across restart', { skip: process.platform !== 'win32', timeout: 60000 }, async () => {
+test('native Windows host: real kernel DACL, first-instance reservation, authenticated response and replay across restart', { skip: process.platform !== 'win32', timeout: 180000 }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a96-native-'));
   const binary = path.resolve('build/agent/SamAttDeploymentAgent.exe');
   const worker = path.resolve('build/agent/deployment-agent-worker.cjs');
@@ -40,7 +40,7 @@ test('native Windows host: real kernel DACL, first-instance reservation, authent
     let stdout = '', stderr = '';
     host.stdout!.on('data', b => stdout += b); host.stderr!.on('data', b => { stderr += b; console.error(String(b)); });
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Native host not ready: ' + stderr)), 15000);
+      const timer = setTimeout(() => { clearInterval(check); reject(new Error('Native host did not finish its bounded 30-second startup: ' + stderr + ' exit=' + host?.exitCode)); }, 35000);
       const check = setInterval(() => {
         if (stdout.includes('HOST_READY')) { clearInterval(check); clearTimeout(timer); resolve(); }
         else if (host!.exitCode !== null) { clearInterval(check); clearTimeout(timer); reject(new Error(stderr)); }

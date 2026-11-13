@@ -10,4 +10,3 @@ export function assertDeploymentPathHasNoLinks(input: string): void {
     const parent = path.dirname(cursor); if (parent === cursor) break; cursor = parent;
   }
 }
-

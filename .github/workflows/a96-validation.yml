@@ -39,7 +39,9 @@ jobs:
         shell: powershell
         run: npm run build:agent
       - name: Unit, integration, security and native isolated tests
-        run: npx tsx --test backend/__tests__/*.test.ts
+        run: |
+          New-Item -ItemType Directory -Force build/test-results | Out-Null
+          npx tsx --test --test-concurrency=1 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=tap --test-reporter-destination=build/test-results/all-tests.tap backend/__tests__/*.test.ts
       - name: Installer filesystem, ACL, resume and junction acceptance
         shell: powershell
         run: |
