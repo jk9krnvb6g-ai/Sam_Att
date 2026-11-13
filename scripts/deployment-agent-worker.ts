@@ -19,7 +19,7 @@ if (config.Mode !== 'ISOLATED' && config.Mode !== 'PRODUCTION') throw new Error(
 if (config.Mode === 'PRODUCTION') {
   if (path.resolve(config.DeploymentRoot).toLowerCase() !== 'c:\\programdata\\samchukhospital\\deployments\\sam_att' ||
       path.resolve(config.FrontendDirectory).toLowerCase() !== 'c:\\inetpub\\wwwroot\\sam_att' ||
-      path.resolve(config.BackendDirectory).toLowerCase() !== 'c:\\inetpub\\wwwroot\\central-api-gateway\\modules\\sam_att' ||
+      path.resolve(config.BackendDirectory).toLowerCase() !== 'c:\\programdata\\samchukhospital\\deployments\\sam_att\\backend' ||
       path.resolve(config.ReleaseRoot) !== path.join(path.resolve(config.DeploymentRoot), 'Releases')) throw new Error('PRODUCTION_PATH_POLICY_FAILED');
 }
 if (!fs.existsSync(config.FrontendDirectory) || !fs.existsSync(config.BackendDirectory)) throw new Error('PRODUCTION_BASELINE_MISSING');
