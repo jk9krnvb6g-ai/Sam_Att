@@ -92,7 +92,7 @@ jobs:
           Copy-Item -LiteralPath scripts/install-deployment-agent-service.ps1 -Destination build/a98-release-candidate/
           Copy-Item -LiteralPath scripts/Export-A98BaselineEvidence.ps1 -Destination build/a98-release-candidate/
           @(
-            "SourceCommit=$env:GITHUB_SHA"
+            "SourceCommit=${{ github.event.pull_request.head.sha || github.sha }}"
             "SourceRef=$env:GITHUB_REF"
             'ApprovalStatus=NOT_APPROVED_FOR_PRODUCTION'
             'BaselineStatus=UNVERIFIED'
@@ -100,7 +100,7 @@ jobs:
       - name: Upload A98 release candidate evidence
         uses: actions/upload-artifact@v4
         with:
-          name: a98-release-candidate-${{ github.sha }}
+          name: a98-release-candidate-${{ github.event.pull_request.head.sha || github.sha }}
           path: build/a98-release-candidate/
           if-no-files-found: error
           retention-days: 14
