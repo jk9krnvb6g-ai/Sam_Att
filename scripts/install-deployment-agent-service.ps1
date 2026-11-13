@@ -13,7 +13,7 @@ if (-not $MaintenanceWindowApproved) { throw 'Maintenance window authorization r
 if ($env:COMPUTERNAME -ne 'FILESERVER') { throw 'Production installer must be executed by the authorized operator on FILESERVER only.' }
 if (Get-Service -Name SamchukSamAttDeployAgent -ErrorAction SilentlyContinue) { throw 'Service already exists; refuse to modify or restart it.' }
 $config = Get-Content -LiteralPath $ConfigurationFile -Raw | ConvertFrom-Json
-$root = 'C:\ProgramData\SamchukHospital\Deployments\Sam_Att'
+$root = 'C:\inetpub\wwwroot\Deployment_Center\Sam_Att'
 if ($config.Mode -ne 'PRODUCTION' -or [IO.Path]::GetFullPath($config.DeploymentRoot) -ne $root -or
     $config.FrontendDirectory -ne 'C:\inetpub\wwwroot\Sam_Att' -or
     $config.BackendDirectory -ne (Join-Path $root 'Backend') -or
@@ -47,7 +47,7 @@ function Set-ProtectedAcl([string]$Path, [bool]$GatewayRead = $false, [bool]$Age
   if($GatewayRead){$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($config.GatewaySid),'ReadAndExecute',$inherit,'None','Allow'))}
   Set-Acl -LiteralPath $Path -AclObject $acl
 }
-New-Item -ItemType Directory -Force -Path $root | Out-Null
+if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw 'DEPLOYMENT_ROOT_MISSING: provision the approved IIS-denied directory before installation.' }
 Set-ProtectedAcl $root $true
 foreach($name in @('ServiceHost','Secrets','Backups','Staging','Releases','Backend','IPCReplay','GatewayReplay')) {
   $dir=Join-Path $root $name; New-Item -ItemType Directory -Force -Path $dir | Out-Null
