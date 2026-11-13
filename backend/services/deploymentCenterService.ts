@@ -1667,6 +1667,35 @@ export class DeploymentCenterService {
       };
     }
 
+    // Deploy Latest only: re-fetch the authoritative main branch at approval time.
+    // A cached preflight result is not sufficient when GitHub has moved since review.
+    const freshGitHub = await this.fetchLatestGitHubVersion(true);
+    if (
+      freshGitHub.githubStatus !== 'CONNECTED' ||
+      !freshGitHub.versionInfo.available ||
+      !HEX_COMMIT_SHA_REGEX.test(freshGitHub.versionInfo.commitSha)
+    ) {
+      return {
+        httpStatus: 503,
+        body: {
+          success: false,
+          code: 'SAM_ATT_LATEST_GITHUB_UNVERIFIED',
+          error: 'ไม่สามารถยืนยัน Commit ล่าสุดจาก GitHub main ได้ กรุณาตรวจสอบอัปเดตและ Preflight ใหม่',
+        },
+      };
+    }
+    if (freshGitHub.versionInfo.commitSha.toLowerCase() !== readiness.targetCommitSha.toLowerCase()) {
+      return {
+        httpStatus: 409,
+        body: {
+          success: false,
+          code: 'SAM_ATT_LATEST_COMMIT_CHANGED',
+          error: 'GitHub main มี Commit ใหม่หลังการตรวจสอบความพร้อม กรุณากด Check for Updates และ Preflight ใหม่ก่อนอนุมัติ',
+          latestCommitSha: freshGitHub.versionInfo.commitSha,
+        },
+      };
+    }
+
     const requestedSha = (params.targetCommitSha || readiness.targetCommitSha).trim().toLowerCase();
     if (
       !HEX_COMMIT_SHA_REGEX.test(requestedSha) ||
