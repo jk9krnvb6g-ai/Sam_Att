@@ -64,7 +64,6 @@ export const DeploymentCenterView: React.FC = () => {
   // Section 6: Approve & Deploy Modal state
   const [showApproveModal, setShowApproveModal] = useState<boolean>(false);
   const [approvePassword, setApprovePassword] = useState<string>('');
-  const [maintenanceWindowApproved, setMaintenanceWindowApproved] = useState<boolean>(false);
   const [approveModalError, setApproveModalError] = useState<string | null>(null);
 
   // Section 9: Rollback Modal state
@@ -115,6 +114,24 @@ export const DeploymentCenterView: React.FC = () => {
     initialFetchDoneRef.current = true;
     void loadDeploymentCenterData();
   }, [loadDeploymentCenterData]);
+
+  useEffect(() => {
+    if (isDemoMode || (actionLoading !== 'approve-deploy' && actionLoading !== 'rollback')) return;
+    let cancelled=false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refreshProgress=async()=>{
+      try {
+        const progress=await apiAttendanceAdapter.fetchDeploymentProgress();
+        if(!cancelled && progress)setLatestProgress(progress);
+      } catch(err) {
+        if(!cancelled)setErrorMessage(extractSafeErrorMessage(err,'ไม่สามารถตรวจสอบความคืบหน้าได้ กรุณาตรวจสอบสถานะก่อนสั่งงานซ้ำ'));
+      } finally {
+        if(!cancelled)timer=setTimeout(refreshProgress,2000);
+      }
+    };
+    void refreshProgress();
+    return ()=>{cancelled=true;if(timer)clearTimeout(timer);};
+  },[actionLoading,isDemoMode]);
 
   const handleManualRefresh = async () => {
     if (loading || actionLoading !== null) return;
@@ -200,14 +217,17 @@ export const DeploymentCenterView: React.FC = () => {
   // Section 6: Approve & Execute Deployment
   const handleOpenApproveModal = () => {
     setApprovePassword('');
-    setMaintenanceWindowApproved(false);
+
     setApproveModalError(null);
     setShowApproveModal(true);
   };
 
   const handleConfirmApproveDeployment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (actionLoading !== null || !payload) return;
+    if (actionLoading !== null || !payload || !isReadyToDeploy || !payload.deploymentAgent.approveEnabled) {
+      setApproveModalError('ระบบยังไม่ผ่าน Preflight หรือ Deployment Agent ไม่พร้อม ไม่สามารถสั่ง Deploy ได้');
+      return;
+    }
 
     const targetSha =
       payload.latestGitHubVersion.commitSha !== 'NOT_AVAILABLE'
@@ -233,7 +253,6 @@ export const DeploymentCenterView: React.FC = () => {
       const result = await apiAttendanceAdapter.approveDeployment({
         targetCommitSha: targetSha,
         adminPassword: approvePassword,
-        maintenanceWindowApproved,
       });
 
       setLastDeployResponse(result);
@@ -288,7 +307,10 @@ export const DeploymentCenterView: React.FC = () => {
 
   const handleConfirmRollback = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (actionLoading !== null) return;
+    if (actionLoading !== null || !payload?.deploymentAgent.rollbackEnabled) {
+      setRollbackModalError('Deployment Agent หรือชุดสำรองที่ตรวจสอบแล้วไม่พร้อม ไม่สามารถสั่ง Rollback ได้');
+      return;
+    }
 
     if (!selectedBackupId.trim()) {
       setRollbackModalError('กรุณาเลือกหรือระบุ Backup ID ที่ต้องการย้อนกลับ');
@@ -607,7 +629,7 @@ export const DeploymentCenterView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => void handleCheckForUpdates()}
-                disabled={actionLoading !== null}
+                disabled={loading || actionLoading !== null}
                 className="flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl bg-gradient-to-r from-[#8B5CF6] to-[#6D28D9] hover:from-[#7C3AED] hover:to-[#5B21B6] text-white text-xs font-bold shadow-2xs transition-all cursor-pointer disabled:opacity-60"
               >
                 {actionLoading === 'check-updates' ? (
@@ -622,7 +644,7 @@ export const DeploymentCenterView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => void handleRunPreflightCheck()}
-                disabled={actionLoading !== null}
+                disabled={loading || actionLoading !== null}
                 className="flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl bg-violet-50 hover:bg-violet-100 text-violet-900 border border-violet-200 text-xs font-bold transition-all cursor-pointer disabled:opacity-60"
               >
                 {actionLoading === 'preflight' ? (
@@ -638,7 +660,7 @@ export const DeploymentCenterView: React.FC = () => {
                 type="button"
                 onClick={handleOpenApproveModal}
                 disabled={
-                  actionLoading !== null || !payload.deploymentAgent.approveEnabled
+                  loading || actionLoading !== null || !isReadyToDeploy || !payload.deploymentAgent.approveEnabled
                 }
                 title={payload.deploymentAgent.lockReason}
                 className={`flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all ${
@@ -670,7 +692,7 @@ export const DeploymentCenterView: React.FC = () => {
                 type="button"
                 onClick={() => handleOpenRollbackModal()}
                 disabled={
-                  actionLoading !== null || !payload.deploymentAgent.rollbackEnabled
+                  loading || actionLoading !== null || !payload.deploymentAgent.rollbackEnabled
                 }
                 title={payload.deploymentAgent.lockReason}
                 className={`flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all ${
@@ -1208,8 +1230,8 @@ export const DeploymentCenterView: React.FC = () => {
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-500">Preflight Status:</span>
-                  <span className="font-bold text-emerald-700">
-                    PASS {passedCount}/{payload.checklist.length} รายการ
+                  <span className={`font-bold ${isReadyToDeploy ? 'text-emerald-700' : 'text-amber-700'}`}>
+                    {isReadyToDeploy ? 'PASS' : 'NOT READY'} {passedCount}/{payload.checklist.length} รายการ
                   </span>
                 </div>
               </div>
@@ -1231,20 +1253,10 @@ export const DeploymentCenterView: React.FC = () => {
                 </div>
               </div>
 
-              <label className="flex items-start gap-2.5 p-3 rounded-xl bg-amber-50/70 border border-amber-200 text-xs text-amber-950 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={maintenanceWindowApproved}
-                  onChange={(e) => setMaintenanceWindowApproved(e.target.checked)}
-                  className="mt-0.5 rounded border-amber-400"
-                />
-                <span>
-                  <strong className="font-bold">
-                    อนุมัติ Maintenance Window สำหรับ Backend Shared Gateway (:3002)
-                  </strong>{' '}
-                  (หากไม่ติ๊กและระบบตรวจพบว่าต้องรีสตาร์ท Central API Gateway ที่ใช้ร่วมกับ Procurement ระบบจะ Deploy เฉพาะส่วนที่ปลอดภัยและหยุดที่สถานะ MAINTENANCE_REQUIRED)
-                </span>
-              </label>
+              <div className="p-3 rounded-xl bg-amber-50/70 border border-amber-200 text-xs text-amber-950">
+                ระบบจะติดตั้งเมื่อยืนยันได้ว่าอัปเดตเฉพาะ Sam_Att โดยไม่รีสตาร์ท Gateway เท่านั้น
+                หากยังไม่พร้อม ระบบจะหยุดที่ MAINTENANCE_REQUIRED เพื่อให้ผู้ดูแลเตรียมการใน Maintenance Window
+              </div>
 
               {approveModalError && (
                 <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 font-mono-data">

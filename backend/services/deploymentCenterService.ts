@@ -1,3 +1,4 @@
+import { APPROVED_DEPLOYMENT_BRANCH } from '../deployment/sourcePolicy';
 /**
  * Sam_Att V2 — Deployment Center Service & Phase 2 Secure Deployment Management
  *
@@ -48,7 +49,7 @@ import {
 
 export const AUTHORITATIVE_GITHUB_REPO_URL = 'https://github.com/jk9krnvb6g-ai/Sam_Att';
 export const AUTHORITATIVE_GITHUB_COMMITS_API =
-  'https://api.github.com/repos/jk9krnvb6g-ai/Sam_Att/commits/main';
+  `https://api.github.com/repos/jk9krnvb6g-ai/Sam_Att/commits/${encodeURIComponent(APPROVED_DEPLOYMENT_BRANCH)}`;
 export const AUTHORITATIVE_PRODUCTION_DATABASE_NAME = 'samchuk_attendance_v2';
 
 export type { ChecklistItemStatus };
@@ -339,6 +340,7 @@ export class DeploymentCenterService {
           process.env.SAM_ATT_AGENT_NAMED_PIPE?.trim() ||
           AUTHORITATIVE_WINDOWS_PATHS.NAMED_PIPE_PATH,
         ipcSecret,
+        progressPath: path.join(path.dirname(this.getEffectiveManifestPath()), 'agent-status.json'),
       });
       return this.configuredPhase2Agent;
     }
@@ -412,7 +414,7 @@ export class DeploymentCenterService {
         version: 'INVALID MANIFEST',
         commitSha: 'NOT AVAILABLE',
         date: 'NOT AVAILABLE',
-        branch: 'main',
+        branch: APPROVED_DEPLOYMENT_BRANCH,
         available: false,
         source: 'INVALID_MANIFEST',
         manifestPath,
@@ -431,7 +433,7 @@ export class DeploymentCenterService {
         version: envVersion || (validSha ? `commit-${envCommit.slice(0, 8)}` : 'NOT CONFIGURED'),
         commitSha: validSha ? envCommit : 'NOT AVAILABLE',
         date: envDate || 'NOT AVAILABLE',
-        branch: 'main',
+        branch: APPROVED_DEPLOYMENT_BRANCH,
         available: validSha,
         source: 'ENVIRONMENT_METADATA',
         manifestPath,
@@ -444,7 +446,7 @@ export class DeploymentCenterService {
       version: 'NOT CONFIGURED',
       commitSha: 'NOT AVAILABLE',
       date: 'NOT AVAILABLE',
-      branch: 'main',
+      branch: APPROVED_DEPLOYMENT_BRANCH,
       available: false,
       source: 'NOT_CONFIGURED',
       manifestPath,
@@ -482,7 +484,7 @@ export class DeploymentCenterService {
           commitSha: 'NOT AVAILABLE',
           date: 'NOT AVAILABLE',
           commitMessage: 'ยังไม่ได้กดตรวจสอบจาก GitHub API',
-          branch: 'main',
+          branch: APPROVED_DEPLOYMENT_BRANCH,
           available: false,
           source: 'NOT_CONFIGURED',
         },
@@ -512,7 +514,7 @@ export class DeploymentCenterService {
             commitSha: 'NOT AVAILABLE',
             date: 'NOT AVAILABLE',
             commitMessage: customRes.error || `GitHub API HTTP ${customRes.status}`,
-            branch: 'main',
+            branch: APPROVED_DEPLOYMENT_BRANCH,
             available: false,
             source: 'NOT_AVAILABLE',
           };
@@ -561,7 +563,7 @@ export class DeploymentCenterService {
           commitSha: 'NOT AVAILABLE',
           date: 'NOT AVAILABLE',
           commitMessage: `GitHub API HTTP ${status}`,
-          branch: 'main',
+          branch: APPROVED_DEPLOYMENT_BRANCH,
           available: false,
           source: 'NOT_AVAILABLE',
         };
@@ -590,7 +592,7 @@ export class DeploymentCenterService {
           commitSha: 'NOT AVAILABLE',
           date: 'NOT AVAILABLE',
           commitMessage: 'Invalid Commit SHA from GitHub API',
-          branch: 'main',
+          branch: APPROVED_DEPLOYMENT_BRANCH,
           available: false,
           source: 'NOT_AVAILABLE',
         };
@@ -603,11 +605,11 @@ export class DeploymentCenterService {
       }
 
       const connectedInfo: VersionInfo = {
-        version: `main@${sha.slice(0, 8)}`,
+        version: `${APPROVED_DEPLOYMENT_BRANCH}@${sha.slice(0, 8)}`,
         commitSha: sha,
         date: formattedDate,
-        commitMessage: rawCommitMsg || `Commit ${sha.slice(0, 8)} on branch main`,
-        branch: 'main',
+        commitMessage: rawCommitMsg || `Commit ${sha.slice(0, 8)} on branch ${APPROVED_DEPLOYMENT_BRANCH}`,
+        branch: APPROVED_DEPLOYMENT_BRANCH,
         available: true,
         source: 'GITHUB_API',
       };
@@ -623,7 +625,7 @@ export class DeploymentCenterService {
         commitSha: 'NOT AVAILABLE',
         date: 'NOT AVAILABLE',
         commitMessage: sanitized,
-        branch: 'main',
+        branch: APPROVED_DEPLOYMENT_BRANCH,
         available: false,
         source: 'NOT_AVAILABLE',
       };
@@ -761,7 +763,7 @@ export class DeploymentCenterService {
       };
     }
 
-    if (!agent || !agent.isAvailable || agent.agentStatus === 'NOT_CONFIGURED') {
+    if (!agent || !agent.isAvailable || agent.agentStatus === 'NOT_CONFIGURED' || agent.agentStatus === 'OFFLINE') {
       return {
         readyToDeploy: false,
         passedCount,
@@ -795,8 +797,10 @@ export class DeploymentCenterService {
       checklist.find((c) => c.id === 'github_source')?.evidence?.commitSha ||
       (latestGitHub?.available ? latestGitHub.commitSha : null);
 
+    const requiredChecks=['github_source','dependencies','build','automated_tests','backup','database_config','central_gateway','procurement_health'];
+    const checklistComplete=checklist.length===requiredChecks.length && requiredChecks.every(id=>checklist.filter(check=>check.id===id).length===1);
     const allEvidenceBoundToSameCommit =
-      Boolean(verifiedCommitSha && HEX_COMMIT_SHA_REGEX.test(verifiedCommitSha)) &&
+      checklistComplete && Boolean(verifiedCommitSha && HEX_COMMIT_SHA_REGEX.test(verifiedCommitSha)) &&
       checklist.every(
         (c) =>
           c.status === 'PASS' &&
@@ -1506,7 +1510,7 @@ export class DeploymentCenterService {
         commitMessage:
           latestGitHub.commitMessage ||
           (latestGitHub.available
-            ? `Commit ${latestGitHub.commitSha.slice(0, 8)} on branch main`
+            ? `Commit ${latestGitHub.commitSha.slice(0, 8)} on branch ${APPROVED_DEPLOYMENT_BRANCH}`
             : 'ยังไม่มีข้อมูล Commit Message จาก GitHub API'),
         branch: latestGitHub.branch || 'main',
         reachable: latestGitHub.available && latestGitHub.source === 'GITHUB_API',
@@ -1666,6 +1670,35 @@ export class DeploymentCenterService {
       };
     }
 
+    // Deploy Latest only: re-fetch the authoritative main branch at approval time.
+    // A cached preflight result is not sufficient when GitHub has moved since review.
+    const freshGitHub = await this.fetchLatestGitHubVersion(true);
+    if (
+      freshGitHub.githubStatus !== 'CONNECTED' ||
+      !freshGitHub.versionInfo.available ||
+      !HEX_COMMIT_SHA_REGEX.test(freshGitHub.versionInfo.commitSha)
+    ) {
+      return {
+        httpStatus: 503,
+        body: {
+          success: false,
+          code: 'SAM_ATT_LATEST_GITHUB_UNVERIFIED',
+          error: 'ไม่สามารถยืนยัน Commit ล่าสุดจาก GitHub main ได้ กรุณาตรวจสอบอัปเดตและ Preflight ใหม่',
+        },
+      };
+    }
+    if (freshGitHub.versionInfo.commitSha.toLowerCase() !== readiness.targetCommitSha.toLowerCase()) {
+      return {
+        httpStatus: 409,
+        body: {
+          success: false,
+          code: 'SAM_ATT_LATEST_COMMIT_CHANGED',
+          error: 'GitHub main มี Commit ใหม่หลังการตรวจสอบความพร้อม กรุณากด Check for Updates และ Preflight ใหม่ก่อนอนุมัติ',
+          latestCommitSha: freshGitHub.versionInfo.commitSha,
+        },
+      };
+    }
+
     const requestedSha = (params.targetCommitSha || readiness.targetCommitSha).trim().toLowerCase();
     if (
       !HEX_COMMIT_SHA_REGEX.test(requestedSha) ||
@@ -1686,7 +1719,7 @@ export class DeploymentCenterService {
       .toISOString()
       .replace(/[-:.TZ]/g, '')
       .slice(0, 14)}_${requestedSha.slice(0, 6)}`;
-    const targetVersion = `main@${requestedSha.slice(0, 8)}`;
+    const targetVersion = `${APPROVED_DEPLOYMENT_BRANCH}@${requestedSha.slice(0, 8)}`;
 
     const execResult: ExecuteDeployResult = await agent.executeApprovedDeployment({
       deploymentId,

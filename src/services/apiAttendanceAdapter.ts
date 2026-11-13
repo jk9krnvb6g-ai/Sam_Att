@@ -24,6 +24,7 @@ import {
   ApproveDeploymentResponse,
   DeploymentBackupSummary,
   DeploymentCenterStatusPayload,
+  DeploymentProgressState,
   DeploymentHistoryItem,
   RollbackDeploymentResponse,
 } from '../types/deploymentCenter';
@@ -1564,6 +1565,11 @@ class ApiAttendanceAdapter {
   private preflightInFlight: Promise<DeploymentCenterStatusPayload> | null = null;
   private approveDeployInFlight: Promise<ApproveDeploymentResponse> | null = null;
   private rollbackDeployInFlight: Promise<RollbackDeploymentResponse> | null = null;
+
+  public async fetchDeploymentProgress(): Promise<DeploymentProgressState | null> {
+    const response=await this.requestJson<{success:boolean;activeProgress:DeploymentProgressState | null}>('/deployment/progress',{method:'GET'});
+    return response.activeProgress;
+  }
 
   public async fetchDeploymentStatus(): Promise<DeploymentCenterStatusPayload> {
     return this.requestJson<DeploymentCenterStatusPayload>('/deployment/status', {
